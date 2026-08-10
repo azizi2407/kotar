@@ -1,0 +1,29 @@
+# Veri & çalışma dosyaları (sırlar zaten /etc/kotar/agency'de, repo dışı)
+data/
+logs/
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Env
+.env
+
+# Test DB
+tests/test.db
+# OS
+.DS_Store
+._*
+.claude/settings.local.json
+
+# Yedek dosyalar (elle alınan .bak kopyaları commit edilmez)
+*.bak
+*.bak.*
+
+# Oturum durum dosyaları (hook taban damgaları) — kişisel, commit edilmez
+.claude/state/
+data/codex-images/
+data/codex-jobs/

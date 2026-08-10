@@ -1,0 +1,28 @@
+Flask==3.0.3
+Werkzeug==3.0.4
+Flask-SQLAlchemy==3.1.1
+SQLAlchemy==2.0.36
+psycopg[binary]==3.2.3
+PyJWT[crypto]==2.9.0
+cryptography==43.0.1
+requests==2.32.3
+python-dotenv==1.0.1
+gunicorn==23.0.0
+# Drive Gateway (Faz 2b) — sırlar Infisical'dan, dosyasız
+google-api-python-client==2.198.0
+google-auth==2.55.2
+# Görsel araçları (image_splitter)
+Pillow==12.3.0
+# Brief markdown ayrıştırma (brief_markdown.py — frontmatter YAML)
+PyYAML==6.0.2
+# Aylık rapor (aylik_rapor.py) — Meta CSV analizi
+pandas==2.3.3
+
+# test
+pytest==9.1.1
+# whisper servisi (Faz 3d)
+faster-whisper==1.2.1
+# videografçı öneri botu — YouTube trend/reklam arama (anahtarsız, ≤90sn filtresi)
+yt-dlp==2026.7.4
+# Mail modülü — IMAP okuma (SMTP/parse stdlib); parola Fernet (cryptography zaten yukarıda)
+imap-tools==1.7.4
