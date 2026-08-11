@@ -1,0 +1,29 @@
+# Data & working files (secrets already live outside the repo, e.g. /etc/kotar/agency)
+data/
+logs/
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# Env
+.env
+
+# Test DB
+tests/test.db
+# OS
+.DS_Store
+._*
+.claude/settings.local.json
+
+# Backup files (manually taken .bak copies aren't committed)
+*.bak
+*.bak.*
+
+# Session state files (hook timestamps) — personal, not committed
+.claude/state/
+data/codex-images/
+data/codex-jobs/
