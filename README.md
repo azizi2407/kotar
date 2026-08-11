@@ -14,6 +14,24 @@ It grew out of a real production system and has been stripped of anything
 specific to the company that built it (branding, real client data, internal
 ops tooling) so it can be run by anyone.
 
+## Background
+
+This started as a Cursor side project to help a friend run their social
+media agency, and grew over time — with substantial help from Claude Code —
+into what's in this repository. Development is ongoing.
+
+To get real use out of the AI-assisted features, you'll need:
+- **An auth provider** for the panel (I use Google via `AUTH_MODE=oidc`; the
+  built-in local login also works)
+- **Magnific MCP**, authenticated with your own Magnific account (for AI
+  image generation/upscaling)
+- **Claude Code**, authenticated via subscription session (no API key needed)
+- **ChatGPT**, via the Codex CLI, authenticated via subscription session (no
+  API key needed)
+
+Fill in your clients' brief inputs, set up your team's roles, and let Kotar
+kotar your day.
+
 ## Features
 
 - **Sharing Board** — the weekly planning surface: a client-by-row grid of
