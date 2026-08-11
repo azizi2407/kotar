@@ -286,10 +286,13 @@ def test_silme(client):
     assert client.get("/api/reports").get_json()["reports"] == []
 
 
-# --- PDF (requires real Chromium) --------------------------------------------
+# --- PDF (requires real Chromium; a real subprocess render, slow/flaky on some
+# CI runners' snap-packaged chromium — same "not run by default" treatment as
+# the other `integration`-marked tests that hit a real external dependency) ---
 
+@pytest.mark.integration
 @pytest.mark.skipif(not shutil.which(os.environ.get("CHROMIUM_BIN") or "chromium"),
-                    reason="chromium kurulu değil")
+                    reason="chromium is not installed")
 def test_pdf_uretilir(client):
     login_as(client, MANAGER)
     rid = _uret(client, client_name="PDF Testi").get_json()["reports"][0]["id"]
