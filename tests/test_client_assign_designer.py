@@ -1,4 +1,4 @@
-"""Toplu tasarımcı ataması — POST /api/clients/assign-designer."""
+"""Bulk designer assignment — POST /api/clients/assign-designer."""
 from conftest import DESIGNER, MANAGER, login_as
 from test_session_csrf import csrf_headers
 
@@ -24,7 +24,7 @@ def test_toplu_atama_ve_yeniden_atama(client):
     r = _assign(client, [{"client_id": a, "user_id": "u1"}, {"client_id": b, "user_id": "u1"}])
     assert r.status_code == 200 and r.get_json()["updated"] == 2
     assert _designer_of(client, a) == "u1" and _designer_of(client, b) == "u1"
-    # yeniden ata (a → u2)
+    # reassign (a → u2)
     _assign(client, [{"client_id": a, "user_id": "u2"}])
     assert _designer_of(client, a) == "u2" and _designer_of(client, b) == "u1"
 

@@ -1,4 +1,4 @@
-"""/api/prefs/hidden-clients — kişisel müşteri gizleme tercihi."""
+"""/api/prefs/hidden-clients — personal client-hiding preference."""
 from conftest import DESIGNER, MANAGER, PENDING, VIDEOGRAPHER, login_as
 from test_session_csrf import csrf_headers
 
@@ -22,7 +22,7 @@ def _get(client, scope=SCOPE):
     return client.get(f'{URL}?scope={scope}').get_json()
 
 
-# --- yetki / CSRF --------------------------------------------------------
+# --- authorization / CSRF ---------------------------------------------------
 
 def test_anonim_401(client):
     assert client.get(URL).status_code == 401
@@ -39,14 +39,14 @@ def test_csrf_yoksa_403(client):
     assert r.status_code == 403
 
 
-# --- temel akış ----------------------------------------------------------
+# --- basic flow ----------------------------------------------------------
 
 def test_gizle_ve_oku(client):
     cid = _client_id(client)
     login_as(client, VIDEOGRAPHER)
     r = _set(client, cid, True)
     assert r.status_code == 200
-    assert r.get_json()['client_ids'] == [cid]      # yanıt TAM küme
+    assert r.get_json()['client_ids'] == [cid]      # response is the FULL set
     assert _get(client)['client_ids'] == [cid]
 
 
@@ -55,7 +55,7 @@ def test_ayni_put_iki_kez_tek_kayit(client):
     cid = _client_id(client)
     login_as(client, VIDEOGRAPHER)
     _set(client, cid, True)
-    assert _set(client, cid, True).status_code == 200      # idempotent, IntegrityError yok
+    assert _set(client, cid, True).status_code == 200      # idempotent, no IntegrityError
     assert UserHiddenClient.query.count() == 1
 
 
@@ -73,7 +73,7 @@ def test_gizlenmemisi_geri_acmak_hatasiz(client):
 
 
 def test_izolasyon_baska_kullaniciyi_etkilemez(client):
-    """Tercih KİŞİSEL — vg A gizlerse vg B ve yönetici etkilenmez."""
+    """The preference is PERSONAL — if videographer A hides it, videographer B and management are unaffected."""
     cid = _client_id(client)
     login_as(client, VIDEOGRAPHER)
     _set(client, cid, True)
@@ -84,13 +84,13 @@ def test_izolasyon_baska_kullaniciyi_etkilemez(client):
 
 
 def test_designer_kendi_tercihini_yazabilir(client):
-    """Uç panel rollerinin hepsine açık; kapsam kontrolü ayrı iş."""
+    """The endpoint is open to all panel roles; scope checking is a separate concern."""
     cid = _client_id(client)
     login_as(client, DESIGNER)
     assert _set(client, cid, True).get_json()['client_ids'] == [cid]
 
 
-# --- doğrulama -----------------------------------------------------------
+# --- validation ------------------------------------------------------------
 
 def test_bilinmeyen_scope_400(client):
     cid = _client_id(client)
@@ -110,7 +110,7 @@ def test_client_id_sayi_degilse_404(client):
 
 
 def test_impersonation_etkin_kimlige_yazar(client):
-    """Yönetici tasarımcı gözünden bakarken tercih HEDEF kullanıcıya yazılır."""
+    """While management is viewing through the designer's eyes, the preference is written to the TARGET user."""
     cid = _client_id(client)
     with client.session_transaction() as sess:
         sess['user'] = dict(DESIGNER)

@@ -1,7 +1,8 @@
-// AI Görsel Üretim sayfası (Faz 6, step 19) — müşteri seç + opsiyonel brief + boyut/model/
-// motor/çözünürlük + (Task 7) referans + üret + sonuç göster + onayla/yeniden. GATE 18:
-// üretim backend'de Magnific/Freepik Mystic REST + API-key (MCP YOK). KVKK onay kapısı:
-// onaysız müşteride üretim başlatılamaz (backend 409). Üretim onay bekler (pending).
+// AI Image Generation page (Phase 6, step 19) — pick client + optional brief + size/model/
+// engine/resolution + (Task 7) reference + generate + show result + approve/regenerate. GATE 18:
+// generation runs on the backend via Magnific/Freepik Mystic REST + API key (NO MCP). KVKK
+// (Turkish data-protection) consent gate: generation can't start for an unconsented client
+// (backend 409). Generations start out pending approval.
 import { useMemo, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { Check, Languages, Lightbulb, Loader2, RefreshCw, Sparkles, TriangleAlert } from "lucide-react"
@@ -9,6 +10,7 @@ import { toast } from "sonner"
 
 import { useAuth } from "@/lib/auth"
 import { useClients } from "@/lib/clients"
+import { useI18n } from "@/lib/i18n"
 import {
   pollJob,
   useApproveImage,
@@ -32,7 +34,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { ReferencePicker } from "@/components/sharing/ReferencePicker"
 import { cn } from "@/lib/utils"
 
-// Mystic REST modelleri + MCP modelleri (Magnific MCP; backend MCP_IMAGE_MODELS ile eş).
+// Mystic REST models + MCP models (Magnific MCP; kept in sync with backend MCP_IMAGE_MODELS).
 const MODEL_GROUPS: [string, [string, string][]][] = [
   ["Mystic", [
     ["realism", "Realism"], ["fluid", "Fluid"], ["zen", "Zen"], ["flexible", "Flexible"],
@@ -48,8 +50,9 @@ const MODEL_GROUPS: [string, [string, string][]][] = [
   ["Seedream", [["seedream-4-5", "Seedream 4.5"]]],
 ]
 const MYSTIC_MODELS = new Set(MODEL_GROUPS[0][1].map(([v]) => v))
-const ENGINES: [string, string][] = [
-  ["automatic", "Otomatik"], ["magnific_illusio", "Illusio"],
+// engine value → translation key (label is produced with t() at render time).
+const ENGINE_KEYS: [string, string][] = [
+  ["automatic", "pages.imageGen.engineAuto"], ["magnific_illusio", "Illusio"],
   ["magnific_sharpy", "Sharpy"], ["magnific_sparkle", "Sparkle"],
 ]
 const RESOLUTIONS = ["1k", "2k", "4k"]
@@ -57,18 +60,15 @@ const ASPECTS: [string, string][] = [
   ["social_post_4_5", "POST (4:5)"], ["social_story_9_16", "STORY (9:16)"],
 ]
 
-const STATUS_LABEL: Record<string, string> = {
-  pending: "Onay bekliyor",
-  approved: "Onaylandı",
-  rejected: "Yeniden üretildi",
-}
-
 const selectCls =
   "h-9 rounded-md border bg-background px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
 
 export function ImageGenPage() {
+  const { t } = useI18n()
   const { data: clients } = useClients({ status: "active", q: "" })
   const { isManagement } = useAuth()
+  const ENGINES: [string, string][] = ENGINE_KEYS.map(
+    ([val, key]) => [val, key.startsWith("pages.") ? t(key) : key])
   const [clientId, setClientId] = useState<number | null>(null)
   const [q, setQ] = useState("")
   const [prompt, setPrompt] = useState("")
@@ -110,7 +110,7 @@ export function ImageGenPage() {
         brief_id: briefId ?? undefined,
         settings: {
           aspect_ratio: aspect, model, resolution, refine, prompt,
-          // motor yalnız Mystic'te anlamlı; referanslar her iki yolda da çalışır (v2).
+          // engine only matters for Mystic; references work on both paths (v2).
           engine: mystic ? engine : undefined,
           structure_ref: structureRef ?? undefined,
           style_ref: styleRef ?? undefined,
@@ -118,14 +118,14 @@ export function ImageGenPage() {
       })
       const done = await pollJob(job.id)
       if (done.status === "failed") {
-        setError(done.result?.error || "Görsel üretimi başarısız oldu.")
+        setError(done.result?.error || t("pages.imageGen.generateFailedResult"))
       }
       await refetch()
-      // Üretim kredi harcadı; worker tazeleme job'u kuyrukladı → rozet sorgusunu tazele
-      // (refreshing=true dönerse hook 20 sn'de bir kendini günceller).
+      // The generation spent credit; the worker queued a refresh job → invalidate the badge query
+      // (if it returns refreshing=true, the hook refreshes itself every 20s).
       qc.invalidateQueries({ queryKey: ["magnific-credits"] })
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Görsel üretimi başlatılamadı.")
+      setError(e instanceof Error ? e.message : t("pages.imageGen.generateFailedStart"))
     } finally {
       setGenerating(false)
     }
@@ -138,35 +138,34 @@ export function ImageGenPage() {
       const job = await regenerate.mutateAsync(id)
       const done = await pollJob(job.id)
       if (done.status === "failed") {
-        setError(done.result?.error || "Yeniden üretim başarısız oldu.")
+        setError(done.result?.error || t("pages.imageGen.regenerateFailedResult"))
       }
       await refetch()
       qc.invalidateQueries({ queryKey: ["magnific-credits"] })
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Yeniden üretim başlatılamadı.")
+      setError(e instanceof Error ? e.message : t("pages.imageGen.regenerateFailedStart"))
     } finally {
       setGenerating(false)
     }
   }
 
   if (!isManagement) {
-    return <div className="p-6 text-sm text-muted-foreground">Bu sayfa yalnız yönetim içindir.</div>
+    return <div className="p-6 text-sm text-muted-foreground">{t("pages.imageGen.managementOnly")}</div>
   }
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold">AI Görsel Üretimi</h1>
+        <h1 className="text-xl font-semibold">{t("pages.imageGen.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Müşteri seç, istem + (opsiyonel) brief + boyut/model ayarlarını ver, görsel üret.
-          Üretilen görsel onay bekler. Onaysız müşteride üretim yapılamaz (KVKK).
+          {t("pages.imageGen.subtitle")}
         </p>
       </div>
 
       <div className="grid gap-6 md:grid-cols-[260px_1fr]">
-        {/* müşteri seçimi */}
+        {/* client selection */}
         <div className="space-y-2">
-          <Input placeholder="Müşteri ara…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <Input placeholder={t("pages.imageGen.searchClientPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} />
           <div className="max-h-96 space-y-1 overflow-auto rounded-md border p-1">
             {filtered.map((c) => (
               <button
@@ -182,59 +181,59 @@ export function ImageGenPage() {
           </div>
         </div>
 
-        {/* üretim formu + sonuçlar */}
+        {/* generation form + results */}
         <div className="space-y-4">
           {clientId == null ? (
-            <div className="text-sm text-muted-foreground">Başlamak için bir müşteri seçin.</div>
+            <div className="text-sm text-muted-foreground">{t("pages.imageGen.selectClientPrompt")}</div>
           ) : (
             <>
               <div className="space-y-3 rounded-lg border p-4">
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <Label htmlFor="ig-prompt">İstem (prompt)</Label>
+                    <Label htmlFor="ig-prompt">{t("pages.imageGen.promptLabel")}</Label>
                     <Button
                       type="button" variant="outline" size="sm"
                       disabled={!prompt.trim() || convertPrompt.isPending}
-                      title="İstemi İngilizce'ye çevirip yapılandırılmış JSON'a dönüştürür (kredi harcamaz)"
+                      title={t("pages.imageGen.convertPromptTitle")}
                       onClick={() =>
                         convertPrompt.mutate({ prompt }, {
                           onSuccess: (p) => setPrompt(p),
-                          onError: (e) => toast.error(e instanceof Error ? e.message : "Dönüşüm başarısız"),
+                          onError: (e) => toast.error(e instanceof Error ? e.message : t("pages.imageGen.convertFailed")),
                         })}
                     >
                       {convertPrompt.isPending
                         ? <Loader2 className="mr-1 size-4 animate-spin" />
                         : <Languages className="mr-1 size-4" />}
-                      İngilizce JSON'a çevir
+                      {t("pages.imageGen.convertPromptButton")}
                     </Button>
                   </div>
                   <Textarea
                     id="ig-prompt"
-                    placeholder="Ne üretilsin? Örn: taze kahve, sıcak tonlar, üstten çekim…"
+                    placeholder={t("pages.imageGen.promptPlaceholder")}
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
                   />
                 </div>
 
-                {/* opsiyonel brief + brief'ten örnek istemler */}
+                {/* optional brief + example prompts from the brief */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <Label htmlFor="ig-brief">Haftalık brief (opsiyonel)</Label>
+                    <Label htmlFor="ig-brief">{t("pages.imageGen.briefLabel")}</Label>
                     {briefId != null && (
                       <Button
                         type="button" variant="outline" size="sm"
                         disabled={promptExamples.isPending}
-                        title="Seçili brief'in fikirlerinden 3 örnek istem üretir (kredi harcamaz)"
+                        title={t("pages.imageGen.examplesButtonTitle")}
                         onClick={() =>
                           promptExamples.mutate({ client_id: clientId, brief_id: briefId }, {
                             onSuccess: setExamples,
-                            onError: (e) => toast.error(e instanceof Error ? e.message : "Örnekler üretilemedi"),
+                            onError: (e) => toast.error(e instanceof Error ? e.message : t("pages.imageGen.examplesFailed")),
                           })}
                       >
                         {promptExamples.isPending
                           ? <Loader2 className="mr-1 size-4 animate-spin" />
                           : <Lightbulb className="mr-1 size-4" />}
-                        Örnek promptlar
+                        {t("pages.imageGen.examplesButton")}
                       </Button>
                     )}
                   </div>
@@ -247,10 +246,10 @@ export function ImageGenPage() {
                       setExamples([])
                     }}
                   >
-                    <option value="">Brief kullanma</option>
+                    <option value="">{t("pages.imageGen.noBriefOption")}</option>
                     {(briefs ?? []).map((b) => (
                       <option key={b.id} value={b.id}>
-                        {b.week_iso} · {b.title || "Başlıksız"} ({b.status})
+                        {b.week_iso} · {b.title || t("pages.imageGen.untitledBrief")} ({b.status})
                       </option>
                     ))}
                   </select>
@@ -261,7 +260,7 @@ export function ImageGenPage() {
                           key={i} type="button"
                           onClick={() => setPrompt(ex)}
                           className="block w-full rounded-md border px-2.5 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground"
-                          title="İsteme kopyala"
+                          title={t("pages.imageGen.copyToPromptTitle")}
                         >
                           {ex}
                         </button>
@@ -270,9 +269,9 @@ export function ImageGenPage() {
                   )}
                 </div>
 
-                {/* boyut */}
+                {/* size */}
                 <div className="space-y-1.5">
-                  <Label>Boyut</Label>
+                  <Label>{t("pages.imageGen.sizeLabel")}</Label>
                   <div className="flex gap-1 rounded-md border p-1">
                     {ASPECTS.map(([val, lbl]) => (
                       <button
@@ -290,10 +289,10 @@ export function ImageGenPage() {
                   </div>
                 </div>
 
-                {/* model / motor / çözünürlük — motor yalnız Mystic'te anlamlı */}
+                {/* model / engine / resolution — engine only matters for Mystic */}
                 <div className="flex flex-wrap gap-4">
                   <div className="space-y-1.5">
-                    <Label htmlFor="ig-model">Model</Label>
+                    <Label htmlFor="ig-model">{t("pages.imageGen.modelLabel")}</Label>
                     <select id="ig-model" className={selectCls}
                       value={model} onChange={(e) => setModel(e.target.value)}>
                       {MODEL_GROUPS.map(([group, models]) => (
@@ -305,7 +304,7 @@ export function ImageGenPage() {
                   </div>
                   {MYSTIC_MODELS.has(model) && (
                     <div className="space-y-1.5">
-                      <Label htmlFor="ig-engine">Motor</Label>
+                      <Label htmlFor="ig-engine">{t("pages.imageGen.engineLabel")}</Label>
                       <select id="ig-engine" className={selectCls}
                         value={engine} onChange={(e) => setEngine(e.target.value)}>
                         {ENGINES.map(([val, lbl]) => <option key={val} value={val}>{lbl}</option>)}
@@ -313,7 +312,7 @@ export function ImageGenPage() {
                     </div>
                   )}
                   <div className="space-y-1.5">
-                    <Label htmlFor="ig-res">Çözünürlük</Label>
+                    <Label htmlFor="ig-res">{t("pages.imageGen.resolutionLabel")}</Label>
                     <select id="ig-res" className={selectCls}
                       value={resolution} onChange={(e) => setResolution(e.target.value)}>
                       {RESOLUTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
@@ -321,19 +320,19 @@ export function ImageGenPage() {
                   </div>
                 </div>
 
-                {/* referanslar (yapı + stil) — tüm modellerde (MCP yolunda upload+references) */}
+                {/* references (structure + style) — for all models (upload+references on the MCP path) */}
                 <div className="grid gap-2 sm:grid-cols-2">
-                  <ReferencePicker label="Yapı referansı" clientId={clientId}
+                  <ReferencePicker label={t("pages.imageGen.structureRefLabel")} clientId={clientId}
                     value={structureRef} onChange={setStructureRef} />
-                  <ReferencePicker label="Stil referansı" clientId={clientId}
+                  <ReferencePicker label={t("pages.imageGen.styleRefLabel")} clientId={clientId}
                     value={styleRef} onChange={setStyleRef} />
                 </div>
 
                 <div className="flex flex-wrap items-center gap-4">
                   <label className="flex items-center gap-2 text-sm"
-                    title="Açıkken istem üretim anında otomatik İngilizce+JSON'a dönüştürülür (zaten JSON ise atlanır)">
+                    title={t("pages.imageGen.autoRefineTitle")}>
                     <Switch checked={refine} onCheckedChange={setRefine} />
-                    Üretimde otomatik İngilizce+JSON dönüşümü
+                    {t("pages.imageGen.autoRefineLabel")}
                   </label>
                   <Button className="ml-auto" onClick={handleGenerate} disabled={generating}>
                     {generating ? (
@@ -341,22 +340,22 @@ export function ImageGenPage() {
                     ) : (
                       <Sparkles className="mr-1 size-4" />
                     )}
-                    Üret
+                    {t("pages.imageGen.generateButton")}
                   </Button>
                 </div>
                 {error && (error.includes("claude mcp login") ? (
-                  // Magnific MCP OAuth token'ı düşmüş — çözüm adımlarını göster.
+                  // The Magnific MCP OAuth token has expired — show the resolution steps.
                   <div className="space-y-2 rounded-md border border-amber-400 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
                     <div className="flex items-center gap-2 font-medium">
                       <TriangleAlert className="h-4 w-4 shrink-0" />
-                      Magnific yetkilendirmesi süresi doldu — üretim yapılamadı
+                      {t("pages.imageGen.mcpAuthExpiredTitle")}
                     </div>
                     <ol className="list-decimal space-y-1 pl-5">
-                      <li>Sunucuda interaktif bir terminal açın (SSH).</li>
-                      <li><code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-xs dark:bg-amber-900/60">claude mcp login magnific --no-browser</code> komutunu çalıştırın.</li>
-                      <li>Basılan URL'i tarayıcıda açıp Magnific'i onaylayın.</li>
-                      <li>Tarayıcının yönlendiği adresi (localhost/callback…) kopyalayıp terminaldeki isteme yapıştırın.</li>
-                      <li>Bu sayfaya dönüp üretimi yeniden deneyin.</li>
+                      <li>{t("pages.imageGen.mcpAuthStep1")}</li>
+                      <li><code className="rounded bg-amber-100 px-1 py-0.5 font-mono text-xs dark:bg-amber-900/60">claude mcp login magnific --no-browser</code> {t("pages.imageGen.mcpAuthStep2")}</li>
+                      <li>{t("pages.imageGen.mcpAuthStep3")}</li>
+                      <li>{t("pages.imageGen.mcpAuthStep4")}</li>
+                      <li>{t("pages.imageGen.mcpAuthStep5")}</li>
                     </ol>
                   </div>
                 ) : (
@@ -364,7 +363,7 @@ export function ImageGenPage() {
                 ))}
               </div>
 
-              {/* sonuçlar */}
+              {/* results */}
               {isLoading ? (
                 <Skeleton className="h-40 w-full" />
               ) : (
@@ -379,7 +378,7 @@ export function ImageGenPage() {
                     />
                   ))}
                   {(rows ?? []).length === 0 && (
-                    <div className="text-sm text-muted-foreground">Henüz üretim yok.</div>
+                    <div className="text-sm text-muted-foreground">{t("pages.imageGen.noResultsYet")}</div>
                   )}
                 </div>
               )}
@@ -402,6 +401,12 @@ function ResultCard({
   onApprove: () => void
   onRegenerate: () => void
 }) {
+  const { t } = useI18n()
+  const STATUS_LABEL: Record<string, string> = {
+    pending: t("pages.imageGen.status.pending"),
+    approved: t("pages.imageGen.status.approved"),
+    rejected: t("pages.imageGen.status.rejected"),
+  }
   return (
     <div className="space-y-2 rounded-lg border p-3">
       <div className="flex items-center justify-between">
@@ -413,22 +418,22 @@ function ResultCard({
       {row.result_url ? (
         <img
           src={row.result_url}
-          alt="AI üretilen görsel"
+          alt={t("pages.imageGen.resultAlt")}
           className="aspect-square w-full rounded object-cover"
         />
       ) : (
         <div className="flex aspect-square w-full items-center justify-center rounded bg-muted text-xs text-muted-foreground">
-          Görsel yok
+          {t("pages.imageGen.noImage")}
         </div>
       )}
       {row.prompt && <p className="line-clamp-3 text-xs text-muted-foreground">{row.prompt}</p>}
       {row.status === "pending" && (
         <div className="flex gap-2">
           <Button size="sm" onClick={onApprove} disabled={busy}>
-            <Check className="mr-1 size-4" /> Onayla
+            <Check className="mr-1 size-4" /> {t("pages.imageGen.approveButton")}
           </Button>
           <Button size="sm" variant="outline" onClick={onRegenerate} disabled={busy}>
-            <RefreshCw className="mr-1 size-4" /> Yeniden
+            <RefreshCw className="mr-1 size-4" /> {t("pages.imageGen.regenerateButton")}
           </Button>
         </div>
       )}

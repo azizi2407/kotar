@@ -1,4 +1,4 @@
-"""Board kart şeridinde hafta-içi seçili özel günler (row.special_days)."""
+"""Selected special days within the week in the board card strip (row.special_days)."""
 from datetime import date
 
 from conftest import DESIGNER, MANAGER, login_as
@@ -42,7 +42,7 @@ def _row(client, cid, week=WK):
 def test_secili_ozel_gun_haftaya_dusuyorsa_kartta(client):
     login_as(client, MANAGER)
     cid = _client(client)
-    d = date.fromisocalendar(2026, 30, 3)  # W30 çarşamba
+    d = date.fromisocalendar(2026, 30, 3)  # W30 Wednesday
     eid = _event("Test Özel Günü", d.month, d.year, date_num=d.day)
     _select(cid, d.month, d.year, [eid])
     row = _row(client, cid)
@@ -57,7 +57,7 @@ def test_secilmemis_ozel_gun_kartta_yok(client):
     login_as(client, MANAGER)
     cid = _client(client)
     d = date.fromisocalendar(2026, 30, 3)
-    _event("Seçilmeyen Gün", d.month, d.year, date_num=d.day)  # seçim yok
+    _event("Seçilmeyen Gün", d.month, d.year, date_num=d.day)  # no selection
     row = _row(client, cid)
     assert row and row["special_days"] == []
 
@@ -66,7 +66,7 @@ def test_secili_ama_hafta_disi_kartta_yok(client):
     login_as(client, MANAGER)
     cid = _client(client)
     d = date.fromisocalendar(2026, 30, 3)
-    # aynı ayda ama haftaya düşmeyen bir gün (W30 dışı bir gün seç)
+    # a day in the same month but that doesn't fall in the week (pick a day outside W30)
     other = date.fromisocalendar(2026, 34, 3)
     eid = _event("Başka Hafta Günü", other.month, other.year, date_num=other.day)
     _select(cid, other.month, other.year, [eid])
@@ -79,7 +79,7 @@ def test_aralik_tipi_hafta_ile_ortusurse_kartta(client):
     cid = _client(client)
     mon = date.fromisocalendar(2026, 30, 1)
     sun = date.fromisocalendar(2026, 30, 7)
-    # haftanın ortasını kapsayan bir aralık (mon.day .. sun.day) — aynı ay varsayımı
+    # a range spanning the middle of the week (mon.day .. sun.day) — same-month assumption
     if mon.month == sun.month:
         eid = _event("Farkındalık Haftası", mon.month, mon.year,
                      date_start=mon.day, date_end=sun.day)
@@ -116,14 +116,15 @@ def test_designer_board_da_ozel_gun_gorunur(client):
 
 
 def test_overview_marka_eslemesi(client):
-    """/special-days/overview: **yalnız SEÇİLMİŞ günler döner**, `client_names` de
-    yalnız seçenlerdir.
+    """/special-days/overview: **only SELECTED days are returned**, and `client_names`
+    is also only the ones that selected.
 
-    2026-07-31'de proje sahibi'in kararıyla BİLİNÇLİ olarak değiştirildi. Bu test önceden
-    eski davranışı çiviliyordu: (a) seçilmeyen genel gün `client_names: []` ile
-    yanıtta duruyordu → takvimde gri "önerilen" çipi oluyordu, (b) etkinliğin
-    `client_id`'si tek başına markayı takvime koyuyordu. Yeni kural: takvim
-    "önerilen günler" panosu değil, müşterilerin içerik istediği günler panosu."""
+    Changed DELIBERATELY on 2026-07-31 by the project owner's decision. This test used
+    to nail down the old behavior: (a) an unselected general day used to stay in the
+    response with `client_names: []` → it became a gray "suggested" chip on the
+    calendar, (b) an event's `client_id` alone put the brand on the calendar. New
+    rule: the calendar is not a "suggested days" board, but a board of days clients
+    have requested content for."""
     login_as(client, MANAGER)
     cid_a = _client(client, "Marka A")
     cid_b = _client(client, "Marka B")
@@ -133,7 +134,7 @@ def test_overview_marka_eslemesi(client):
     _select(cid_a, 7, 2026, [e_global])
     items = client.get("/api/sharing/special-days/overview?month=7&year=2026").get_json()["items"]
     by_id = {i["id"]: i for i in items}
-    # Yalnız seçilen gün döndü; diğer ikisi yanıtta HİÇ YOK.
+    # Only the selected day came back; the other two are NOT in the response AT ALL.
     assert list(by_id) == [e_global]
     assert by_id[e_global]["client_names"] == ["Marka A"]
     assert e_secilmemis not in by_id, 'seçilmeyen gün takvime girmemeli'
@@ -149,12 +150,12 @@ def test_overview_rol_kapisi(client):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# /special-days/overview — TAKVİM görünümü (2026-07-31 kuralı)
+# /special-days/overview — CALENDAR view (2026-07-31 rule)
 #
-# KURAL (proje sahibi): takvimde YALNIZCA müşteri tarafından SEÇİLMİŞ günler görünür.
-# Önceki davranış ayın tüm kataloğunu döndürüyordu; seçimi olmayanlar gri çip
-# olarak ızgarayı doldurup gerçek taahhütleri görünmez hale getiriyordu.
-# Bu uç için daha önce HİÇ test yoktu.
+# RULE (project owner): the calendar shows ONLY days SELECTED by a client.
+# The previous behavior returned the entire month's catalog; unselected days filled
+# the grid as gray chips, making real commitments invisible.
+# There were NO tests for this endpoint before.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _overview(client, month=8, year=2026):
@@ -173,7 +174,8 @@ def test_overview_secilen_gun_gorunur(client):
 
 
 def test_overview_SECILMEYEN_gun_GORUNMEZ(client):
-    """Kuralın çekirdeği: katalogda duran ama kimsenin seçmediği gün takvime girmez."""
+    """The core of the rule: a day sitting in the catalog that nobody selected doesn't
+    make it onto the calendar."""
     login_as(client, MANAGER)
     _client(client)
     _event("Kimse Seçmedi", 8, 2026, date_num=9)
@@ -181,10 +183,11 @@ def test_overview_SECILMEYEN_gun_GORUNMEZ(client):
 
 
 def test_overview_MUSTERIYE_OZEL_ama_secilmemis_gun_GORUNMEZ(client):
-    """DAVRANIŞ DEĞİŞİKLİĞİ: eskiden etkinliğin `client_id`'si tek başına markayı
-    takvime koyuyordu. Ama seçim sayfası (`special_days._events_for`) müşteriye özel
-    günleri de seçime SUNUYOR → işaretlenmemiş müşteriye özel bir gün de
-    "sunuldu, seçilmedi"dir; genel günlerden farklı davranmasının nedeni yok."""
+    """BEHAVIOR CHANGE: previously an event's `client_id` alone put the brand on the
+    calendar. But the selection page (`special_days._events_for`) also OFFERS
+    client-specific days for selection → an unmarked client-specific day is also
+    "offered, not selected"; there's no reason for it to behave differently from
+    general days."""
     login_as(client, MANAGER)
     cid = _client(client, "Özel Marka")
     _event("Markaya Özel Gün", 8, 2026, date_num=12, client_id=cid)
@@ -210,12 +213,12 @@ def test_overview_ayni_gunu_secen_iki_marka_birlikte(client):
     _select(b, 8, 2026, [eid])
     items = _overview(client)
     assert len(items) == 1
-    assert items[0]["client_names"] == ["Aaa Marka", "Bbb Marka"]   # sıralı
+    assert items[0]["client_names"] == ["Aaa Marka", "Bbb Marka"]   # sorted
 
 
 def test_overview_silinmis_musterinin_secimi_takvimde_kalmaz(client):
-    """Soft-delete edilen müşterinin seçimi günü takvimde tutmamalı — aksi halde
-    artık müşterisi olmayan bir gün ızgarada duruyordu."""
+    """A soft-deleted client's selection shouldn't keep the day on the calendar —
+    otherwise a day with no client anymore would still sit in the grid."""
     login_as(client, MANAGER)
     cid = _client(client, "Gidecek Marka")
     eid = _event("Gün", 8, 2026, date_num=7)
@@ -231,7 +234,7 @@ def test_overview_baska_ayin_secimi_sizmaz(client):
     cid = _client(client)
     eid = _event("Eylül Günü", 9, 2026, date_num=4)
     _select(cid, 9, 2026, [eid])
-    assert _overview(client, month=8) == []          # Ağustos'a sızmadı
+    assert _overview(client, month=8) == []          # didn't leak into August
     assert len(_overview(client, month=9)) == 1
 
 
@@ -244,10 +247,11 @@ def test_overview_pasif_etkinlik_secili_olsa_da_gorunmez(client):
 
 
 def test_overview_TASLAK_gun_secilmisse_gorunur(client):
-    """Sınır durumu, bilinçli: seçim sayfası yalnız `approved` günleri sunar, yani
-    taslak normalde seçilemez. AMA onaylı bir gün seçildikten SONRA yönetim onu
-    taslağa geri çekerse seçim ortada kalır — o günü takvimden gizlemek, müşterinin
-    içerik beklediği bir günü görünmez yapardı. Panel taslak rozetini gösterir."""
+    """Edge case, deliberate: the selection page only offers `approved` days, so a
+    draft normally can't be selected. BUT if an approved day gets pulled back to
+    draft by management AFTER it was selected, the selection is left dangling —
+    hiding that day from the calendar would make a day the client expects content
+    for invisible. The panel shows the draft badge."""
     login_as(client, MANAGER)
     cid = _client(client, "Taslak Marka")
     eid = _event("Sonradan Taslak", 8, 2026, date_num=8, status="draft")

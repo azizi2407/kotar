@@ -1,5 +1,5 @@
-// Müşteri detayı: sekmeli görünüm (Genel · Anlaşma · Ekip · Kişiler/Lokasyon · Drive).
-// Düzenle/Sil/Geri Al yalnız management. Silme reason'ı istenir.
+// Client detail: tabbed view (General · Contract · Team · Contacts/Location · Drive).
+// Edit/Delete/Restore management-only. A delete reason is required.
 import { useEffect, useMemo, useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import { ArrowLeft, Copy, ExternalLink, Loader2, Pencil, Plus, RotateCcw, Trash2, X } from "lucide-react"
@@ -15,6 +15,7 @@ import type { ClientDetail } from "@/lib/types"
 import {
   useCaptionSettings, useSaveCaptionSettings, type CaptionSettings,
 } from "@/lib/sharing"
+import { useI18n } from "@/lib/i18n"
 import { ApiError } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -37,14 +38,17 @@ import { ClientFormDialog } from "@/components/clients/ClientFormDialog"
 import { AyarView, Field } from "@/components/clients/AyarView"
 import { BrandAssetsTab } from "@/components/clients/BrandAssetsTab"
 
-// Caption ayar UI'ı: model seçenekleri ShareModal ile aynı (ai_claude.py DEFAULT_MODEL
-// + bilinen alternatif). Bu sayfadaki kayıt kalıcı müşteri-varsayılanı olur (Faz 1b).
+// Caption settings UI: model options match ShareModal (ai_claude.py DEFAULT_MODEL
+// + known alternative). Saving on this page becomes the persistent client default (Phase 1b).
 const MODEL_DEFAULT = "__varsayilan__"
-const MODEL_OPTIONS = [
-  { value: MODEL_DEFAULT, label: "Varsayılan (Sonnet)" },
-  { value: "claude-sonnet-5", label: "Sonnet" },
-  { value: "claude-opus-4-8", label: "Opus" },
-]
+
+function modelOptions(t: (key: string) => string) {
+  return [
+    { value: MODEL_DEFAULT, label: t("pages.clientDetail.captionSettings.modelDefault") },
+    { value: "claude-sonnet-5", label: t("pages.clientDetail.captionSettings.modelSonnet") },
+    { value: "claude-opus-4-8", label: t("pages.clientDetail.captionSettings.modelOpus") },
+  ]
+}
 
 function numOrNull(v: string): number | null {
   if (v.trim() === "") return null
@@ -52,8 +56,9 @@ function numOrNull(v: string): number | null {
   return Number.isFinite(n) ? n : null
 }
 
-// Müşterinin caption üretim varsayılanları: görüntüleme (herkes) + düzenleme (management).
+// Client's caption generation defaults: viewing (everyone) + editing (management).
 function CaptionSettingsSection({ clientId, canEdit }: { clientId: number; canEdit: boolean }) {
+  const { t } = useI18n()
   const { data, isLoading } = useCaptionSettings(clientId)
   const save = useSaveCaptionSettings(clientId)
   const [form, setForm] = useState<CaptionSettings>({})
@@ -65,9 +70,9 @@ function CaptionSettingsSection({ clientId, canEdit }: { clientId: number; canEd
   async function onSave() {
     try {
       await save.mutateAsync(form)
-      toast.success("Caption varsayılanları kaydedildi")
+      toast.success(t("pages.clientDetail.captionSettings.toast.saved"))
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Kaydedilemedi")
+      toast.error(err instanceof ApiError ? err.message : t("pages.clientDetail.captionSettings.toast.saveFailed"))
     }
   }
 
@@ -76,70 +81,69 @@ function CaptionSettingsSection({ clientId, canEdit }: { clientId: number; canEd
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Caption Varsayılanları</CardTitle>
+        <CardTitle className="text-base">{t("pages.clientDetail.captionSettings.title")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">
-          Bu ayarlar "✨ Üret" sırasında müşteri varsayılanı olarak ön-dolar; her üretimde
-          o iş için ayrıca değiştirilebilir (kalıcı değişiklik yalnız burada kaydedilir).
+          {t("pages.clientDetail.captionSettings.description")}
         </p>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <Label>Model</Label>
+            <Label>{t("pages.clientDetail.captionSettings.model")}</Label>
             <Select value={form.model || MODEL_DEFAULT}
               disabled={!canEdit}
               onValueChange={(v) => v && setForm((f) => ({ ...f, model: v === MODEL_DEFAULT ? null : v }))}>
               <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
-                {MODEL_OPTIONS.map((o) => (
+                {modelOptions(t).map((o) => (
                   <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="cs-tone">Ton</Label>
+            <Label htmlFor="cs-tone">{t("pages.clientDetail.captionSettings.tone")}</Label>
             <Input id="cs-tone" value={form.tone ?? ""} disabled={!canEdit}
-              placeholder="Boşsa marka sesi (brand_voice) kullanılır"
+              placeholder={t("pages.clientDetail.captionSettings.tonePlaceholder")}
               onChange={(e) => setForm((f) => ({ ...f, tone: e.target.value || null }))} />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="cs-emoji">Emoji limiti</Label>
+            <Label htmlFor="cs-emoji">{t("pages.clientDetail.captionSettings.emojiLimit")}</Label>
             <Input id="cs-emoji" type="number" min={0} value={form.emoji_limit ?? ""} disabled={!canEdit}
               onChange={(e) => setForm((f) => ({ ...f, emoji_limit: numOrNull(e.target.value) }))} />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="cs-hashtag">Hashtag sayısı</Label>
+            <Label htmlFor="cs-hashtag">{t("pages.clientDetail.captionSettings.hashtagCount")}</Label>
             <Input id="cs-hashtag" type="number" min={0} value={form.hashtag_count ?? ""} disabled={!canEdit}
               onChange={(e) => setForm((f) => ({ ...f, hashtag_count: numOrNull(e.target.value) }))} />
           </div>
           <div className="space-y-1.5">
-            <Label>Dil</Label>
+            <Label>{t("pages.clientDetail.captionSettings.lang")}</Label>
             <Select value={form.lang || "TR"} disabled={!canEdit}
               onValueChange={(v) => v && setForm((f) => ({ ...f, lang: v as CaptionSettings["lang"] }))}>
               <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="TR">Türkçe</SelectItem>
-                <SelectItem value="EN">İngilizce</SelectItem>
-                <SelectItem value="TR+EN">İkisi</SelectItem>
+                <SelectItem value="TR">{t("pages.clientDetail.captionSettings.langTr")}</SelectItem>
+                <SelectItem value="EN">{t("pages.clientDetail.captionSettings.langEn")}</SelectItem>
+                <SelectItem value="TR+EN">{t("pages.clientDetail.captionSettings.langBoth")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="cs-charlimit">Karakter limiti</Label>
+            <Label htmlFor="cs-charlimit">{t("pages.clientDetail.captionSettings.charLimit")}</Label>
             <Input id="cs-charlimit" type="number" min={0} value={form.char_limit ?? ""} disabled={!canEdit}
-              placeholder="Sınırsız"
+              placeholder={t("pages.clientDetail.captionSettings.charLimitPlaceholder")}
               onChange={(e) => setForm((f) => ({ ...f, char_limit: numOrNull(e.target.value) }))} />
           </div>
         </div>
         <label className="flex items-center gap-2 text-sm">
           <Switch checked={form.use_brief ?? false} disabled={!canEdit}
             onCheckedChange={(v) => setForm((f) => ({ ...f, use_brief: v }))} />
-          Brief'i bağlam olarak kullan
+          {t("pages.clientDetail.captionSettings.useBrief")}
         </label>
         {canEdit && (
           <Button onClick={onSave} disabled={save.isPending}>
-            {save.isPending ? "Kaydediliyor…" : "Kaydet"}
+            {save.isPending ? t("pages.clientDetail.captionSettings.saving") : t("pages.clientDetail.captionSettings.save")}
           </Button>
         )}
       </CardContent>
@@ -147,27 +151,30 @@ function CaptionSettingsSection({ clientId, canEdit }: { clientId: number; canEd
   )
 }
 
-// Ayar sabitleri — paylaşım günleri (kanonik sıra) + içerik dağılımı format anahtarları.
+// Settings constants — posting days (canonical order, a data value sent to the
+// backend in Turkish — not translated) + content mix format keys. `.key` is
+// the API contract (immutable); `.label` is display text only (translated via t()).
 const GUNLER = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"] as const
 const MIX_KEYS = [
-  { key: "carousel", label: "Carousel" },
-  { key: "editorial_single", label: "Editorial (tek)" },
-  { key: "reel", label: "Reel" },
+  { key: "carousel", labelKey: "pages.clientDetail.ayarForm.mix.carousel" },
+  { key: "editorial_single", labelKey: "pages.clientDetail.ayarForm.mix.editorialSingle" },
+  { key: "reel", labelKey: "pages.clientDetail.ayarForm.mix.reel" },
 ] as const
 const HASHTAG_GROUPS = [
-  { key: "konu", label: "Konu" },
-  { key: "marka", label: "Marka" },
-  { key: "sektor", label: "Sektör" },
+  { key: "konu", labelKey: "pages.clientDetail.ayarForm.hashtag.konu" },
+  { key: "marka", labelKey: "pages.clientDetail.ayarForm.hashtag.marka" },
+  { key: "sektor", labelKey: "pages.clientDetail.ayarForm.hashtag.sektor" },
 ] as const
 
-// Satır/virgül-ayrık metni temiz string listesine çevirir (boşlar düşer).
+// Converts newline/comma-separated text into a clean string list (blanks dropped).
 function toList(s: string): string[] {
   return s.split(/[\n,]/).map((x) => x.trim()).filter(Boolean)
 }
 
-// Ayar düzenleme formu — brand_profile alanları (brief üretimini yönlendirir).
-// caption_settings AYRI "Caption Ayarları" sekmesinde düzenlenir; burada dokunulmaz.
+// Settings edit form — brand_profile fields (guides brief generation).
+// caption_settings is edited in a SEPARATE "Caption Settings" tab; not touched here.
 function AyarForm({ clientId, ayar, onDone }: { clientId: number; ayar: VaultAyar; onDone: () => void }) {
+  const { t } = useI18n()
   const put = usePutVaultAyar(clientId)
   const [brandVoice, setBrandVoice] = useState(ayar.brand_voice)
   const [audience, setAudience] = useState(ayar.target_audience)
@@ -197,7 +204,7 @@ function AyarForm({ clientId, ayar, onDone }: { clientId: number; ayar: VaultAya
   async function onSave() {
     const ipw = parseInt(ideas, 10)
     if (!Number.isFinite(ipw) || ipw < 0) {
-      toast.error("Haftalık fikir sayısı geçerli bir tam sayı olmalı")
+      toast.error(t("pages.clientDetail.ayarForm.toast.invalidIdeas"))
       return
     }
     const body = {
@@ -222,10 +229,10 @@ function AyarForm({ clientId, ayar, onDone }: { clientId: number; ayar: VaultAya
     }
     try {
       await put.mutateAsync(body)
-      toast.success("Ayar kaydedildi")
+      toast.success(t("pages.clientDetail.ayarForm.toast.saved"))
       onDone()
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Kaydedilemedi")
+      toast.error(err instanceof ApiError ? err.message : t("pages.clientDetail.ayarForm.toast.saveFailed"))
     }
   }
 
@@ -233,28 +240,28 @@ function AyarForm({ clientId, ayar, onDone }: { clientId: number; ayar: VaultAya
     <div className="space-y-5">
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-1.5">
-          <Label htmlFor="ay-voice">Marka Sesi</Label>
+          <Label htmlFor="ay-voice">{t("pages.clientDetail.ayarForm.brandVoice")}</Label>
           <Textarea id="ay-voice" value={brandVoice} onChange={(e) => setBrandVoice(e.target.value)}
-            placeholder="Ör. Resmi, sıcak, güven veren" />
+            placeholder={t("pages.clientDetail.ayarForm.brandVoicePlaceholder")} />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="ay-audience">Hedef Kitle</Label>
+          <Label htmlFor="ay-audience">{t("pages.clientDetail.ayarForm.targetAudience")}</Label>
           <Textarea id="ay-audience" value={audience} onChange={(e) => setAudience(e.target.value)} />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="ay-cta">Birincil CTA</Label>
+          <Label htmlFor="ay-cta">{t("pages.clientDetail.ayarForm.cta")}</Label>
           <Input id="ay-cta" value={cta} onChange={(e) => setCta(e.target.value)}
-            placeholder="Ör. danışın, rezervasyon yapın" />
+            placeholder={t("pages.clientDetail.ayarForm.ctaPlaceholder")} />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="ay-ideas">Haftalık Fikir Sayısı</Label>
+          <Label htmlFor="ay-ideas">{t("pages.clientDetail.ayarForm.ideasPerWeek")}</Label>
           <Input id="ay-ideas" type="number" min={0} value={ideas}
             onChange={(e) => setIdeas(e.target.value)} />
         </div>
       </div>
 
       <div className="space-y-1.5">
-        <Label>Paylaşım Günleri</Label>
+        <Label>{t("pages.clientDetail.ayarForm.postingDays")}</Label>
         <div className="flex flex-wrap gap-1.5">
           {GUNLER.map((g) => {
             const on = days.includes(g)
@@ -270,21 +277,21 @@ function AyarForm({ clientId, ayar, onDone }: { clientId: number; ayar: VaultAya
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="ay-forbidden">Yasaklar</Label>
+        <Label htmlFor="ay-forbidden">{t("pages.clientDetail.ayarForm.forbidden")}</Label>
         <Textarea id="ay-forbidden" value={forbiddenText} onChange={(e) => setForbiddenText(e.target.value)}
-          className="min-h-24" placeholder="Her satıra bir madde" />
-        <p className="text-xs text-muted-foreground">Her satır ayrı bir madde olarak kaydedilir.</p>
+          className="min-h-24" placeholder={t("pages.clientDetail.ayarForm.forbiddenPlaceholder")} />
+        <p className="text-xs text-muted-foreground">{t("pages.clientDetail.ayarForm.forbiddenHint")}</p>
       </div>
 
       <div className="space-y-1.5">
-        <Label>Renk Paleti</Label>
+        <Label>{t("pages.clientDetail.ayarForm.colorPalette")}</Label>
         <div className="space-y-2">
           {palette.map((hex, i) => (
             <div key={i} className="flex items-center gap-2">
               <input type="color" value={/^#[0-9a-fA-F]{6}$/.test(hex) ? hex : "#000000"}
                 onChange={(e) => setPalette((p) => p.map((h, j) => (j === i ? e.target.value : h)))}
                 className="h-9 w-10 cursor-pointer rounded border bg-transparent p-0.5" />
-              <Input value={hex} placeholder="#RRGGBB"
+              <Input value={hex} placeholder={t("pages.clientDetail.ayarForm.colorHexPlaceholder")}
                 onChange={(e) => setPalette((p) => p.map((h, j) => (j === i ? e.target.value : h)))}
                 className="max-w-40" />
               <Button type="button" variant="ghost" size="icon"
@@ -294,17 +301,17 @@ function AyarForm({ clientId, ayar, onDone }: { clientId: number; ayar: VaultAya
             </div>
           ))}
           <Button type="button" variant="outline" size="sm" onClick={() => setPalette((p) => [...p, "#000000"])}>
-            <Plus className="mr-1 h-3.5 w-3.5" /> Renk ekle
+            <Plus className="mr-1 h-3.5 w-3.5" /> {t("pages.clientDetail.ayarForm.addColor")}
           </Button>
         </div>
       </div>
 
       <div className="space-y-1.5">
-        <Label>İçerik Dağılımı</Label>
+        <Label>{t("pages.clientDetail.ayarForm.contentMix")}</Label>
         <div className="grid gap-3 sm:grid-cols-3">
           {MIX_KEYS.map((m) => (
             <div key={m.key} className="space-y-1">
-              <Label htmlFor={`ay-mix-${m.key}`} className="text-xs text-muted-foreground">{m.label}</Label>
+              <Label htmlFor={`ay-mix-${m.key}`} className="text-xs text-muted-foreground">{t(m.labelKey)}</Label>
               <Input id={`ay-mix-${m.key}`} type="number" min={0} value={mix[m.key] ?? ""}
                 onChange={(e) => setMix((cur) => ({ ...cur, [m.key]: Number(e.target.value) || 0 }))} />
             </div>
@@ -313,50 +320,51 @@ function AyarForm({ clientId, ayar, onDone }: { clientId: number; ayar: VaultAya
       </div>
 
       <div className="space-y-2">
-        <Label>Hashtag Setleri</Label>
+        <Label>{t("pages.clientDetail.ayarForm.hashtagSets")}</Label>
         <div className="grid gap-3 sm:grid-cols-3">
           {HASHTAG_GROUPS.map((g) => (
             <div key={g.key} className="space-y-1">
-              <Label htmlFor={`ay-hash-${g.key}`} className="text-xs text-muted-foreground">{g.label}</Label>
+              <Label htmlFor={`ay-hash-${g.key}`} className="text-xs text-muted-foreground">{t(g.labelKey)}</Label>
               <Textarea id={`ay-hash-${g.key}`} value={hashText[g.key]}
                 onChange={(e) => hashSetters[g.key](e.target.value)}
-                className="min-h-24" placeholder="Satır ya da virgülle ayır" />
+                className="min-h-24" placeholder={t("pages.clientDetail.ayarForm.hashtagPlaceholder")} />
             </div>
           ))}
         </div>
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="ay-guide">Marka Rehberi (guide_md)</Label>
+        <Label htmlFor="ay-guide">{t("pages.clientDetail.ayarForm.guideMd")}</Label>
         <Textarea id="ay-guide" value={guide} onChange={(e) => setGuide(e.target.value)}
           className="min-h-32" />
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="ay-pillars">İçerik Sütunları (content_pillars)</Label>
+        <Label htmlFor="ay-pillars">{t("pages.clientDetail.ayarForm.contentPillars")}</Label>
         <Textarea id="ay-pillars" value={pillars} onChange={(e) => setPillars(e.target.value)}
           className="min-h-24" />
       </div>
 
       <div className="flex gap-2">
         <Button onClick={onSave} disabled={put.isPending}>
-          {put.isPending ? "Kaydediliyor…" : "Kaydet"}
+          {put.isPending ? t("pages.clientDetail.ayarForm.saving") : t("pages.clientDetail.ayarForm.save")}
         </Button>
-        <Button variant="outline" onClick={onDone} disabled={put.isPending}>Vazgeç</Button>
+        <Button variant="outline" onClick={onDone} disabled={put.isPending}>{t("pages.clientDetail.ayarForm.cancel")}</Button>
       </div>
     </div>
   )
 }
 
-// Ayar sekmesi gövdesi: görüntüle ↔ düzenle geçişi (management-only).
+// Settings tab body: view ↔ edit toggle (management-only).
 function AyarPanel({ clientId, ayar }: { clientId: number; ayar: VaultAyar }) {
+  const { t } = useI18n()
   const [editing, setEditing] = useState(false)
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
-        <CardTitle className="text-base">Ayar</CardTitle>
+        <CardTitle className="text-base">{t("pages.clientDetail.ayarPanel.title")}</CardTitle>
         {!editing && (
           <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
-            <Pencil className="mr-1.5 h-3.5 w-3.5" /> Düzenle
+            <Pencil className="mr-1.5 h-3.5 w-3.5" /> {t("pages.clientDetail.ayarPanel.edit")}
           </Button>
         )}
       </CardHeader>
@@ -369,9 +377,10 @@ function AyarPanel({ clientId, ayar }: { clientId: number; ayar: VaultAyar }) {
   )
 }
 
-// Müşterinin vault Ayar dosyası: salt-görüntüleme + brief aç/kapa + catch-up + onboarding.
-// Uçların tümü management-only (write=True) → sekme yalnız management'a gösterilir.
+// Client's vault Settings file: read-only view + brief toggle + catch-up + onboarding.
+// All endpoints are management-only (write=True) → the tab is only shown to management.
 function VaultAyarSection({ client }: { client: ClientDetail }) {
+  const { t } = useI18n()
   const clientId = client.id
   const { data, isLoading, isError, error } = useVaultAyar(clientId)
   const onboarding = !!data?.onboarding
@@ -382,19 +391,21 @@ function VaultAyarSection({ client }: { client: ClientDetail }) {
   async function onToggle(v: boolean) {
     try {
       await setBriefEnabled.mutateAsync(v)
-      toast.success(v ? "Brief üretimi açıldı" : "Brief üretimi kapatıldı")
+      toast.success(v
+        ? t("pages.clientDetail.vaultAyar.toast.briefOn")
+        : t("pages.clientDetail.vaultAyar.toast.briefOff"))
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Değiştirilemedi")
+      toast.error(err instanceof ApiError ? err.message : t("pages.clientDetail.vaultAyar.toast.toggleFailed"))
     }
   }
 
   async function onCatchUp() {
     try {
       const r = await catchUp.mutateAsync()
-      if (r.enqueued === 0) toast.info("Eksik hafta yok — tümü güncel")
-      else toast.success(`${r.enqueued} hafta kuyruklandı: ${r.weeks.join(", ")}`)
+      if (r.enqueued === 0) toast.info(t("pages.clientDetail.vaultAyar.toast.upToDate"))
+      else toast.success(t("pages.clientDetail.vaultAyar.toast.queued", { count: r.enqueued, weeks: r.weeks.join(", ") }))
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Kuyruğa alınamadı")
+      toast.error(err instanceof ApiError ? err.message : t("pages.clientDetail.vaultAyar.toast.queueFailed"))
     }
   }
 
@@ -402,9 +413,9 @@ function VaultAyarSection({ client }: { client: ClientDetail }) {
     if (!promptQ.data) return
     try {
       await navigator.clipboard.writeText(promptQ.data)
-      toast.success("Prompt kopyalandı")
+      toast.success(t("pages.clientDetail.vaultAyar.toast.promptCopied"))
     } catch {
-      toast.error("Kopyalanamadı")
+      toast.error(t("pages.clientDetail.vaultAyar.toast.copyFailed"))
     }
   }
 
@@ -416,16 +427,16 @@ function VaultAyarSection({ client }: { client: ClientDetail }) {
             <Switch checked={client.brief_enabled} disabled={setBriefEnabled.isPending}
               onCheckedChange={onToggle} />
             <span>
-              <span className="font-medium">Brief üretimi</span>
+              <span className="font-medium">{t("pages.clientDetail.vaultAyar.briefLabel")}</span>
               <span className="block text-xs text-muted-foreground">
-                Kapalıyken rutin ve catch-up bu müşteriye otomatik brief üretmez.
+                {t("pages.clientDetail.vaultAyar.briefHint")}
               </span>
             </span>
           </label>
           {client.brief_enabled && !onboarding && (
             <Button variant="outline" size="sm" onClick={onCatchUp} disabled={catchUp.isPending}>
               {catchUp.isPending && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
-              Eksik haftaları kuyrukla
+              {t("pages.clientDetail.vaultAyar.catchUpButton")}
             </Button>
           )}
         </CardContent>
@@ -436,7 +447,9 @@ function VaultAyarSection({ client }: { client: ClientDetail }) {
       ) : isError ? (
         <Card>
           <CardContent className="pt-6 text-sm text-destructive">
-            Ayar okunamadı: {error instanceof ApiError ? error.message : "bilinmeyen hata"}
+            {t("pages.clientDetail.vaultAyar.loadError", {
+              message: error instanceof ApiError ? error.message : t("pages.clientDetail.vaultAyar.unknownError"),
+            })}
           </CardContent>
         </Card>
       ) : data ? (
@@ -444,12 +457,11 @@ function VaultAyarSection({ client }: { client: ClientDetail }) {
           {onboarding && (
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Onboarding bekliyor</CardTitle>
+                <CardTitle className="text-base">{t("pages.clientDetail.vaultAyar.onboardingTitle")}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-sm text-muted-foreground">
-                  Bu müşterinin Ayar'ı henüz boş. Aşağıdaki alanları elle doldurabilir ya da başlangıç
-                  prompt'unu taze bir Claude oturumuna yapıştırıp Ayar'ı ürettirip buraya işleyebilirsin.
+                  {t("pages.clientDetail.vaultAyar.onboardingBody")}
                 </p>
                 {promptQ.isLoading ? (
                   <Skeleton className="h-40 w-full" />
@@ -457,7 +469,7 @@ function VaultAyarSection({ client }: { client: ClientDetail }) {
                   <div className="space-y-2">
                     <div className="flex justify-end">
                       <Button variant="outline" size="sm" onClick={copyPrompt}>
-                        <Copy className="mr-1.5 h-3.5 w-3.5" /> Kopyala
+                        <Copy className="mr-1.5 h-3.5 w-3.5" /> {t("pages.clientDetail.vaultAyar.copy")}
                       </Button>
                     </div>
                     <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-lg border bg-muted/30 p-3 text-xs">
@@ -465,7 +477,7 @@ function VaultAyarSection({ client }: { client: ClientDetail }) {
                     </pre>
                   </div>
                 ) : (
-                  <p className="text-sm text-destructive">Prompt getirilemedi.</p>
+                  <p className="text-sm text-destructive">{t("pages.clientDetail.vaultAyar.promptFetchFailed")}</p>
                 )}
               </CardContent>
             </Card>
@@ -477,11 +489,12 @@ function VaultAyarSection({ client }: { client: ClientDetail }) {
   )
 }
 
-function yesno(v: boolean | null | undefined) {
-  return v == null ? "—" : v ? "Evet" : "Hayır"
+function yesno(t: (key: string) => string, v: boolean | null | undefined) {
+  return v == null ? "—" : v ? t("pages.clientDetail.yesno.yes") : t("pages.clientDetail.yesno.no")
 }
 
 export function ClientDetailPage() {
+  const { t } = useI18n()
   const { id } = useParams()
   const clientId = Number(id)
   const navigate = useNavigate()
@@ -504,9 +517,9 @@ export function ClientDetailPage() {
   if (isError || !c) {
     return (
       <div className="space-y-4">
-        <p className="text-destructive">Müşteri bulunamadı.</p>
+        <p className="text-destructive">{t("pages.clientDetail.notFound")}</p>
         <Button variant="outline" render={<Link to="/clients" />}>
-          <ArrowLeft className="mr-1 h-4 w-4" /> Listeye dön
+          <ArrowLeft className="mr-1 h-4 w-4" /> {t("pages.clientDetail.backToList")}
         </Button>
       </div>
     )
@@ -515,19 +528,19 @@ export function ClientDetailPage() {
   async function doDelete() {
     try {
       await del.mutateAsync({ id: clientId, reason: reason.trim() || undefined })
-      toast.success("Müşteri arşivlendi")
+      toast.success(t("pages.clientDetail.toast.archived"))
       setConfirmDel(false)
       navigate("/clients")
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Silme başarısız")
+      toast.error(err instanceof ApiError ? err.message : t("pages.clientDetail.toast.deleteFailed"))
     }
   }
   async function doRestore() {
     try {
       await restore.mutateAsync(clientId)
-      toast.success("Müşteri geri alındı")
+      toast.success(t("pages.clientDetail.toast.restored"))
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Geri alma başarısız")
+      toast.error(err instanceof ApiError ? err.message : t("pages.clientDetail.toast.restoreFailed"))
     }
   }
 
@@ -537,60 +550,62 @@ export function ClientDetailPage() {
     <div className="space-y-6">
       <div>
         <Link to="/clients" className="mb-2 inline-flex items-center text-sm text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="mr-1 h-4 w-4" /> Müşteriler
+          <ArrowLeft className="mr-1 h-4 w-4" /> {t("pages.clientDetail.backToClients")}
         </Link>
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-semibold tracking-tight">{c.name}</h1>
             {c.status === "deleted"
-              ? <Badge variant="outline" className="text-muted-foreground">Silinmiş</Badge>
-              : <Badge variant="secondary">Aktif</Badge>}
+              ? <Badge variant="outline" className="text-muted-foreground">{t("pages.clientDetail.status.deleted")}</Badge>
+              : <Badge variant="secondary">{t("pages.clientDetail.status.active")}</Badge>}
           </div>
           {isManagement && (
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => setEditing(true)}>
-                <Pencil className="mr-1 h-4 w-4" /> Düzenle
+                <Pencil className="mr-1 h-4 w-4" /> {t("pages.clientDetail.edit")}
               </Button>
               {c.status === "active" ? (
                 <Button variant="outline" className="text-destructive"
                   onClick={() => { setReason(""); setConfirmDel(true) }}>
-                  <Trash2 className="mr-1 h-4 w-4" /> Sil
+                  <Trash2 className="mr-1 h-4 w-4" /> {t("pages.clientDetail.delete")}
                 </Button>
               ) : (
                 <Button variant="outline" onClick={doRestore} disabled={restore.isPending}>
-                  <RotateCcw className="mr-1 h-4 w-4" /> Geri Al
+                  <RotateCcw className="mr-1 h-4 w-4" /> {t("pages.clientDetail.restore")}
                 </Button>
               )}
             </div>
           )}
         </div>
         {c.status === "deleted" && c.deleted_reason && (
-          <p className="mt-1 text-sm text-muted-foreground">Silme nedeni: {c.deleted_reason}</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {t("pages.clientDetail.deleteReason", { reason: c.deleted_reason })}
+          </p>
         )}
       </div>
 
       <Tabs defaultValue="genel">
         <TabsList>
-          <TabsTrigger value="genel">Genel</TabsTrigger>
-          <TabsTrigger value="anlasma">Anlaşma & Çekim</TabsTrigger>
-          <TabsTrigger value="ekip">Ekip</TabsTrigger>
-          <TabsTrigger value="kisiler">Kişiler & Lokasyon</TabsTrigger>
-          <TabsTrigger value="drive">Drive</TabsTrigger>
-          <TabsTrigger value="caption">Caption Ayarları</TabsTrigger>
-          {isManagement && <TabsTrigger value="marka">Marka Görselleri</TabsTrigger>}
-          {isManagement && <TabsTrigger value="vault">Vault Ayar</TabsTrigger>}
+          <TabsTrigger value="genel">{t("pages.clientDetail.tabs.general")}</TabsTrigger>
+          <TabsTrigger value="anlasma">{t("pages.clientDetail.tabs.contract")}</TabsTrigger>
+          <TabsTrigger value="ekip">{t("pages.clientDetail.tabs.team")}</TabsTrigger>
+          <TabsTrigger value="kisiler">{t("pages.clientDetail.tabs.contacts")}</TabsTrigger>
+          <TabsTrigger value="drive">{t("pages.clientDetail.tabs.drive")}</TabsTrigger>
+          <TabsTrigger value="caption">{t("pages.clientDetail.tabs.captionSettings")}</TabsTrigger>
+          {isManagement && <TabsTrigger value="marka">{t("pages.clientDetail.tabs.brandAssets")}</TabsTrigger>}
+          {isManagement && <TabsTrigger value="vault">{t("pages.clientDetail.tabs.vaultAyar")}</TabsTrigger>}
         </TabsList>
 
         <TabsContent value="genel">
           <Card>
             <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
-              <Field label="Sektör" value={c.sector} />
-              <Field label="E-posta" value={c.client_email} />
-              <Field label="Instagram" value={
+              <Field label={t("pages.clientDetail.field.sector")} value={c.sector} />
+              <Field label={t("pages.clientDetail.field.email")} value={c.client_email} />
+              <Field label={t("pages.clientDetail.field.instagram")} value={
                 c.instagram_url
                   ? <a className="text-primary hover:underline" href={c.instagram_url} target="_blank" rel="noreferrer">{c.instagram_url}</a>
                   : null} />
-              <Field label="Notlar" value={c.notes} />
+              <Field label={t("pages.clientDetail.field.notes")} value={c.notes} />
             </CardContent>
           </Card>
         </TabsContent>
@@ -598,18 +613,18 @@ export function ClientDetailPage() {
         <TabsContent value="anlasma">
           <Card>
             <CardContent className="grid gap-4 pt-6 sm:grid-cols-3">
-              <Field label="Haftalık İçerik" value={ct?.weekly_content_count} />
-              <Field label="Post" value={ct?.post_count} />
-              <Field label="Story" value={ct?.story_count} />
-              <Field label="KDV %" value={ct?.vat_rate} />
-              <Field label="İçerik Planı" value={ct?.content_plan} />
-              <Field label="Ücret Başlangıç" value={ct?.fee_effective_date} />
-              <Field label="Video Çekimi" value={yesno(ct?.video_shooting_enabled)} />
-              <Field label="Haftalık Video" value={ct?.weekly_video_count} />
-              <Field label="Foto Çekimi" value={yesno(ct?.photo_shooting_enabled)} />
-              <Field label="Haftalık Foto" value={ct?.weekly_photo_count} />
-              <Field label="Drone" value={yesno(ct?.drone_usage)} />
-              <Field label="Açıklama" value={ct?.description} />
+              <Field label={t("pages.clientDetail.field.weeklyContent")} value={ct?.weekly_content_count} />
+              <Field label={t("pages.clientDetail.field.post")} value={ct?.post_count} />
+              <Field label={t("pages.clientDetail.field.story")} value={ct?.story_count} />
+              <Field label={t("pages.clientDetail.field.vatRate")} value={ct?.vat_rate} />
+              <Field label={t("pages.clientDetail.field.contentPlan")} value={ct?.content_plan} />
+              <Field label={t("pages.clientDetail.field.feeEffectiveDate")} value={ct?.fee_effective_date} />
+              <Field label={t("pages.clientDetail.field.videoShooting")} value={yesno(t, ct?.video_shooting_enabled)} />
+              <Field label={t("pages.clientDetail.field.weeklyVideo")} value={ct?.weekly_video_count} />
+              <Field label={t("pages.clientDetail.field.photoShooting")} value={yesno(t, ct?.photo_shooting_enabled)} />
+              <Field label={t("pages.clientDetail.field.weeklyPhoto")} value={ct?.weekly_photo_count} />
+              <Field label={t("pages.clientDetail.field.drone")} value={yesno(t, ct?.drone_usage)} />
+              <Field label={t("pages.clientDetail.field.description")} value={ct?.description} />
             </CardContent>
           </Card>
         </TabsContent>
@@ -618,7 +633,7 @@ export function ClientDetailPage() {
           <Card>
             <CardContent className="grid gap-4 pt-6 sm:grid-cols-2">
               {ROLE_SLOTS.map((slot) => (
-                <Field key={slot.key} label={slot.label}
+                <Field key={slot.key} label={t(slot.labelKey)}
                   value={c.team_assignments[slot.key]
                     ? (nameBySub[c.team_assignments[slot.key]] ?? c.team_assignments[slot.key])
                     : null} />
@@ -630,9 +645,9 @@ export function ClientDetailPage() {
         <TabsContent value="kisiler">
           <div className="grid gap-4 md:grid-cols-2">
             <Card>
-              <CardHeader><CardTitle className="text-base">Kişiler</CardTitle></CardHeader>
+              <CardHeader><CardTitle className="text-base">{t("pages.clientDetail.contacts.title")}</CardTitle></CardHeader>
               <CardContent className="space-y-3">
-                {(c.contacts ?? []).length === 0 && <p className="text-sm text-muted-foreground">Kayıtlı kişi yok.</p>}
+                {(c.contacts ?? []).length === 0 && <p className="text-sm text-muted-foreground">{t("pages.clientDetail.contacts.empty")}</p>}
                 {(c.contacts ?? []).map((p, i) => (
                   <div key={i} className="rounded-md border p-2 text-sm">
                     <div className="font-medium">{p.name || "—"}</div>
@@ -643,9 +658,9 @@ export function ClientDetailPage() {
               </CardContent>
             </Card>
             <Card>
-              <CardHeader><CardTitle className="text-base">Lokasyonlar</CardTitle></CardHeader>
+              <CardHeader><CardTitle className="text-base">{t("pages.clientDetail.locations.title")}</CardTitle></CardHeader>
               <CardContent className="space-y-3">
-                {(c.locations ?? []).length === 0 && <p className="text-sm text-muted-foreground">Kayıtlı lokasyon yok.</p>}
+                {(c.locations ?? []).length === 0 && <p className="text-sm text-muted-foreground">{t("pages.clientDetail.locations.empty")}</p>}
                 {(c.locations ?? []).map((l, i) => (
                   <div key={i} className="rounded-md border p-2 text-sm">
                     <div className="font-medium">{l.name || "—"}</div>
@@ -660,19 +675,21 @@ export function ClientDetailPage() {
         <TabsContent value="drive">
           <Card>
             <CardContent className="space-y-4 pt-6">
-              <Field label="Ana Drive Klasörü" value={
+              <Field label={t("pages.clientDetail.drive.mainFolder")} value={
                 c.google_drive_url
-                  ? <a className="inline-flex items-center gap-1 text-primary hover:underline" href={c.google_drive_url} target="_blank" rel="noreferrer">Klasörü aç <ExternalLink className="h-3 w-3" /></a>
+                  ? <a className="inline-flex items-center gap-1 text-primary hover:underline" href={c.google_drive_url} target="_blank" rel="noreferrer">{t("pages.clientDetail.drive.openFolder")} <ExternalLink className="h-3 w-3" /></a>
                   : null} />
               <div>
-                <div className="mb-2 text-xs text-muted-foreground">Hafta Klasörleri ({c.week_folders.length})</div>
+                <div className="mb-2 text-xs text-muted-foreground">
+                  {t("pages.clientDetail.drive.weekFolders", { count: c.week_folders.length })}
+                </div>
                 <div className="flex flex-wrap gap-2">
                   {c.week_folders.length === 0 && <span className="text-sm text-muted-foreground">—</span>}
                   {c.week_folders.map((w) => (
                     w.link
                       ? <a key={w.week_number} href={w.link} target="_blank" rel="noreferrer"
-                          className="rounded border px-2 py-1 text-xs hover:bg-muted">Hafta {w.week_number}</a>
-                      : <span key={w.week_number} className="rounded border px-2 py-1 text-xs text-muted-foreground">Hafta {w.week_number}</span>
+                          className="rounded border px-2 py-1 text-xs hover:bg-muted">{t("pages.clientDetail.drive.week", { number: w.week_number })}</a>
+                      : <span key={w.week_number} className="rounded border px-2 py-1 text-xs text-muted-foreground">{t("pages.clientDetail.drive.week", { number: w.week_number })}</span>
                   ))}
                 </div>
               </div>
@@ -704,20 +721,20 @@ export function ClientDetailPage() {
       <Dialog open={confirmDel} onOpenChange={setConfirmDel}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Müşteriyi sil</DialogTitle>
+            <DialogTitle>{t("pages.clientDetail.deleteDialog.title")}</DialogTitle>
             <DialogDescription>
-              "{c.name}" arşivlenecek (soft-delete). İstersen bir neden ekle.
+              {t("pages.clientDetail.deleteDialog.description", { name: c.name })}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-1.5">
-            <Label htmlFor="reason">Neden (opsiyonel)</Label>
+            <Label htmlFor="reason">{t("pages.clientDetail.deleteDialog.reasonLabel")}</Label>
             <Input id="reason" value={reason} onChange={(e) => setReason(e.target.value)} />
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmDel(false)}>İptal</Button>
+            <Button variant="outline" onClick={() => setConfirmDel(false)}>{t("pages.clientDetail.deleteDialog.cancel")}</Button>
             <Button className="bg-destructive text-white hover:bg-destructive/90"
               onClick={doDelete} disabled={del.isPending}>
-              {del.isPending ? "Siliniyor…" : "Sil"}
+              {del.isPending ? t("pages.clientDetail.deleteDialog.deleting") : t("pages.clientDetail.deleteDialog.confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>

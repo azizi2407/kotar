@@ -1,11 +1,12 @@
-"""Mail Gateway — IMAP/SMTP için tek saf adaptör (drive_gateway muadili).
+"""Mail Gateway — the single pure adapter for IMAP/SMTP (the drive_gateway counterpart).
 
-DB'ye DOKUNMAZ; bir MailConn (host/port/kimlik) alır, ağ işini yapar, domain tipli
-hata döndürür (MailError / MailAuthError). IMAP: imap-tools. SMTP: stdlib smtplib +
-email. Testlerde MailBox/SMTP monkeypatch'lenir → ağa çıkılmaz.
+Does NOT touch the DB; takes a MailConn (host/port/credentials), does the
+network work, returns domain-typed errors (MailError / MailAuthError). IMAP:
+imap-tools. SMTP: stdlib smtplib + email. MailBox/SMTP are monkeypatched in
+tests → no network access.
 
-örnek: IMAP mail.example.com:993 SSL, SMTP :465 implicit SSL. imap_tools uid'leri
-string döndürür; burada int'e çevrilir.
+example: IMAP mail.example.com:993 SSL, SMTP :465 implicit SSL. imap_tools
+returns uids as strings; converted to int here.
 """
 import datetime as dt
 import smtplib
@@ -19,7 +20,7 @@ from imap_tools import errors as imap_errors
 
 import mail_crypto
 
-# Klasör özel-kullanım eşlemesi (IMAP \Special-Use flag'i veya ad tabanlı fallback)
+# Folder special-use mapping (IMAP \Special-Use flag, or a name-based fallback)
 _SPECIAL_FLAGS = {
     '\\inbox': 'inbox', '\\sent': 'sent', '\\drafts': 'drafts',
     '\\trash': 'trash', '\\junk': 'junk', '\\archive': 'archive',
@@ -32,11 +33,11 @@ _SPECIAL_NAMES = {
 
 
 class MailError(Exception):
-    """IMAP/SMTP erişilemedi veya protokol hatası."""
+    """IMAP/SMTP unreachable, or a protocol error."""
 
 
 class MailAuthError(MailError):
-    """Kimlik geçersiz (kullanıcı/parola yanlış)."""
+    """Credentials invalid (wrong username/password)."""
 
 
 @dataclass
@@ -73,7 +74,7 @@ class MailMsg:
 
 
 def available():
-    """Mail modülü çalışabilir mi (şifreleme anahtarı var mı)?"""
+    """Can the mail module run (is there an encryption key)?"""
     return mail_crypto.available()
 
 
@@ -85,16 +86,16 @@ def _mailbox_cls(conn):
 
 
 def _open(conn):
-    """Giriş yapılmış MailBox döner (context manager). Hataları domain tipine çevirir."""
+    """Returns a logged-in MailBox (context manager). Converts errors to domain types."""
     cls = _mailbox_cls(conn)
     try:
         mb = cls(conn.imap_host, conn.imap_port)
         mb.login(conn.username, conn.password, initial_folder=None)
         return mb
     except imap_errors.MailboxLoginError as e:
-        raise MailAuthError(f'IMAP giriş başarısız: {e}')
+        raise MailAuthError(f'IMAP login failed: {e}')
     except (imap_errors.ImapToolsError, OSError, ssl.SSLError) as e:
-        raise MailError(f'IMAP bağlantı hatası: {e}')
+        raise MailError(f'IMAP connection error: {e}')
 
 
 def _special_use(name, flags):
@@ -106,7 +107,7 @@ def _special_use(name, flags):
 
 
 def list_folders(conn):
-    """Hesabın klasör listesi: [{name, path, flags, special_use, uidvalidity}]."""
+    """The account's folder list: [{name, path, flags, special_use, uidvalidity}]."""
     out = []
     with _open(conn) as mb:
         for fi in mb.folder.list():
@@ -127,7 +128,7 @@ def _to_msg(m):
     fv = m.from_values
     atts = []
     for i, a in enumerate(m.attachments):
-        atts.append({'part_id': str(i), 'filename': a.filename or f'ek-{i}',
+        atts.append({'part_id': str(i), 'filename': a.filename or f'attachment-{i}',
                      'content_type': a.content_type, 'size': a.size,
                      'content_id': a.content_id})
     text = m.text or ''
@@ -153,8 +154,8 @@ def _to_msg(m):
 
 
 def fetch_headers(conn, folder, since_uid=None, limit=50):
-    """Klasörden envelope + snippet + flag (gövde/ek YOK). since_uid verilirse yalnız
-    ondan büyük UID'ler. En yeni önce (reverse)."""
+    """Envelope + snippet + flags from the folder (NO body/attachments). If
+    since_uid is given, only UIDs greater than it. Newest first (reverse)."""
     if since_uid:
         criteria = AND(uid=UidRange(str(int(since_uid) + 1), '*'))
     else:
@@ -169,30 +170,30 @@ def fetch_headers(conn, folder, since_uid=None, limit=50):
 
 
 def fetch_message(conn, folder, uid):
-    """Tek mesajın tam hali (gövde + ek metadata). Bulunamazsa MailError."""
+    """A single message's full form (body + attachment metadata). MailError if not found."""
     with _open(conn) as mb:
         mb.folder.set(folder, readonly=True)
         for m in mb.fetch(AND(uid=str(int(uid))), mark_seen=False, bulk=False):
             return _to_msg(m)
-    raise MailError(f'mesaj bulunamadı: uid={uid}')
+    raise MailError(f'message not found: uid={uid}')
 
 
 def fetch_attachment(conn, folder, uid, part_id):
-    """Ekin ham baytları (bytes, filename, content_type). part_id = ek sırası."""
+    """The attachment's raw bytes (bytes, filename, content_type). part_id = attachment index."""
     idx = int(part_id)
     with _open(conn) as mb:
         mb.folder.set(folder, readonly=True)
         for m in mb.fetch(AND(uid=str(int(uid))), mark_seen=False, bulk=False):
             atts = list(m.attachments)
             if idx < 0 or idx >= len(atts):
-                raise MailError(f'ek bulunamadı: part={part_id}')
+                raise MailError(f'attachment not found: part={part_id}')
             a = atts[idx]
-            return a.payload, (a.filename or f'ek-{idx}'), a.content_type
-    raise MailError(f'mesaj bulunamadı: uid={uid}')
+            return a.payload, (a.filename or f'attachment-{idx}'), a.content_type
+    raise MailError(f'message not found: uid={uid}')
 
 
 def store_flags(conn, folder, uid, add=(), remove=()):
-    """IMAP STORE — flag ekle/kaldır. add/remove: ('\\Seen', '\\Flagged', ...)."""
+    """IMAP STORE — add/remove flags. add/remove: ('\\Seen', '\\Flagged', ...)."""
     with _open(conn) as mb:
         mb.folder.set(folder)
         u = str(int(uid))
@@ -224,13 +225,13 @@ def _build_mime(conn, *, to, cc, subject, body_text, body_html, in_reply_to, ref
         # att: {filename, content_type, data(bytes)}
         maintype, _, subtype = (att.get('content_type') or 'application/octet-stream').partition('/')
         msg.add_attachment(att['data'], maintype=maintype, subtype=subtype or 'octet-stream',
-                           filename=att.get('filename') or 'ek')
+                           filename=att.get('filename') or 'attachment')
     return msg, mid
 
 
 def send(conn, *, to, cc=(), subject='', body_text='', body_html=None,
          in_reply_to=None, references=None, attachments=()):
-    """SMTP ile gönder. (message_id, raw_bytes) döner — raw_bytes Sent'e APPEND edilebilir."""
+    """Send via SMTP. Returns (message_id, raw_bytes) — raw_bytes can be APPENDed to Sent."""
     msg, mid = _build_mime(conn, to=to, cc=cc, subject=subject, body_text=body_text,
                            body_html=body_html, in_reply_to=in_reply_to,
                            references=references, attachments=attachments)
@@ -246,31 +247,31 @@ def send(conn, *, to, cc=(), subject='', body_text='', body_html=None,
             server.login(conn.username, conn.password)
             server.send_message(msg)
     except smtplib.SMTPAuthenticationError as e:
-        raise MailAuthError(f'SMTP giriş başarısız: {e}')
+        raise MailAuthError(f'SMTP login failed: {e}')
     except (smtplib.SMTPException, OSError, ssl.SSLError) as e:
-        raise MailError(f'SMTP gönderim hatası: {e}')
+        raise MailError(f'SMTP send error: {e}')
     return mid, raw
 
 
 def append_sent(conn, raw_bytes, folder='Sent'):
-    """Gönderilen mesajın ham halini Sent klasörüne APPEND eder (best-effort)."""
+    """APPENDs the sent message's raw form to the Sent folder (best-effort)."""
     try:
         with _open(conn) as mb:
             mb.append(raw_bytes, folder, dt.datetime.now(dt.timezone.utc), ('\\Seen',))
     except (MailError, imap_errors.ImapToolsError):
-        pass  # Sent yoksa/başarısızsa gönderim yine başarılı sayılır
+        pass  # if Sent doesn't exist/fails, sending is still counted as successful
 
 
 def test_imap(conn):
-    """Yalnız IMAP kimliğini doğrular (okuma için zorunlu). Başarısızsa MailAuthError/MailError."""
+    """Verifies IMAP credentials only (required for reading). MailAuthError/MailError on failure."""
     with _open(conn) as mb:
         mb.folder.list()
 
 
 def test_smtp(conn):
-    """Yalnız SMTP kimliğini/erişimini doğrular. Bazı sunucularda giden SMTP portu (465/587)
-    ağ düzeyinde engelli olabilir → MailError (timeout). Gönderim o zaman kullanılamaz ama
-    okuma etkilenmez."""
+    """Verifies SMTP credentials/reachability only. On some servers the outgoing
+    SMTP port (465/587) may be network-blocked → MailError (timeout). Sending is
+    then unavailable, but reading is unaffected."""
     try:
         if conn.smtp_security == 'ssl':
             server = smtplib.SMTP_SSL(conn.smtp_host, conn.smtp_port, timeout=30)
@@ -281,12 +282,12 @@ def test_smtp(conn):
                 server.starttls(context=ssl.create_default_context())
             server.login(conn.username, conn.password)
     except smtplib.SMTPAuthenticationError as e:
-        raise MailAuthError(f'SMTP giriş başarısız: {e}')
+        raise MailAuthError(f'SMTP login failed: {e}')
     except (smtplib.SMTPException, OSError, ssl.SSLError) as e:
-        raise MailError(f'SMTP bağlantı hatası: {e}')
+        raise MailError(f'SMTP connection error: {e}')
 
 
 def test_connection(conn):
-    """IMAP + SMTP kimliğini doğrular (ikisi de zorunlu). Başarısızsa hata atar."""
+    """Verifies both IMAP + SMTP credentials (both required). Raises on failure."""
     test_imap(conn)
     test_smtp(conn)

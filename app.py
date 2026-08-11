@@ -1,10 +1,9 @@
-"""svc-agency — Kotar ajans paneli (Flask app factory).
+"""svc-agency — Kotar agency panel (Flask app factory).
 
-Kimlik OIDC sağlayıcısına delege edilir (bkz. `sso_client.py`; AUTH_MODE=local
-iken yerel e-posta/parola girişi de desteklenir). Frontend: `panel/` (Vite +
-React + shadcn), Flask JSON API + SPA servisi olarak çalışır. Ajans domeni
-(clients + sharing board + brief + ...) modül modül `api.py`'ye ve panele
-eklenir.
+Identity is delegated to an OIDC provider (see `sso_client.py`; local email/password
+login is also supported when AUTH_MODE=local). Frontend: `panel/` (Vite + React +
+shadcn); Flask runs as a JSON API + SPA server. The agency domain (clients + sharing
+board + brief + ...) is added to `api.py` and the panel module by module.
 """
 import os
 from datetime import timedelta
@@ -19,11 +18,11 @@ from sso_client import AUTH_MODE, OIDCClient
 
 load_dotenv()
 
-# CSP — REPORT-ONLY (enforce DEĞİL). Public inline-HTML sayfaları (review.py,
-# special_days.py: inline <style>/<script>, special_days.py ayrıca Google Fonts)
-# ve SPA (panel/dist, harici JS/CSS dosyaları) kırılmasın diye önce gözlem modu;
-# enforce geçişi ayrı bir adım — CSP ihlallerini üretimde gözlemleyip kırılma
-# riski olmadığını doğruladıktan sonra yapılmalı.
+# CSP — REPORT-ONLY (NOT enforced). Observation mode first so the public inline-HTML
+# pages (review.py, special_days.py: inline <style>/<script>, special_days.py also uses
+# Google Fonts) and the SPA (panel/dist, external JS/CSS files) don't break; switching
+# to enforce is a separate step — should be done after observing CSP violations in
+# production and confirming there's no risk of breakage.
 _CSP_POLICY = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline'; "
@@ -41,7 +40,7 @@ _CSP_POLICY = (
 
 def create_app():
     app = Flask(__name__)
-    # nginx arkasında: X-Forwarded-Proto/Host doğru okunsun
+    # behind nginx: so X-Forwarded-Proto/Host are read correctly
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
     env = os.getenv('FLASK_ENV', 'production')
@@ -50,13 +49,13 @@ def create_app():
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {'pool_pre_ping': True, 'pool_recycle': 280}
     app.config['AGENCY_BASE_URL'] = os.getenv('AGENCY_BASE_URL', 'https://panel.example.com')
-    # Impersonation ("kullanıcı gözünden bak") yalnız bu e-postalara açık (virgülle ayrık).
+    # Impersonation ("view as user") is open only to these emails (comma-separated).
     app.config['SUPERADMIN_EMAILS'] = {
         e.strip().lower() for e in
         os.getenv('SUPERADMIN_EMAILS', '').split(',') if e.strip()
     }
-    # Mail modülü — self-servis hesap alan adı allowlist + varsayılan IMAP/SMTP sunucusu.
-    # Sırlar/allowlist secret manager'dan (start.sh --path=/ enjekte); anahtar MAIL_ENC_KEY.
+    # Mail module — self-service account domain allowlist + default IMAP/SMTP server.
+    # Secrets/allowlist come from the secret manager (injected by start.sh --path=/); key is MAIL_ENC_KEY.
     app.config['MAIL_ALLOWED_DOMAINS'] = {
         d.strip().lower() for d in
         os.getenv('MAIL_ALLOWED_DOMAINS', 'example.com').split(',') if d.strip()
@@ -68,57 +67,58 @@ def create_app():
     app.config['SESSION_COOKIE_SECURE'] = env == 'production'
     app.config['SESSION_COOKIE_HTTPONLY'] = True
     app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-    # Oturum ömrü (2026-08-05: 8 saat → 30 gün). Oturum sunucuda DEĞİL, Flask'ın
-    # imzalı çerezinde tutulur — ne agency'de ne SSO'da oturum tablosu var. Bunun
-    # iki sonucu var:
-    #   1) Aynı kullanıcı istediği kadar cihazdan (mobil + masaüstü) AYNI ANDA
-    #      bağlı kalabilir; bir cihazdaki giriş diğerini düşürmez. Bunu bozan bir
-    #      "tek oturum" kuralı hiç olmadı.
-    #   2) Tek sınır bu süreydi: 8 saat, gece boyunca doluyordu ve kullanıcı her
-    #      sabah yeniden giriş yapmak zorunda kalıyordu (giriş kayıtları: 3 günde
-    #      12 giriş, çoğu 07:00–09:00 arası).
-    # Pencere KAYAR: `SESSION_REFRESH_EACH_REQUEST` (varsayılan True) sayesinde her
-    # istekte çerez yeniden imzalanır → süre ancak 30 gün HAREKETSİZLİKTE dolar.
+    # Session lifetime (2026-08-05: 8 hours → 30 days). The session is kept NOT on
+    # the server but in Flask's signed cookie — neither agency nor SSO has a session
+    # table. This has two consequences:
+    #   1) The same user can stay logged in from as many devices (mobile + desktop)
+    #      SIMULTANEOUSLY as they want; logging in on one device doesn't kick out
+    #      another. There was never a "single session" rule that this would break.
+    #   2) The only limit was this duration: 8 hours would fill up overnight and the
+    #      user had to log in again every morning (login records: 12 logins over
+    #      3 days, most between 07:00–09:00).
+    # The window SLIDES: thanks to `SESSION_REFRESH_EACH_REQUEST` (default True) the
+    # cookie gets re-signed on every request → it only expires after 30 days of INACTIVITY.
     app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
-    app.config['SESSION_REFRESH_EACH_REQUEST'] = True   # varsayılan; kayan pencere açık kalsın
-    # Yükleme üst sınırı: bu SADECE taşıma katmanının (Flask/werkzeug) ham gövde
-    # tavanı — ürün limitleri BUNUN ALTINDA, her uç kendi sınırını VIEW İÇİNDE
-    # zorlar (sharing.MAX_UPLOAD_BYTES, depot.MAX_FILE_BYTES: 500 MB/dosya;
-    # design_files.MAX_FILE_BYTES: 1 GB/dosya — design_files nginx'in izin
-    # verdiği en büyük ürünü kullandığı için tavan ONA göre belirlenir, diğer
-    # uçlar zaten kendi 500 MB'lık sınırlarını daha erken (küçük gövdede) uygular.
-    # Tavan design_files'ın 1 GB'lık dosyasını (+ multipart/form-data payı) ham
-    # 413'e TAKILMADAN view'a ulaştıracak kadar yüksek olmalı: nginx zaten
-    # `client_max_body_size 1100m` ile bunu geçiriyor, Flask tarafı da aynı
-    # sınırda olmazsa nginx'in geçirdiği istek burada ölü kod haline gelen bir
-    # view-içi kontrole hiç ulaşmadan reddedilirdi (yaşanmış hata: tavan 512 MB
-    # iken design_files'ın 1 GB kontrolü hiçbir zaman çalışmıyordu).
+    app.config['SESSION_REFRESH_EACH_REQUEST'] = True   # default; keep the sliding window on
+    # Upload ceiling: this is ONLY the raw body cap of the transport layer
+    # (Flask/werkzeug) — product limits are BELOW this, each endpoint enforces its
+    # own limit INSIDE THE VIEW (sharing.MAX_UPLOAD_BYTES, depot.MAX_FILE_BYTES:
+    # 500 MB/file; design_files.MAX_FILE_BYTES: 1 GB/file — since design_files uses
+    # the largest product nginx allows, the ceiling is set based on IT; the other
+    # endpoints already apply their own 500 MB limit earlier (at a smaller body size).
+    # The ceiling must be high enough to let design_files' 1 GB file (+ multipart/
+    # form-data overhead) reach the view WITHOUT hitting a raw 413: nginx already
+    # passes this through with `client_max_body_size 1100m`, and if the Flask side
+    # isn't at the same limit, a request nginx passed through would be rejected here
+    # before ever reaching the in-view check, turning it into dead code (bug that
+    # actually happened: while the ceiling was 512 MB, design_files' 1 GB check
+    # never ran).
     app.config['MAX_CONTENT_LENGTH'] = 1100 * 1024 * 1024
 
     @app.errorhandler(413)
     def _too_large(_e):
-        # Tek bir "üst sınır X MB" mesajı YANLIŞ olurdu — uçların ürün limitleri
-        # farklı (500 MB / 1 GB) ve zaten kendi 413'lerini kendi mesajlarıyla
-        # dönüyorlar (view içinde). Bu handler yalnız o view-içi kontrollerin
-        # HİÇ ulaşamadığı, taşıma katmanının kendisinin reddettiği (1100 MB üstü)
-        # ham gövdeler için devreye girer.
-        return jsonify(error='Dosya çok büyük — yükleme boyut sınırını aşıyor.'), 413
+        # A single "ceiling is X MB" message would be WRONG — endpoints have
+        # different product limits (500 MB / 1 GB) and already return their own
+        # 413s with their own messages (inside the view). This handler only kicks
+        # in for raw bodies (over 1100 MB) that the transport layer itself rejects,
+        # where those in-view checks are NEVER reached.
+        return jsonify(error='File too large — exceeds the upload size limit.'), 413
 
     @app.after_request
     def _guvenlik_basliklari(resp):
-        # Tüm yanıtlara (health/api/panel SPA/public review-özel gün sayfaları) uygulanır.
-        # Strict-Transport-Security nginx katmanında eklenir (prod'da TLS orada sonlanır).
+        # Applied to all responses (health/api/panel SPA/public review-special day pages).
+        # Strict-Transport-Security is added at the nginx layer (TLS terminates there in prod).
         resp.headers['X-Content-Type-Options'] = 'nosniff'
         resp.headers['X-Frame-Options'] = 'SAMEORIGIN'
         resp.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
-        # `microphone=(self)`: sesli not sayfası (2026-08-09) tarayıcıda kayıt
-        # yapıyor. `microphone=()` "HİÇBİR origin kullanamaz" demek ve
-        # `getUserMedia`'yı kullanıcıya izin sorulmadan ÖNCE reddediyordu
+        # `microphone=(self)`: the voice note page (2026-08-09) records in the
+        # browser. `microphone=()` means "NO origin may use it" and rejected
+        # `getUserMedia` BEFORE the user was even asked for permission
         # ("Permissions policy violation: microphone is not allowed in this
-        # document" — canlıda hem masaüstünde hem telefonda yaşandı).
-        # `(self)` yalnız KENDİ origin'imize izin verir; iframe'e gömülen üçüncü
-        # taraf yine mikrofona erişemez. camera/geolocation kapalı kalır —
-        # panelde onları kullanan hiçbir yer yok.
+        # document" — happened in production on both desktop and phone).
+        # `(self)` only allows OUR OWN origin; a third party embedded in an iframe
+        # still can't access the microphone. camera/geolocation stay off — nothing
+        # in the panel uses them.
         resp.headers['Permissions-Policy'] = (
             'camera=(), microphone=(self), geolocation=()')
         resp.headers['Content-Security-Policy-Report-Only'] = _CSP_POLICY
@@ -127,8 +127,8 @@ def create_app():
     db.init_app(app)
     app.config['AUTH_MODE'] = AUTH_MODE
     if AUTH_MODE == 'oidc':
-        # Discovery (issuer'dan authorization/token/jwks uçlarını çeker) yalnız
-        # üç env de elle verilmemişse ağa çıkar — bkz. sso_client.OIDCClient.
+        # Discovery (fetches authorization/token/jwks endpoints from the issuer)
+        # only hits the network if all three envs aren't set manually — see sso_client.OIDCClient.
         app.extensions['oidc'] = OIDCClient(
             issuer=os.environ['OIDC_ISSUER'],
             client_id=os.environ['OIDC_CLIENT_ID'],
@@ -160,37 +160,37 @@ def create_app():
     app.register_blueprint(planning_bp, url_prefix='/api/planning')
     from depot import bp as depot_bp
     app.register_blueprint(depot_bp, url_prefix='/api/depot')
-    # Tasarım çalışma dosyaları (2026-08-07) — müşteri bazlı, sürümlü kaynak
-    # dosya alanı. Prefix kendi altında: uçların tamamı `/api/design-files/*`.
+    # Design work files (2026-08-07) — a per-client, versioned source file area.
+    # Has its own prefix: all endpoints live under `/api/design-files/*`.
     from design_files import bp as design_files_bp
     app.register_blueprint(design_files_bp, url_prefix='/api/design-files')
-    # Sesli not (2026-08-09) — ses → transkript → yapılandırılmış not.
+    # Voice note (2026-08-09) — audio → transcript → structured note.
     from voice_notes import bp as voice_notes_bp
     app.register_blueprint(voice_notes_bp, url_prefix='/api/voice-notes')
-    # Font havuzu (2026-08-05). Prefix `/api`: uçlar hem `/fonts` hem
-    # `/clients/<id>/fonts` altında yaşıyor (ikincisi müşteri sayfasının kaynağı).
+    # Font pool (2026-08-05). Prefix `/api`: endpoints live under both `/fonts`
+    # and `/clients/<id>/fonts` (the latter is the source for the client page).
     from fonts import bp as fonts_bp
     app.register_blueprint(fonts_bp, url_prefix='/api')
     from review import bp as review_bp
-    app.register_blueprint(review_bp)  # public /review/<token>, prefix yok
-    # Aylık rapor (2026-08-07): API management-only, public sayfa token'lı.
+    app.register_blueprint(review_bp)  # public /review/<token>, no prefix
+    # Monthly report (2026-08-07): API is management-only, public page is token-based.
     from reports import bp as reports_bp, public_bp as report_public_bp
     app.register_blueprint(reports_bp, url_prefix='/api/reports')
     app.register_blueprint(report_public_bp)   # public /rapor/<token>
     from client_approval import bp as client_approval_bp
-    app.register_blueprint(client_approval_bp)  # public /onay/<token> (elle seçilmiş içerikler)
+    app.register_blueprint(client_approval_bp)  # public /onay/<token> (manually selected content)
     from special_days import bp as special_days_bp
     app.register_blueprint(special_days_bp)  # public /special-days/<token>
 
     from public_media import bp as public_media_bp
-    app.register_blueprint(public_media_bp)  # public /m/<file_id> (kalıcı medya linki)
+    app.register_blueprint(public_media_bp)  # public /m/<file_id> (permanent media link)
 
     from imagegen_api import bp as imagegen_bp
-    app.register_blueprint(imagegen_bp, url_prefix='/api/imagegen')  # Codex görsel üretimi
+    app.register_blueprint(imagegen_bp, url_prefix='/api/imagegen')  # Codex image generation
 
     @app.get('/img/<name>')
     def img_bucket_public(name):
-        # Public resim servisi (harici gömme). Auth yok; sadece bucket'taki düz dosya.
+        # Public image serving (external embedding). No auth; just a plain file from the bucket.
         import img_bucket
         if not img_bucket.ext_ok(name) or name != os.path.basename(name):
             return ('', 404)
@@ -205,8 +205,8 @@ def create_app():
         except Exception:
             return jsonify(status='error'), 500
 
-    # Panel SPA (Vite build → panel/dist). Statik dosya varsa onu, yoksa
-    # index.html (client-side routing fallback).
+    # Panel SPA (Vite build → panel/dist). Serves the static file if it exists,
+    # otherwise index.html (client-side routing fallback).
     panel_dist = os.path.join(app.root_path, 'panel', 'dist')
 
     @app.route('/panel/')
@@ -215,30 +215,30 @@ def create_app():
         target = os.path.join(panel_dist, subpath)
         if subpath and os.path.isfile(target):
             return send_from_directory(panel_dist, subpath)
-        # Eski build'in hash'li asset'i: SPA fallback index.html dönerse tarayıcı
-        # MIME hatası verir (CSS yerine text/html). Net 404 → istemci yeniler.
+        # A hashed asset from an old build: if the SPA fallback returns index.html
+        # the browser throws a MIME error (text/html instead of CSS). Clean 404 → client refreshes.
         if subpath.startswith('assets/'):
             return ('', 404)
         index = os.path.join(panel_dist, 'index.html')
         if not os.path.isfile(index):
-            return ('Panel henüz derlenmedi (panel/ içinde `npm run build`).', 503)
+            return ('Panel has not been built yet (run `npm run build` inside panel/).', 503)
         return send_from_directory(panel_dist, 'index.html')
 
     @app.get('/')
     def root():
         return redirect('/panel/')
 
-    import models  # noqa: F401 — tablolar create_all'dan önce kayıtlı olsun
-    import models_auth  # noqa: F401 — AUTH_MODE=local kullanıcı tablosu (oidc modunda boş kalır)
+    import models  # noqa: F401 — so tables are registered before create_all
+    import models_auth  # noqa: F401 — AUTH_MODE=local user table (stays empty in oidc mode)
     import models_sharing  # noqa: F401
-    import models_mail  # noqa: F401 — mail modülü tabloları
-    import models_planning  # noqa: F401 — planlama panosu tabloları
-    import models_fonts  # noqa: F401 — font havuzu tabloları
-    import models_reports  # noqa: F401 — aylık rapor tablosu
-    import models_reference  # noqa: F401 — müşteri örnek hesapları
-    import models_design_files  # noqa: F401 — tasarım çalışma dosyaları tabloları
-    import models_voice_notes  # noqa: F401 — sesli not tablosu
-    import models_imagegen  # noqa: F401 — Codex görsel üretim işleri tablosu
+    import models_mail  # noqa: F401 — mail module tables
+    import models_planning  # noqa: F401 — planning board tables
+    import models_fonts  # noqa: F401 — font pool tables
+    import models_reports  # noqa: F401 — monthly report table
+    import models_reference  # noqa: F401 — client reference accounts
+    import models_design_files  # noqa: F401 — design work file tables
+    import models_voice_notes  # noqa: F401 — voice note table
+    import models_imagegen  # noqa: F401 — Codex image generation jobs table
 
     with app.app_context():
         db.create_all()

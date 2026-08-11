@@ -1,6 +1,6 @@
-"""auth.py — AUTH_MODE=local uçları (/auth/local-login, /auth/change-password,
-/auth/logout) + /auth/login yönlendirme hedefi. Global test varsayılanı zaten
-AUTH_MODE=local (bkz. conftest.py)."""
+"""auth.py — AUTH_MODE=local endpoints (/auth/local-login, /auth/change-password,
+/auth/logout) + the /auth/login redirect target. The global test default is
+already AUTH_MODE=local (see conftest.py)."""
 import local_admin
 from extensions import db
 from models_auth import LocalUser
@@ -55,7 +55,7 @@ def test_change_password_dogru_akis(app, client):
     r = client.post('/auth/change-password',
                     json={'current_password': 'ilk-parola', 'new_password': 'yeni-parola-123'})
     assert r.status_code == 200
-    # eski parolayla artık giriş yapılamaz, yenisiyle yapılabilir
+    # can no longer log in with the old password, can with the new one
     client.get('/auth/logout')
     assert client.post('/auth/local-login',
                        json={'email': 'giris@test.com', 'password': 'ilk-parola'}).status_code == 401
@@ -87,7 +87,7 @@ def test_change_password_kisa_parola_400(app, client):
 
 
 def test_callback_local_modda_404(client):
-    """AUTH_MODE=local iken /auth/callback (OIDC'ye özgü) yok sayılır."""
+    """When AUTH_MODE=local, /auth/callback (OIDC-specific) is ignored."""
     assert client.get('/auth/callback?code=x').status_code == 404
 
 

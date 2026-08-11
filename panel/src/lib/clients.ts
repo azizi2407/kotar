@@ -1,15 +1,18 @@
-// Müşteriler için TanStack Query hook'ları + sabitler. API sözleşmesi api.py.
+// TanStack Query hooks + constants for clients. API contract is api.py.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiDelete, apiGet, apiJson } from "./api"
 import type { ClientDetail, ClientListItem, User } from "./types"
 
-// Sabit ekip rol slotları (eski team_assignments anahtarları).
+// Fixed team role slots (legacy team_assignments keys). `label` here is the
+// default (TR) text — the UI uses the t()-translated version (see
+// dictionaries/clients.ts components.clients.roleSlots.*); the raw `label` is
+// only used where t() isn't available (e.g. a type default).
 export const ROLE_SLOTS = [
-  { key: "designer", label: "Tasarımcı" },
-  { key: "content_creator", label: "İçerik Üretici" },
-  { key: "videographer_shoot", label: "Videografçı (Çekim)" },
-  { key: "videographer_edit", label: "Videografçı (Kurgu)" },
+  { key: "designer", label: "Tasarımcı", labelKey: "components.clients.roleSlots.designer" },
+  { key: "content_creator", label: "İçerik Üretici", labelKey: "components.clients.roleSlots.contentCreator" },
+  { key: "videographer_shoot", label: "Videografçı (Çekim)", labelKey: "components.clients.roleSlots.videographerShoot" },
+  { key: "videographer_edit", label: "Videografçı (Kurgu)", labelKey: "components.clients.roleSlots.videographerEdit" },
 ] as const
 
 export interface ClientForm {
@@ -49,8 +52,8 @@ export function useUsers() {
   })
 }
 
-// Toplu tasarımcı ataması — yalnız 'designer' slot'una dokunur (diğer ekip slotları
-// korunur). user_id null → atama kaldırılır. Sözleşme: api.py /clients/assign-designer.
+// Bulk designer assignment — only touches the 'designer' slot (other team slots
+// are preserved). user_id null → assignment removed. Contract: api.py /clients/assign-designer.
 export function useAssignDesigner() {
   const qc = useQueryClient()
   return useMutation<{ updated: number }, Error, { client_id: number; user_id: string | null }[]>({
@@ -98,11 +101,12 @@ export function useRestoreClient() {
   })
 }
 
-// --- Faz 3 / Option A: DÜZENLENEBİLİR Ayar (vault emekli — panel DB tek otorite) ---
-// Sözleşme: api.py (/clients/:id/{brief-enabled,vault-ayar,catch-up,onboarding-prompt}).
+// --- Phase 3 / Option A: EDITABLE Ayar (vault retired — panel DB is the sole authority) ---
+// Contract: api.py (/clients/:id/{brief-enabled,vault-ayar,catch-up,onboarding-prompt}).
 
-// Ayar şeması — `brand_profile` (JSON) + `caption_settings` (ayrı kolon) düz görünümü.
-// GET boş/eksik alanları makul default ('' / [] / {}) ile döner; PUT kısmi merge eder.
+// Ayar schema — a flat view of `brand_profile` (JSON) + `caption_settings`
+// (separate column). GET returns sensible defaults ('' / [] / {}) for empty/missing
+// fields; PUT does a partial merge.
 export interface VaultAyar {
   brand_voice: string
   target_audience: string
@@ -117,7 +121,7 @@ export interface VaultAyar {
   ideas_per_week: number
   caption_settings: Record<string, unknown>
 }
-// Backend her zaman 200 + {ayar} döner; brand_profile boşsa ek `onboarding:true` bayrağı.
+// Backend always returns 200 + {ayar}; an extra `onboarding:true` flag if brand_profile is empty.
 export type VaultAyarResult = { ayar: VaultAyar; onboarding: boolean }
 
 export function useVaultAyar(clientId: number | null) {
@@ -132,8 +136,8 @@ export function useVaultAyar(clientId: number | null) {
   })
 }
 
-// Ayar kaydet (PUT, kısmi merge) — management + CSRF. Ayar + client cache'ini tazeler
-// (brief/caption üretimi bu alanları okur; kayıt anında etkili).
+// Save Ayar (PUT, partial merge) — management + CSRF. Refreshes the Ayar + client
+// cache (brief/caption generation reads these fields; effective immediately on save).
 export function usePutVaultAyar(clientId: number) {
   const qc = useQueryClient()
   return useMutation({
@@ -146,7 +150,7 @@ export function usePutVaultAyar(clientId: number) {
   })
 }
 
-// Onboarding başlangıç prompt'u (yalnız Ayar yokken çekilir) — düz metin.
+// Onboarding starter prompt (only fetched when Ayar doesn't exist yet) — plain text.
 export function useOnboardingPrompt(clientId: number | null, enabled: boolean) {
   return useQuery<string>({
     queryKey: ["onboarding-prompt", clientId],
@@ -155,7 +159,7 @@ export function useOnboardingPrompt(clientId: number | null, enabled: boolean) {
   })
 }
 
-// Brief aç/kapa toggle → Client.brief_enabled; client + liste cache'ini tazeler.
+// Brief on/off toggle → Client.brief_enabled; refreshes the client + list cache.
 export function useSetBriefEnabled(clientId: number) {
   const qc = useQueryClient()
   return useMutation({
@@ -165,7 +169,7 @@ export function useSetBriefEnabled(clientId: number) {
   })
 }
 
-// Catch-up: eksik haftaların brief job'larını enqueue eder → {enqueued, weeks}.
+// Catch-up: enqueues brief jobs for missing weeks → {enqueued, weeks}.
 export function useCatchUp(clientId: number) {
   return useMutation<{ enqueued: number; weeks: string[] }, Error, void>({
     mutationFn: () => apiJson(`/clients/${clientId}/catch-up`, {}),

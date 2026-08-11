@@ -1,4 +1,4 @@
-"""/api/depot — Videograf Deposu: yetki, kota, tür/ad kısıtları, ortaklık, silme."""
+"""/api/depot — Videographer Depot: authorization, quota, type/name restrictions, shared ownership, deletion."""
 import io
 import os
 
@@ -19,11 +19,11 @@ def content_root(monkeypatch):
 
 @pytest.fixture
 def fake_drive(monkeypatch):
-    """Drive katmanını ağa çıkmadan taklit et; çağrıları kaydet."""
+    """Mock the Drive layer without going over the network; record the calls."""
     calls = {'upload': [], 'folder': [], 'grant': [], 'trash': []}
 
     def fake_upload(folder_id, filename, data, mime):
-        # Akıştan mı gidiyor? (bytes geçilirse sözleşme bozulmuş olur)
+        # Is it going as a stream? (if bytes are passed, the contract is broken)
         calls['upload'].append({'folder_id': folder_id, 'filename': filename, 'mime': mime,
                                 'streamed': hasattr(data, 'read')})
         payload = data.read() if hasattr(data, 'read') else data
@@ -57,7 +57,7 @@ def _files(client):
 
 
 def _seed(size, name='eski.mp4'):
-    """Kota testleri için doğrudan satır ekle (Drive'a gitmeden)."""
+    """Insert a row directly for quota tests (without going to Drive)."""
     from models_sharing import DepotFile
     row = DepotFile(file_id=f'seed{name}', file_name=name, file_size=size,
                     mime_type='video/mp4', uploaded_by='1')
@@ -66,7 +66,7 @@ def _seed(size, name='eski.mp4'):
     return row
 
 
-# --- yetki / CSRF --------------------------------------------------------
+# --- authorization / CSRF ---------------------------------------------------
 
 def test_anonim_401(client):
     assert client.get(f'{BASE}/files').status_code == 401
@@ -105,7 +105,7 @@ def test_csrf_yoksa_403(client, fake_drive):
     assert client.delete(f'{BASE}/files/{row.id}').status_code == 403
 
 
-# --- yükleme -------------------------------------------------------------
+# --- upload -------------------------------------------------------------------
 
 def test_dosyasiz_400(client, fake_drive):
     login_as(client, VIDEOGRAPHER)
@@ -132,21 +132,21 @@ def test_yukleme_basarili(client, fake_drive):
     assert body['file']['note'] == 'ham çekim notu'
     assert body['file']['uploaded_by'] == VIDEOGRAPHER['sub']
     assert body['quota']['used'] == 10
-    # klasör içerik kökü altında ve doğru adla açıldı
+    # folder was opened under the content root with the correct name
     assert fake_drive['folder'] == [{'parent': 'CONTENT_ROOT', 'name': 'Videograf Deposu'}]
-    # link herkeste açılsın diye izin verildi
+    # permission granted so the link opens for everyone
     assert fake_drive['grant'] == ['fid1']
 
 
 def test_upload_akistan_gider(client, fake_drive):
-    """Sözleşme muhafızı: dosya RAM'e alınıp bytes olarak geçilmemeli."""
+    """Contract guard: the file must not be loaded into RAM and passed as bytes."""
     login_as(client, VIDEOGRAPHER)
     _upload(client)
     assert fake_drive['upload'][0]['streamed'] is True
 
 
 def test_media_store_kullanilmaz(client, fake_drive):
-    """Depo dosyası 21 günlük lokal kopyaya YAZILMAZ (Drive kanonik)."""
+    """Depot file is NOT written to the 21-day local copy (Drive is canonical)."""
     login_as(client, VIDEOGRAPHER)
     _upload(client)
     originals = os.path.join(os.environ['MEDIA_STORE_DIR'], 'originals')
@@ -170,7 +170,7 @@ def test_kota_asilirsa_409_ve_driveya_gidilmez(client, fake_drive, monkeypatch):
     r = _upload(client, 'yeni.mp4', b'0123456789')
     assert r.status_code == 409
     body = r.get_json()
-    assert 'Depo dolu' in body['error'] and 'quota' in body
+    assert 'Storage is full' in body['error'] and 'quota' in body
     assert fake_drive['upload'] == []
 
 
@@ -188,7 +188,7 @@ def test_drive_hatasi_502_ve_satir_yazilmaz(client, fake_drive, monkeypatch):
 
 
 def test_dosya_limiti_sharing_ile_ayni(client):
-    """Drift muhafızı — iki modülün ürün limiti ayrışmasın."""
+    """Drift guard — the two modules' product limit must not diverge."""
     import depot
     import sharing
     assert depot.MAX_FILE_BYTES == sharing.MAX_UPLOAD_BYTES
@@ -198,12 +198,12 @@ def test_depot_files_tablosu_create_all_ile_gelir(client):
     assert 'depot_files' in set(db.metadata.tables)
 
 
-# --- tür / ad ------------------------------------------------------------
+# --- type / name ---------------------------------------------------------------
 
 def test_yasak_uzanti_400_ve_driveya_gidilmez(client, fake_drive):
     login_as(client, VIDEOGRAPHER)
     r = _upload(client, 'virus.exe')
-    assert r.status_code == 400 and 'çalıştırılabilir' in r.get_json()['error']
+    assert r.status_code == 400 and 'executable' in r.get_json()['error']
     assert fake_drive['upload'] == []
 
 
@@ -226,7 +226,7 @@ def test_yol_ayirici_ve_kontrol_karakteri_temizlenir(client, fake_drive):
 
 
 def test_turkce_ad_aynen_korunur(client, fake_drive):
-    """secure_filename eklenirse bu test kırılır — repo Türkçe adları koruyor."""
+    """This test breaks if secure_filename gets added — the repo preserves Turkish names."""
     login_as(client, VIDEOGRAPHER)
     _upload(client, 'çekim özetİ ğüş.pdf')
     assert fake_drive['upload'][0]['filename'] == 'çekim özetİ ğüş.pdf'
@@ -239,7 +239,7 @@ def test_kesme_isaretli_ad_kabul(client, fake_drive):
     assert fake_drive['upload'][0]['filename'] == "proje sahibi'in dosyası.pdf"
 
 
-# --- ortaklık / liste ----------------------------------------------------
+# --- shared ownership / list ----------------------------------------------------
 
 def test_depo_ortak_baska_videograf_gorur(client, fake_drive):
     login_as(client, VIDEOGRAPHER)
@@ -251,7 +251,7 @@ def test_depo_ortak_baska_videograf_gorur(client, fake_drive):
 def test_herkes_her_dosyayi_silebilir(client, fake_drive):
     login_as(client, VIDEOGRAPHER)
     row_id = _upload(client, 'benim.pdf').get_json()['file']['id']
-    login_as(client, VG2)                     # başkasının dosyası
+    login_as(client, VG2)                     # someone else's file
     assert client.delete(f'{BASE}/files/{row_id}',
                          headers=csrf_headers(client)).status_code == 200
 
@@ -283,7 +283,7 @@ def test_uploader_name_cozulur(client, fake_drive):
 
 
 def test_liste_sorgu_sayisi_dosya_sayisindan_bagimsiz(client, fake_drive):
-    """N+1 muhafızı — uploader_name lazy erişimle çözülürse kırılır."""
+    """N+1 guard — breaks if uploader_name gets resolved via lazy access."""
     from sqlalchemy import event
 
     def count_queries(n):
@@ -308,7 +308,7 @@ def test_liste_sorgu_sayisi_dosya_sayisindan_bagimsiz(client, fake_drive):
     assert count_queries(1) == count_queries(5)
 
 
-# --- kota / silme --------------------------------------------------------
+# --- quota / deletion ---------------------------------------------------------
 
 def test_silinen_dosya_kotadan_dusulur(client, fake_drive, monkeypatch):
     import depot
@@ -316,9 +316,9 @@ def test_silinen_dosya_kotadan_dusulur(client, fake_drive, monkeypatch):
     login_as(client, VIDEOGRAPHER)
     row_id = _upload(client, 'a.pdf', b'0123456789').get_json()['file']['id']
     assert _upload(client, 'b.pdf', b'0123456789').status_code == 201
-    assert _upload(client, 'c.pdf', b'0123456789').status_code == 409     # dolu
+    assert _upload(client, 'c.pdf', b'0123456789').status_code == 409     # full
     client.delete(f'{BASE}/files/{row_id}', headers=csrf_headers(client))
-    assert _upload(client, 'c.pdf', b'0123456789').status_code == 201     # yer açıldı
+    assert _upload(client, 'c.pdf', b'0123456789').status_code == 201     # room freed up
 
 
 def test_kota_yalniz_silinmemisleri_toplar(client, fake_drive):

@@ -1,12 +1,12 @@
-"""Haftalık içerik brief'i için saf markdown ayrıştırıcı (yan etkisiz).
+"""Pure markdown parser for the weekly content brief (no side effects).
 
-`ai_worker.py`'nin brief handler'ı AI'dan markdown üretir, sonra kendi çıktısını
-BU modülle ayrıştırıp yapısal alanlara (title/intro/ideas/week_notes) böler —
-üretim ile ayrıştırma aynı sözleşmeyi paylaşsın diye (bkz. `ai_worker.brief_handler`).
+`ai_worker.py`'s brief handler generates markdown from the AI, then parses its own
+output with THIS module into structured fields (title/intro/ideas/week_notes) — so
+generation and parsing share the same contract (see `ai_worker.brief_handler`).
 
-Format LENIENT: eski/yeni madde başlıkları ikisi de idare edilir. Anahtarlar
-İngilizceye zorla çevrilmez (kayıpsız); madde başlığı küçük harfe indirgenip
-aynen saklanır, ham blok metni ayrıca `raw` altında tutulur.
+The format is LENIENT: both old and new item headings are handled. Keys aren't
+force-translated to English (lossless); the item heading is lowercased and kept
+as-is, the raw block text is also kept under `raw`.
 """
 import datetime as dt
 import re
@@ -15,21 +15,21 @@ import yaml
 
 
 def _json_safe(obj):
-    """YAML'ın ürettiği `date`/`datetime` nesnelerini JSONB-yazılabilir ISO
-    string'e çevirir (recursive). psycopg JSONB dumper `date`'i serialize edemez."""
+    """Converts `date`/`datetime` objects produced by YAML into a JSONB-writable ISO
+    string (recursive). The psycopg JSONB dumper can't serialize `date`."""
     if isinstance(obj, dict):
         return {k: _json_safe(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_json_safe(v) for v in obj]
-    if isinstance(obj, (dt.date, dt.datetime)):   # datetime, date'in alt sınıfı
+    if isinstance(obj, (dt.date, dt.datetime)):   # datetime is a subclass of date
         return obj.isoformat()
     return obj
 
 
 def parse_frontmatter(text):
-    """`--- ... ---` YAML bloğunu (dict) + kalan gövdeyi döner.
+    """Returns the `--- ... ---` YAML block (dict) + the remaining body.
 
-    Frontmatter yoksa/bozuksa ({}, text) döner (patlamaz)."""
+    If there's no frontmatter/it's broken, returns ({}, text) (doesn't blow up)."""
     m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.S)
     if not m:
         return {}, text
@@ -43,10 +43,11 @@ def parse_frontmatter(text):
 
 
 def _sections(body):
-    """Gövdeyi `##`/`###` başlıklarına böler.
+    """Splits the body on `##`/`###` headings.
 
-    Döner: (pre, [(başlık_satırı, bölüm_gövdesi), ...]). `pre` = ilk `##`ten
-    önceki kısım (title/intro burada yaşar). Level-1 `#` başlık BÖLMEZ (title)."""
+    Returns: (pre, [(heading_line, section_body), ...]). `pre` = the part before
+    the first `##` (title/intro live here). A level-1 `#` heading does NOT split
+    (title)."""
     parts = re.split(r"(?m)^(#{2,3}\s+.*)$", body)
     pre = parts[0]
     secs = [(parts[i].strip(), parts[i + 1]) for i in range(1, len(parts) - 1, 2)]
@@ -54,7 +55,7 @@ def _sections(body):
 
 
 def _first_title(body):
-    """İlk level-1 `# ...` başlığı (title). Yoksa ''."""
+    """The first level-1 `# ...` heading (title). '' if none."""
     for line in body.splitlines():
         if line.startswith("# "):
             return line[2:].strip()
@@ -62,7 +63,7 @@ def _first_title(body):
 
 
 def _first_intro(body):
-    """İlk `>` blockquote bloğu (intro). Ardışık `>` satırları birleştirilir."""
+    """The first `>` blockquote block (intro). Consecutive `>` lines are merged."""
     out = []
     started = False
     for line in body.splitlines():
@@ -76,17 +77,18 @@ def _first_intro(body):
 
 
 def _quoted(text):
-    """İlk tırnak (düz veya kıvrık) içi metni döner; yoksa ''."""
+    """Returns the text inside the first quote (straight or curly); '' if none."""
     m = re.search(r'[""“”](.+?)[""“”]', text)
     return m.group(1).strip() if m else ""
 
 
 def _parse_kv_bullets(text):
-    """`- **anahtar**: değer` madde listesini dict'e ayrıştırır (LENIENT).
+    """Parses a `- **key**: value` bullet list into a dict (LENIENT).
 
-    Alt-maddeler (girintili `- ...`) değer listesi olur. Anahtar kaynaktaki HÂLİYLE
-    (case dönüşümü YOK) saklanır → eski+yeni format kayıpsız; ayrıca Türkçe `İ`.lower()
-    tuzağından (birleşik nokta) kaçınılır. Tüketici gerekirse case-insensitive eşler."""
+    Sub-bullets (indented `- ...`) become a list of values. The key is kept AS
+    FOUND in the source (NO case conversion) → old+new format stays lossless; this
+    also avoids the Turkish `İ`.lower() trap (combining dot). The consumer can
+    match case-insensitively if needed."""
     lines = text.splitlines()
     result = {}
     i = 0
@@ -111,7 +113,7 @@ def _parse_kv_bullets(text):
 
 
 def parse_brief(text, source_path):
-    """Bir brief markdown'ını yapısal dict'e ayrıştırır (upsert'e hazır)."""
+    """Parses a brief markdown into a structural dict (ready for upsert)."""
     fm, body = parse_frontmatter(text)
     _, secs = _sections(body)
 

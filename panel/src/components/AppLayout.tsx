@@ -22,14 +22,14 @@ import {
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { ChangePasswordDialog } from "@/components/ChangePasswordDialog"
 
-// Okunmamış sayısı ve liste kaç saniyede bir tazelenir (basit polling — YAGNI).
+// How often (in seconds) the unread count and list refresh (simple polling — YAGNI).
 const NOTIFICATION_POLL_MS = 30_000
 
-// roles: undefined = herkes; aksi halde yalnız listedeki roller (management her zaman görür).
+// roles: undefined = everyone; otherwise only the listed roles (management always sees it).
 const nav = [
-  // "/" rol bazlı yönlendirici (App.tsx AnaSayfa): yönetim → /sharing, diğerleri
-  // → /dashboard. Menüde bu yüzden gerçek hedef yazılı, yoksa yöneticinin "Panel"e
-  // tıklaması onu tekrar Sharing Board'a atardı.
+  // "/" is a role-based redirector (App.tsx AnaSayfa): management → /sharing, others
+  // → /dashboard. That's why the actual target is written in the menu — otherwise a
+  // manager clicking "Dashboard" would get sent back to the Sharing Board.
   { to: "/dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard, end: true },
   { to: "/clients", labelKey: "nav.clients", icon: Users, end: false, roles: ["management"] },
   { to: "/sharing", labelKey: "nav.sharing", icon: LayoutGrid, end: false, roles: ["management"] },
@@ -37,15 +37,15 @@ const nav = [
   { to: "/designer-assignments", labelKey: "nav.designerAssignments", icon: UserCog, end: false, roles: ["management", "designer"] },
   { to: "/brief", labelKey: "nav.brief", icon: FileText, end: false,
     roles: ["management", "designer", "content_creator", "videographer"] },
-  // Marka rehberi salt-okunur; müşteri detayının ticari/iletişim yüzeyi olmadan.
+  // Brand guide is read-only; the commercial/contact surface of the client detail page is excluded.
   { to: "/marka-rehberi", labelKey: "nav.brandGuide", icon: BookOpen, end: false,
     roles: ["management", "designer", "content_creator", "videographer"] },
-  // Font havuzu (2026-08-05): dört üretim rolü de görür/indirir; yükleme ve
-  // silme yalnız yönetim + tasarımcıda (kapı backend'de, bkz. fonts.py).
+  // Font pool (2026-08-05): visible/downloadable by all four production roles;
+  // upload and delete are management + designer only (gated on the backend, see fonts.py).
   { to: "/fontlar", labelKey: "nav.fonts", icon: Type, end: false,
     roles: ["management", "designer", "content_creator", "videographer"] },
-  // Aylık rapor (2026-08-07): Meta CSV'lerinden müşteri raporu. Ticari veri
-  // (harcama, erişim) taşıdığı için YALNIZ yönetim.
+  // Monthly report (2026-08-07): client report from Meta CSVs. Carries commercial data
+  // (spend, reach), so management ONLY.
   { to: "/aylik-rapor", labelKey: "nav.monthlyReport", icon: FileBarChart, end: false, roles: ["management"] },
   { to: "/sesli-not", labelKey: "nav.voiceNote", icon: Mic, end: false, roles: ["management"] },
   { to: "/videographer", labelKey: "nav.shootPlan", icon: Clapperboard, end: true, roles: ["management", "videographer"] },
@@ -67,14 +67,14 @@ const nav = [
   { to: "/kullanicilar", labelKey: "nav.users", icon: ShieldCheck, end: false, superadmin: true },
 ]
 
-// Sidebar grupları (2026-08-07). Menü 24 öğeye çıkınca düz liste taranamaz hale
-// geldi. Gruplar `nav`'ı KOPYALAMAZ, yalnız yol listesiyle ona atıf yapar: `nav`
-// hâlâ tek gerçek kaynak (rol/superadmin kapıları oradan türetiliyor), buradaki
-// tablo sadece SIRA ve BAŞLIK bilgisi taşır. Yeni bir sayfa eklenip buraya
-// yazılmazsa kaybolmaz — "Diğer" grubuna düşer (aşağıdaki artık-toplayıcı).
-// `baslik` KARARLI bir iç anahtardır (localStorage + aktif-grup eşleşmesinde
-// kullanılır) — dil değişince değişmez. Görünen metin `titleKey` üzerinden
-// `t()` ile üretilir (bkz. NavItems).
+// Sidebar groups (2026-08-07). Once the menu grew to 24 items, a flat list became
+// hard to scan. Groups do NOT copy `nav`, they only reference it by a path list:
+// `nav` is still the single source of truth (role/superadmin gates are derived from
+// it) — this table only carries ORDER and TITLE info. A new page that's added but
+// not listed here won't disappear — it falls into the "Other" group (the catch-all
+// below). `baslik` is a STABLE internal key (used for localStorage + matching the
+// active group) — it doesn't change when the language changes. The displayed text
+// is produced via `titleKey` with `t()` (see NavItems).
 const NAV_GRUPLARI: { baslik: string; titleKey: string; yollar: string[] }[] = [
   { baslik: "Genel", titleKey: "navGroup.general",
     yollar: ["/dashboard", "/clients", "/sharing", "/planlama", "/sesli-not"] },
@@ -91,14 +91,14 @@ const NAV_GRUPLARI: { baslik: string; titleKey: string; yollar: string[] }[] = [
   { baslik: "Sistem", titleKey: "navGroup.system", yollar: ["/posta", "/kullanicilar"] },
 ]
 
-// AÇIK gruplar saklanır (kapalı değil): varsayılan "hepsi kapalı" (proje sahibi 2026-08-07).
-// Anahtar adı bilerek yeni — eski "navKapaliGruplar" değerleri ters anlamlıydı,
-// aynı anahtarı yeniden kullanmak mevcut tarayıcılarda menüyü tersine çevirirdi.
+// OPEN groups are stored (not closed ones): default is "all closed" (project owner, 2026-08-07).
+// The key name is deliberately new — the old "navKapaliGruplar" values had the opposite
+// meaning, so reusing the same key would have flipped the menu on existing browsers.
 const GRUP_DEPO_ANAHTARI = "panel.navAcikGruplar"
 
-// Aktif path'in ait olduğu grup — en uzun eşleşme kazanır (/videographer/upload,
-// /videographer'dan önce gelmeli). Bu grup, kullanıcı kapatmış olsa bile AÇIK
-// gösterilir: "neredeyim" bilgisi kapalı bir grubun içinde kaybolmamalı.
+// The group the active path belongs to — the longest match wins (/videographer/upload
+// must come before /videographer). This group is shown OPEN even if the user closed it:
+// "where am I" info shouldn't get lost inside a closed group.
 function aktifGrupBasligi(pathname: string): string | undefined {
   let enIyi: { baslik: string; uzunluk: number } | undefined
   for (const g of NAV_GRUPLARI) {
@@ -112,9 +112,9 @@ function aktifGrupBasligi(pathname: string): string | undefined {
   return enIyi?.baslik
 }
 
-// Aktif path için gereken rolleri nav tablosundan türet (tek gerçek kaynak). En uzun
-// eşleşen giriş kazanır (ör. /clients/123 → /clients kaydı). Nav'da olmayan route'lar
-// (ör. /notifications) kısıtsız sayılır.
+// Derive the roles required for the active path from the nav table (single source of
+// truth). The longest matching entry wins (e.g. /clients/123 → /clients entry). Routes
+// not in nav (e.g. /notifications) are considered unrestricted.
 function rolesForPath(pathname: string): string[] | undefined {
   const match = nav
     .filter((n) => n.roles && n.to !== "/" &&
@@ -123,8 +123,8 @@ function rolesForPath(pathname: string): string[] | undefined {
   return match?.roles
 }
 
-// Rol'e kapalı bir sayfaya girilince (özellikle impersonation'da) ham API 403 yerine
-// bu ekran gösterilir. Erişim mantığı nav filtresiyle aynı kaynaktan gelir.
+// Shown instead of a raw API 403 when a page closed to the role is entered (especially
+// during impersonation). The access logic comes from the same source as the nav filter.
 function NoAccess() {
   const { t } = useI18n()
   return (
@@ -135,7 +135,7 @@ function NoAccess() {
   )
 }
 
-// Path superadmin'e mi kapalı (nav.superadmin bayrağı) — GuardedOutlet için.
+// Whether the path is closed to superadmin (nav.superadmin flag) — for GuardedOutlet.
 function isSuperadminPath(pathname: string): boolean {
   const match = nav
     .filter((n) => n.to !== "/" && (pathname === n.to || pathname.startsWith(n.to + "/")))
@@ -164,16 +164,16 @@ function NavItems({ onNavigate }: { onNavigate?: () => void }) {
   const { pathname } = useLocation()
   const role = user?.role || ""
 
-  // Açık gruplar kalıcı (localStorage). Varsayılan HEPSİ KAPALI (proje sahibi tercihi):
-  // 24 öğelik menüde asıl kazanç kısa listeyle başlamak. Kaybolma riskini iki şey
-  // kapatıyor: aktif sayfanın grubu her zaman açık gösterilir ve başlıklar
-  // daima görünür kalır.
+  // Open groups persist (localStorage). Default is ALL CLOSED (project owner's
+  // preference): the real win in a 24-item menu is starting with a short list. Two
+  // things prevent the "getting lost" risk: the active page's group is always shown
+  // open, and the titles always stay visible.
   const [acikGruplar, setAcikGruplar] = useState<string[]>(() => {
     try {
       const ham = localStorage.getItem(GRUP_DEPO_ANAHTARI)
       return ham ? (JSON.parse(ham) as string[]) : []
     } catch {
-      return []          // bozuk/erişilemez depo menüyü kırmasın
+      return []          // don't let corrupted/inaccessible storage break the menu
     }
   })
 
@@ -182,7 +182,7 @@ function NavItems({ onNavigate }: { onNavigate?: () => void }) {
       const yeni = mevcut.includes(baslik)
         ? mevcut.filter((b) => b !== baslik)
         : [...mevcut, baslik]
-      try { localStorage.setItem(GRUP_DEPO_ANAHTARI, JSON.stringify(yeni)) } catch { /* yok say */ }
+      try { localStorage.setItem(GRUP_DEPO_ANAHTARI, JSON.stringify(yeni)) } catch { /* ignore */ }
       return yeni
     })
   }
@@ -192,8 +192,9 @@ function NavItems({ onNavigate }: { onNavigate?: () => void }) {
   )
   const aktifGrup = aktifGrupBasligi(pathname)
 
-  // Gruplara dağıt. Bir yol grupta yazılıysa oraya, yazılmamışsa "Diğer"e —
-  // yeni sayfa eklenip gruba yazılmayı unutunca menüden DÜŞMESİN.
+  // Distribute into groups. If a path is listed in a group, it goes there; if not,
+  // into "Other" — so a new page won't DISAPPEAR from the menu if adding it to a
+  // group is forgotten.
   const gruplanmis = NAV_GRUPLARI.map((g) => ({
     baslik: g.baslik,
     titleKey: g.titleKey,
@@ -206,8 +207,8 @@ function NavItems({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <nav className="flex flex-col gap-0.5 px-3">
       {gruplanmis.map((g) => {
-        // Aktif sayfanın grubu, kullanıcı açmamış olsa bile açık gösterilir —
-        // "neredeyim" bilgisi kapalı bir grubun içinde kaybolmamalı.
+        // The active page's group is shown open even if the user hasn't opened it —
+        // "where am I" info shouldn't get lost inside a closed group.
         const acik = acikGruplar.includes(g.baslik) || g.baslik === aktifGrup
         return (
           <div key={g.baslik} className="pb-0.5">
@@ -261,22 +262,23 @@ function Brand() {
   )
 }
 
-// Göreli zaman metni (ör. "5 dk önce") — basit tutuldu, kütüphane eklenmedi.
-function timeAgo(iso: string) {
+// Relative time text (e.g. "5 min ago") — kept simple, no library added.
+function timeAgo(iso: string, t: (key: string, vars?: Record<string, string | number>) => string) {
   const diffMs = Date.now() - new Date(iso).getTime()
   const min = Math.round(diffMs / 60000)
-  if (min < 1) return "az önce"
-  if (min < 60) return `${min} dk önce`
+  if (min < 1) return t("timeAgo.justNow")
+  if (min < 60) return t("timeAgo.minutesAgo", { min })
   const hr = Math.round(min / 60)
-  if (hr < 24) return `${hr} sa önce`
+  if (hr < 24) return t("timeAgo.hoursAgo", { hr })
   const day = Math.round(hr / 24)
-  return `${day} gün önce`
+  return t("timeAgo.daysAgo", { day })
 }
 
 function NotificationBell() {
   const [items, setItems] = useState<Notification[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
   const navigate = useNavigate()
+  const { t } = useI18n()
 
   async function load() {
     try {
@@ -284,7 +286,7 @@ function NotificationBell() {
       setItems(d.notifications)
       setUnreadCount(d.unread_count)
     } catch {
-      // bell kritik akış değil — sessizce geç
+      // the bell isn't a critical flow — fail silently
     }
   }
 
@@ -318,7 +320,7 @@ function NotificationBell() {
       setItems((prev) => prev.map((it) => ({ ...it, read_at: it.read_at || new Date().toISOString() })))
       setUnreadCount(0)
     } catch {
-      // yoksay
+      // ignore
     }
   }
 
@@ -337,20 +339,20 @@ function NotificationBell() {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80">
         <div className="flex items-center justify-between gap-2 px-1.5 py-1">
-          <DropdownMenuGroup><DropdownMenuLabel className="p-0 font-normal text-foreground">Bildirimler</DropdownMenuLabel></DropdownMenuGroup>
+          <DropdownMenuGroup><DropdownMenuLabel className="p-0 font-normal text-foreground">{t("notifications.title")}</DropdownMenuLabel></DropdownMenuGroup>
           {unreadCount > 0 && (
             <button
               type="button"
               onClick={handleReadAll}
               className="text-xs font-medium text-primary hover:underline"
             >
-              Tümünü okundu işaretle
+              {t("notifications.markAllRead")}
             </button>
           )}
         </div>
         <DropdownMenuSeparator />
         {items.length === 0 && (
-          <div className="px-1.5 py-4 text-center text-sm text-muted-foreground">Bildirim yok</div>
+          <div className="px-1.5 py-4 text-center text-sm text-muted-foreground">{t("notifications.empty")}</div>
         )}
         {items.map((n) => (
           <DropdownMenuItem
@@ -366,7 +368,7 @@ function NotificationBell() {
               <span className="font-medium">{n.title}</span>
             </div>
             {n.body && <span className="line-clamp-2 text-xs text-muted-foreground">{n.body}</span>}
-            <span className="text-[10px] text-muted-foreground/70">{timeAgo(n.created_at)}</span>
+            <span className="text-[10px] text-muted-foreground/70">{timeAgo(n.created_at, t)}</span>
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
@@ -375,24 +377,25 @@ function NotificationBell() {
           onClick={() => navigate("/notifications")}
           className="w-full py-1.5 text-center text-xs font-medium text-primary hover:underline"
         >
-          Tüm bildirimler ve geçmiş →
+          {t("notifications.viewAll")}
         </button>
       </DropdownMenuContent>
     </DropdownMenu>
   )
 }
 
-// Superadmin'e özel: bir kullanıcı seçip onun gözünden bak (impersonation başlat/değiştir).
+// Superadmin-only: pick a user and view as them (start/switch impersonation).
 function ViewAsSwitcher() {
   const { canImpersonate, realUser, impersonate } = useAuth()
   const { data: users } = useUsers()
+  const { t } = useI18n()
   if (!canImpersonate) return null
   const others = (users || []).filter((u) => u.sub !== realUser?.sub)
   return (
     <Select value="" onValueChange={(v) => v && impersonate(v)}>
-      <SelectTrigger className="h-8 w-auto gap-1 text-xs" title="Bir kullanıcının gözünden bak">
+      <SelectTrigger className="h-8 w-auto gap-1 text-xs" title={t("viewAs.title")}>
         <Eye className="h-3.5 w-3.5" />
-        <SelectValue placeholder="Gözünden bak" />
+        <SelectValue placeholder={t("viewAs.placeholder")} />
       </SelectTrigger>
       <SelectContent>
         {others.map((u) => (
@@ -405,20 +408,25 @@ function ViewAsSwitcher() {
   )
 }
 
-// Üst bar Magnific kredi rozeti (yalnız management). Cache'ten gelir; tazeleme
-// günde 2x timer + üretim sonrası. AI görsel üretimleri kredi tüketir (unlimited değil).
+// Top bar Magnific credit badge (management only). Comes from cache; refreshed by
+// a 2x/day timer + after generation. AI image generation consumes credits (not unlimited).
 function CreditsBadge() {
   const { isManagement } = useAuth()
   const { data } = useMagnificCredits(isManagement)
+  const { t, lang } = useI18n()
   if (!isManagement || data?.credits?.available == null) return null
-  const at = data.credits.at ? new Date(data.credits.at).toLocaleString("tr-TR") : null
+  const locale = lang === "tr" ? "tr-TR" : "en-US"
+  const at = data.credits.at ? new Date(data.credits.at).toLocaleString(locale) : null
+  const title = t("credits.label")
+    + (at ? t("credits.updated", { at }) : "")
+    + (data.refreshing ? t("credits.refreshing") : "")
   return (
     <span
       className="hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium text-muted-foreground sm:flex"
-      title={`Magnific kalan kredi${at ? ` · güncelleme: ${at}` : ""}${data.refreshing ? " · tazeleniyor…" : ""}`}
+      title={title}
     >
       <Coins className="h-3.5 w-3.5 text-amber-500" />
-      {data.credits.available.toLocaleString("tr-TR")} kredi
+      {data.credits.available.toLocaleString(locale)} {t("credits.unit")}
     </span>
   )
 }
@@ -512,12 +520,12 @@ export function AppLayout() {
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-amber-300 bg-amber-100 px-4 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-200 md:px-8">
             <Eye className="h-4 w-4 shrink-0" />
             <span>
-              <strong>{user?.name || user?.email}</strong> ({user?.role}) gözünden bakıyorsun.
+              {t("impersonate.viewingAs")} <strong>{user?.name || user?.email}</strong> ({user?.role})
             </span>
-            <span className="text-amber-700 dark:text-amber-400/80">Gerçek kimlik: {realUser?.email}</span>
+            <span className="text-amber-700 dark:text-amber-400/80">{t("impersonate.realIdentity")} {realUser?.email}</span>
             <Button size="sm" variant="outline" className="ml-auto h-7"
               onClick={() => stopImpersonate()}>
-              Kendine dön
+              {t("impersonate.backToSelf")}
             </Button>
           </div>
         )}

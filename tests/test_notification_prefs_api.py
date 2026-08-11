@@ -1,7 +1,8 @@
-"""Bildirim tercihleri API'si + ntfy teslimatı (2026-08-05).
+"""Notification preferences API + ntfy delivery (2026-08-05).
 
-Kanal HTTP çağrısı mock'lu — testler ağa çıkmaz. Vurgu: kendi kaydından başkasına
-erişilememesi, doğrulama, ve "panel satırı yazıldı ama telefona gitmedi" ayrımı.
+The channel's HTTP call is mocked — tests never touch the network. Focus: you can't
+reach anyone else's record from your own, validation, and the "panel row was written
+but the phone didn't get it" distinction.
 """
 import pytest
 from conftest import DESIGNER, MANAGER, login_as
@@ -10,7 +11,7 @@ from test_session_csrf import csrf_headers
 
 @pytest.fixture
 def ntfy(monkeypatch):
-    """ntfy kanalını yapılandırılmış say ve gönderilenleri topla."""
+    """Treat the ntfy channel as configured and collect what's sent."""
     gonderilen = []
     import ntfy_gateway
     monkeypatch.setenv('NTFY_BASE_URL', 'http://ntfy.test')
@@ -25,19 +26,19 @@ def ntfy(monkeypatch):
     return gonderilen
 
 
-# --- tercih uçları ----------------------------------------------------------
+# --- preference endpoints ----------------------------------------------------
 
 def test_get_kayit_yoksa_olusturur_ve_topic_verir(client, ntfy):
     login_as(client, MANAGER)
     r = client.get("/api/notification-prefs")
     assert r.status_code == 200
     d = r.get_json()
-    assert len(d["prefs"]["ntfy_topic"]) == 32          # 16 bayt hex
-    assert d["prefs"]["ntfy_enabled"] is False          # OPT-IN: kayıt tek başına açmaz
+    assert len(d["prefs"]["ntfy_topic"]) == 32          # 16 hex bytes
+    assert d["prefs"]["ntfy_enabled"] is False          # OPT-IN: the record alone doesn't turn it on
     assert d["prefs"]["min_severity"] == "kritik"
     assert d["subscribe_url"].endswith(d["prefs"]["ntfy_topic"])
-    # ntfy uygulaması sunucu ve konuyu AYRI alanlarda ister → ikisi ayrı dönmeli
-    # (kullanıcı URL'den parça sökmek zorunda kalmasın, 2026-08-05 geri bildirimi).
+    # the ntfy app wants the server and the topic in SEPARATE fields → both must be returned
+    # separately (so the user doesn't have to pull a piece out of the URL, 2026-08-05 feedback).
     assert d["server_url"] and not d["server_url"].endswith(d["prefs"]["ntfy_topic"])
     assert d["subscribe_url"] == f'{d["server_url"]}/{d["prefs"]["ntfy_topic"]}'
     assert d["channel_ready"] is True
@@ -107,8 +108,8 @@ def test_csrf_zorunlu(client, ntfy):
 
 
 def test_test_ucu_esigi_atlar(client, ntfy):
-    """Eşik 'kritik' ve kanal kapalı olsa bile test bildirimi gider — burada soru
-    'kanal çalışıyor mu', 'bu bildirim geçer mi' değil."""
+    """The test notification goes out even with the threshold at 'kritik' and the channel
+    off — the question here is 'does the channel work', not 'does this notification pass'."""
     login_as(client, MANAGER)
     r = client.post("/api/notification-prefs/test", headers=csrf_headers(client))
     assert r.status_code == 200
@@ -123,7 +124,7 @@ def test_kanal_yapilandirilmamissa_test_ucu_503(client, monkeypatch):
     assert r.status_code == 503
 
 
-# --- teslimat ---------------------------------------------------------------
+# --- delivery ------------------------------------------------------------------
 
 def _pref_ac(client, **kw):
     govde = {"ntfy_enabled": True}
@@ -136,7 +137,7 @@ def test_kritik_bildirim_telefona_gider(client, ntfy):
     import notifications
     from extensions import db
     login_as(client, MANAGER)
-    pref = _pref_ac(client)                      # eşik varsayılan: kritik
+    pref = _pref_ac(client)                      # default threshold: kritik
     ntfy.clear()
     notifications.push(MANAGER["sub"], "revision_requested", "Revizyon talebi",
                        "Müşteri X — revizyon istendi", link="/panel/sharing")
@@ -148,12 +149,12 @@ def test_kritik_bildirim_telefona_gider(client, ntfy):
 
 
 def test_esik_altindaki_bildirim_panele_yazilir_telefona_gitmez(client, ntfy):
-    """Ayrım önemli: panel-içi çan HER ZAMAN çalışır, ntfy seçicidir."""
+    """The distinction matters: the in-panel bell ALWAYS fires, ntfy is selective."""
     import notifications
     from extensions import db
     from models import Notification
     login_as(client, MANAGER)
-    _pref_ac(client)                             # eşik: kritik
+    _pref_ac(client)                             # threshold: kritik
     ntfy.clear()
     notifications.push(MANAGER["sub"], "revision_resolved", "Revizyon çözüldü", "…")
     db.session.commit()
@@ -173,8 +174,8 @@ def test_opt_in_kayitsiz_kullaniciya_gitmez(client, ntfy):
 
 
 def _musteri(client):
-    """Müşteri + alıcı kaydı. `_recipients` UserRef'ten okur (session claim'inden
-    DEĞİL) — UserRef yoksa bildirimin alıcısı çıkmaz."""
+    """Client + recipient record. `_recipients` reads from UserRef (NOT from the
+    session claim) — without a UserRef, the notification has no recipient."""
     from extensions import db
     from models import UserRef
     if db.session.get(UserRef, MANAGER["sub"]) is None:
@@ -186,7 +187,7 @@ def _musteri(client):
 
 
 def test_musteri_revizyonu_kritige_yukselir(client, ntfy):
-    """Katalogda `client_review` NORMAL; revizyon durumunda KRITIK'e çıkar."""
+    """`client_review` is NORMAL in the catalog; it escalates to KRITIK on a revision status."""
     import notifications
     from models import Notification
     login_as(client, MANAGER)
@@ -204,7 +205,7 @@ def test_musteri_onayi_normal_kalir(client, ntfy):
     from models import Notification
     login_as(client, MANAGER)
     cid = _musteri(client)
-    _pref_ac(client)                             # eşik kritik → onay telefona gitmez
+    _pref_ac(client)                             # threshold kritik → approval doesn't reach the phone
     ntfy.clear()
     notifications.notify_client_review(cid, "2026-W32", "approved")
     satir = Notification.query.filter_by(kind="client_review").first()
@@ -212,11 +213,11 @@ def test_musteri_onayi_normal_kalir(client, ntfy):
     assert ntfy == []
 
 
-# --- başlık kodlaması (2026-08-05 canlı kusuru) -----------------------------
+# --- header encoding (2026-08-05 production bug) -----------------------------
 
 def test_turkce_baslik_bozulmadan_gonderilir(monkeypatch):
-    """Canlıda "Çekim fotoğrafı" → "?ekim foto?raf?" oluyordu: requests str header'ı
-    latin-1'e encode ediyor. Başlık artık UTF-8 bytes gidiyor (ntfy kabul ediyor)."""
+    """In production, "Çekim fotoğrafı" was turning into "?ekim foto?raf?": requests
+    encodes a str header as latin-1. The title now goes out as UTF-8 bytes (ntfy accepts it)."""
     import ntfy_gateway
     yakalanan = {}
     monkeypatch.setenv("NTFY_BASE_URL", "http://ntfy.test")
@@ -237,8 +238,8 @@ def test_turkce_baslik_bozulmadan_gonderilir(monkeypatch):
 
 
 def test_baslikta_satir_sonu_temizlenir(monkeypatch):
-    """HTTP başlığına satır sonu girerse istek bölünebilir; anons başlığı kullanıcı
-    metni taşıdığı için bu bir enjeksiyon yüzeyi."""
+    """A newline in an HTTP header can split the request; since the announcement title
+    carries user text, this is an injection surface."""
     import ntfy_gateway
     yakalanan = {}
     monkeypatch.setenv("NTFY_BASE_URL", "http://ntfy.test")

@@ -5,8 +5,8 @@ import { useI18n } from "@/lib/i18n"
 import { AppLayout } from "@/components/AppLayout"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 
-// Planlama tuvali AYRI CHUNK: @xyflow/react ~200 KB ve panelin tek chunk'ı zaten
-// 1 MB'ı geçiyordu. Tuvale hiç girmeyen kullanıcı bedelini ödemesin.
+// The Planning canvas is a SEPARATE CHUNK: @xyflow/react is ~200 KB and the panel's
+// single chunk was already over 1 MB. A user who never opens the canvas shouldn't pay for it.
 const PlanlamaPage = lazy(() => import("@/pages/PlanlamaPage")
   .then((m) => ({ default: m.PlanlamaPage })))
 import { DashboardPage } from "@/pages/DashboardPage"
@@ -46,15 +46,16 @@ function FullscreenSpinner() {
   )
 }
 
-// Panel erişimi olan roller. Bunun dışındaki (pending/client/bilinmeyen) kullanıcı
-// giriş yapsa bile panele giremez → kurumun genel web sitesine yönlendirilir
-// (VITE_PUBLIC_SITE_URL; verilmezse panel köküne düşer).
+// Roles with panel access. A user outside this list (pending/client/unknown) can't
+// enter the panel even if they log in → redirected to the organization's general
+// website (VITE_PUBLIC_SITE_URL; falls back to the panel root if unset).
 const PANEL_ROLES = ["management", "designer", "content_creator", "videographer"]
 const PUBLIC_SITE = import.meta.env.VITE_PUBLIC_SITE_URL || "/panel/"
 
-// Panel rolü olmayan kullanıcıya gösterilen ekran. PUBLIC_SITE'a otomatik yönlendirir
-// AMA önce KAÇIŞ YOLU sunar (çıkış yap / kendine dön) — aksi halde yanlış/test hesabıyla
-// giren kişi anında yönlendirilip panele bir daha giremezdi (kapan). Çıkış = /auth/logout.
+// Screen shown to a user without a panel role. Auto-redirects to PUBLIC_SITE BUT
+// offers an ESCAPE HATCH first (log out / switch back to self) — otherwise someone who
+// logged in with the wrong/test account would be redirected instantly and could
+// never get back into the panel (a trap). Logout = /auth/logout.
 function NoPanelAccess() {
   const { logout, impersonating, stopImpersonate } = useAuth()
   const { t } = useI18n()
@@ -87,8 +88,8 @@ function NoPanelAccess() {
   )
 }
 
-// Oturum yoksa SSO'ya (tam sayfa) yönlendirir; local login sayfası yok. Oturum var ama
-// panel rolü yoksa NoPanelAccess (kaçış yollu PUBLIC_SITE yönlendirmesi) gösterilir.
+// Without a session, redirects to SSO (full page); there's no local login page. With a
+// session but no panel role, shows NoPanelAccess (PUBLIC_SITE redirect with an escape hatch).
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading, login } = useAuth()
   useEffect(() => {
@@ -99,33 +100,34 @@ function Protected({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-// Rol'e göre ana sayfa. `Navigate` ile YÖNLENDİRİLİR (aynı yolda farklı bileşen
-// render etmek yerine) → adres çubuğu gerçek sayfayı gösterir, sidebar'daki aktif
-// işaret doğru yere düşer ve yenilemede aynı yerde kalınır.
+// Home page by role. REDIRECTS via `Navigate` (instead of rendering a different
+// component at the same path) → the address bar shows the real page, the sidebar's
+// active indicator lands on the right item, and a refresh stays in the same place.
 function AnaSayfa() {
   const { user } = useAuth()
   return <Navigate to={user?.role === "management" ? "/sharing" : "/dashboard"} replace />
 }
 
 export default function App() {
+  const { t } = useI18n()
   return (
     <ErrorBoundary>
     <Routes>
-      {/* AUTH_MODE=local'de Flask /auth/login buraya yönlendirir — Protected'ın
-          dışında, oturumsuz erişilebilir tek route. */}
+      {/* In AUTH_MODE=local, Flask /auth/login redirects here — the only route
+          reachable without a session, outside Protected. */}
       <Route path="/login" element={<LoginPage />} />
       <Route element={<Protected><AppLayout /></Protected>}>
-        {/* Yöneticinin ana sayfası Sharing Board (proje sahibi 2026-08-07): gün oradan
-            başlıyor. Dashboard kaldırılmadı, `/dashboard`'a taşındı — diğer roller
-            için ana sayfa olmaya devam ediyor ve yönetim de menüden ulaşabiliyor. */}
+        {/* Management's home page is the Sharing Board (product owner, 2026-08-07): the
+            day starts there. Dashboard wasn't removed, just moved to `/dashboard` — it's
+            still the home page for other roles, and management can reach it from the menu too. */}
         <Route path="/" element={<AnaSayfa />} />
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/clients" element={<ClientsPage />} />
         <Route path="/clients/:id" element={<ClientDetailPage />} />
         <Route path="/sharing" element={<SharingBoardPage />} />
         <Route path="/designer" element={<DesignerBoardPage />} />
-        {/* Müşteri medya sayfası bilerek /designer altında: AppLayout rol kapısını
-            nav tablosundan PREFIX eşleşmesiyle türetir → management + designer. */}
+        {/* Client media page is intentionally under /designer: AppLayout derives its
+            role gate from the nav table via PREFIX matching → management + designer. */}
         <Route path="/designer/musteri/:id" element={<ClientMediaPage />} />
         <Route path="/designer-assignments" element={<DesignerAssignmentsPage />} />
         <Route path="/marka-rehberi" element={<MarkaRehberiPage />} />
@@ -141,11 +143,11 @@ export default function App() {
         <Route path="/tools/image-splitter" element={<ImageSplitterPage />} />
         <Route path="/tools/img-bucket" element={<ImgBucketPage />} />
         <Route path="/planlama" element={
-          <Suspense fallback={<div className="p-8 text-muted-foreground">Tuval yükleniyor…</div>}>
+          <Suspense fallback={<div className="p-8 text-muted-foreground">{t("canvasLoading")}</div>}>
             <PlanlamaPage />
           </Suspense>
         } />
-        {/* eski yer imleri kırılmasın */}
+        {/* keep old bookmarks from breaking */}
         <Route path="/canvas" element={<Navigate to="/planlama" replace />} />
         <Route path="/tools/image-gen" element={<ImageGenPage />} />
         <Route path="/tools/codex-gorsel" element={<CodexImagePage />} />

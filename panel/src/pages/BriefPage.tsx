@@ -1,10 +1,11 @@
-// Brief sayfası — müşteri seç + hafta gezin, haftalık içerik brief'ini zengin görüntüle.
-// management: elle "üret/yeniden üret" + taslak brief'i onaylama akışı (onay kapısı — 06/13).
+// Brief page — select client + navigate weeks, rich display of the weekly content brief.
+// management: manual "generate/regenerate" + draft brief approval flow (approval gate — 06/13).
 import { useMemo, useState } from "react"
 import { ChevronLeft, ChevronRight, Loader2, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 
 import { useAuth } from "@/lib/auth"
+import { useI18n } from "@/lib/i18n"
 import { useClients } from "@/lib/clients"
 import {
   pollJob, useApproveBrief, useBrief, useGenerateBrief, useSaveWeekNotes,
@@ -28,9 +29,11 @@ import { Textarea } from "@/components/ui/textarea"
 
 const DURUM_NONE = "__yok__"
 
-// Hafta Notları writeback (yalnız management) — mevcut onay akışını bozmadan yanına eklenir.
-// Kısmi merge: gönderilen anahtar üzerine yazılır; `brief.id` değişince key ile yeniden seed'lenir.
+// Week Notes writeback (management only) — added alongside the existing approval
+// flow without breaking it. Partial merge: only the submitted key gets overwritten;
+// re-seeded via the `key` prop when `brief.id` changes.
 function WeekNotesForm({ brief }: { brief: Brief }) {
+  const { t } = useI18n()
   const save = useSaveWeekNotes()
   const wn = (brief.week_notes || {}) as Record<string, unknown>
   const [durum, setDurum] = useState<string>(typeof wn.durum === "string" ? wn.durum : "")
@@ -53,49 +56,49 @@ function WeekNotesForm({ brief }: { brief: Brief }) {
     }
     try {
       await save.mutateAsync({ briefId: brief.id, notes })
-      toast.success("Hafta notları kaydedildi")
+      toast.success(t("pages.brief.weekNotes.saved"))
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Kaydedilemedi")
+      toast.error(err instanceof ApiError ? err.message : t("pages.brief.weekNotes.saveFailed"))
     }
   }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Hafta Notları</CardTitle>
+        <CardTitle className="text-base">{t("pages.brief.weekNotes.title")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <Label>Durum</Label>
+            <Label>{t("pages.brief.weekNotes.status")}</Label>
             <Select value={durum || DURUM_NONE}
               onValueChange={(v) => setDurum(v && v !== DURUM_NONE ? v : "")}>
-              <SelectTrigger className="w-full"><SelectValue placeholder="Seç" /></SelectTrigger>
+              <SelectTrigger className="w-full"><SelectValue placeholder={t("pages.brief.weekNotes.selectPlaceholder")} /></SelectTrigger>
               <SelectContent>
                 <SelectItem value={DURUM_NONE}>—</SelectItem>
-                <SelectItem value="taslak">Taslak</SelectItem>
-                <SelectItem value="onaylandı">Onaylandı</SelectItem>
+                <SelectItem value="taslak">{t("pages.brief.weekNotes.draft")}</SelectItem>
+                <SelectItem value="onaylandı">{t("pages.brief.weekNotes.approved")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="wn-gun">Gün Ataması</Label>
-            <Input id="wn-gun" value={gun} placeholder="ör. Pzt: 1, Çar: 3…"
+            <Label htmlFor="wn-gun">{t("pages.brief.weekNotes.dayAssignment")}</Label>
+            <Input id="wn-gun" value={gun} placeholder={t("pages.brief.weekNotes.dayAssignmentPlaceholder")}
               onChange={(e) => setGun(e.target.value)} />
           </div>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="wn-fikirler">Seçilen Fikirler (her satıra bir madde)</Label>
+          <Label htmlFor="wn-fikirler">{t("pages.brief.weekNotes.selectedIdeas")}</Label>
           <Textarea id="wn-fikirler" rows={3} value={fikirler}
             onChange={(e) => setFikirler(e.target.value)} />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="wn-geri">Geri Bildirim</Label>
+          <Label htmlFor="wn-geri">{t("pages.brief.weekNotes.feedback")}</Label>
           <Textarea id="wn-geri" rows={2} value={geri}
             onChange={(e) => setGeri(e.target.value)} />
         </div>
         <Button onClick={onSave} disabled={save.isPending}>
-          {save.isPending ? "Kaydediliyor…" : "Kaydet"}
+          {save.isPending ? t("pages.brief.weekNotes.saving") : t("pages.brief.weekNotes.save")}
         </Button>
       </CardContent>
     </Card>
@@ -103,12 +106,13 @@ function WeekNotesForm({ brief }: { brief: Brief }) {
 }
 
 export function BriefPage() {
+  const { t, lang } = useI18n()
   const { data: clients } = useClients({ status: "active", q: "" })
   const [clientId, setClientId] = useState<number | null>(null)
   const [weekIso, setWeekIso] = useState(currentWeekIso())
   const [q, setQ] = useState("")
   const { isManagement } = useAuth()
-  // Taslakları (onaylanmamış AI üretimi) yalnız management görür — onay ucu için gerekli.
+  // Only management sees drafts (unapproved AI generation) — needed for the approval endpoint.
   const { data: brief, isLoading, refetch } = useBrief(clientId, weekIso, clientId != null, isManagement)
   const approve = useApproveBrief()
   const generate = useGenerateBrief()
@@ -123,27 +127,27 @@ export function BriefPage() {
 
   const clientName = clients?.find((c) => c.id === clientId)?.name
 
-  // Elle üret / yeniden üret: enqueue → job'u poll et → sonucu (brief) yeniden yükle.
-  // Brief zaten varsa `force` şart: handler onsuz idempotent, yani üretmeden atlar. Onay
-  // kapısı kaldırıldığından (2026-07-30) yeniden üretim kötü brief'in TEK düzeltme yolu —
-  // ama eski metni geri getirmediği için önce onay isteyip sonra gönderiyoruz.
+  // Manual generate / regenerate: enqueue → poll the job → reload the result (brief).
+  // If a brief already exists, `force` is required: the handler is idempotent without
+  // it, so it skips generation. Since the approval gate was removed (2026-07-30),
+  // regeneration is the ONLY way to fix a bad brief — but since it doesn't restore the
+  // old text, we ask for confirmation first before submitting.
   async function handleGenerate() {
     if (clientId == null) return
     const force = brief != null
     if (force && !window.confirm(
-      `${clientName} · ${weekIso} brief'i yeniden üretilecek ve mevcut metnin üzerine `
-      + `yazılacak. Eski metin geri getirilemez. Devam edilsin mi?`)) return
+      t("pages.brief.confirmRegenerate", { client: clientName ?? "", week: weekIso }))) return
     setGenError(null)
     setGenerating(true)
     try {
       const job = await generate.mutateAsync({ client_id: clientId, week_iso: weekIso, force })
       const done = await pollJob(job.id)
       if (done.status === "failed") {
-        setGenError(done.result?.error || "Brief üretimi başarısız oldu.")
+        setGenError(done.result?.error || t("pages.brief.generateFailed"))
       }
       await refetch()
     } catch (e) {
-      setGenError(e instanceof Error ? e.message : "Brief üretimi başarısız oldu.")
+      setGenError(e instanceof Error ? e.message : t("pages.brief.generateFailed"))
     } finally {
       setGenerating(false)
     }
@@ -152,14 +156,14 @@ export function BriefPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Brief</h1>
-        <p className="text-muted-foreground">Müşteri seç, haftalık içerik brief'ini görüntüle.</p>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("pages.brief.title")}</h1>
+        <p className="text-muted-foreground">{t("pages.brief.subtitle")}</p>
       </div>
 
       <div className="grid gap-6 md:grid-cols-[16rem_1fr]">
-        {/* Müşteri listesi */}
+        {/* Client list */}
         <div className="space-y-2">
-          <Input placeholder="Müşteri ara…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <Input placeholder={t("pages.brief.searchClientsPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} />
           <div className="max-h-[70vh] divide-y overflow-y-auto rounded-lg border">
             {(filtered ?? []).map((c) => (
               <button key={c.id} onClick={() => setClientId(c.id)}
@@ -169,12 +173,12 @@ export function BriefPage() {
               </button>
             ))}
             {filtered.length === 0 && (
-              <p className="px-3 py-4 text-sm text-muted-foreground">Müşteri yok.</p>
+              <p className="px-3 py-4 text-sm text-muted-foreground">{t("pages.brief.noClients")}</p>
             )}
           </div>
         </div>
 
-        {/* Brief içeriği */}
+        {/* Brief content */}
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-1 rounded-lg border p-1">
@@ -183,13 +187,13 @@ export function BriefPage() {
               </Button>
               <div className="min-w-[9rem] flex-1 text-center">
                 <div className="text-sm font-medium">{weekIso}</div>
-                <div className="text-xs text-muted-foreground">{weekRangeLabel(weekIso)}</div>
+                <div className="text-xs text-muted-foreground">{weekRangeLabel(weekIso, lang)}</div>
               </div>
               <Button variant="ghost" size="icon" onClick={() => setWeekIso(shiftWeek(weekIso, 1))}>
                 <ChevronRight className="h-4 w-4" />
               </Button>
               <Button variant="outline" size="sm" className="ml-1" onClick={() => setWeekIso(currentWeekIso())}>
-                Bugün
+                {t("pages.brief.today")}
               </Button>
             </div>
             {isManagement && clientId != null && (
@@ -197,7 +201,7 @@ export function BriefPage() {
                 {generating
                   ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
-                {brief ? "Yeniden üret" : "Brief üret"}
+                {brief ? t("pages.brief.regenerate") : t("pages.brief.generate")}
               </Button>
             )}
           </div>
@@ -207,24 +211,24 @@ export function BriefPage() {
           )}
 
           {clientId == null ? (
-            <p className="py-12 text-center text-muted-foreground">Soldan bir müşteri seç.</p>
+            <p className="py-12 text-center text-muted-foreground">{t("pages.brief.selectClientPrompt")}</p>
           ) : isLoading || generating ? (
             <Skeleton className="h-64 w-full" />
           ) : !brief ? (
             <p className="py-12 text-center text-muted-foreground">
-              {clientName} · {weekIso} için brief yok.
+              {t("pages.brief.noBrief", { client: clientName ?? "", week: weekIso })}
             </p>
           ) : (
             <div className="space-y-4">
               {brief.status === "draft" && (
                 <div className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950/30">
-                  <Badge variant="secondary">Taslak{brief.generated_by === "ai" ? " · AI" : ""}</Badge>
+                  <Badge variant="secondary">{t("pages.brief.draftBadge")}{brief.generated_by === "ai" ? t("pages.brief.aiSuffix") : ""}</Badge>
                   <span className="flex-1 text-sm text-muted-foreground">
-                    Bu brief henüz onaylanmadı.
+                    {t("pages.brief.notApprovedYet")}
                   </span>
                   {isManagement && (
                     <Button size="sm" onClick={() => approve.mutate(brief.id)} disabled={approve.isPending}>
-                      Onayla
+                      {t("pages.brief.approve")}
                     </Button>
                   )}
                 </div>

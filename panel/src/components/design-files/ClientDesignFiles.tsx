@@ -1,11 +1,11 @@
-// Müşteri sayfasındaki "Çalışma Dosyaları" bölümü (2026-08-07).
+// "Working Files" section on the client page (2026-08-07).
 //
-// Tasarımcıların kaynak dosyaları (.psd/.ai/.indd…) burada SÜRÜMLÜ durur:
-// listede yalnız güncel sürüm görünür, geçmiş satır açılınca gelir. "Güncellik
-// takibi" gereksinimi buradaki `v3` rozeti + "2 gün önce" ile karşılanıyor.
+// Designers' source files (.psd/.ai/.indd…) live here VERSIONED: only the
+// current version shows in the list, history appears when the row is expanded.
+// The "recency tracking" requirement is met by the `v3` badge here + "2 days ago".
 //
-// Rol kapısı ROUTE'tan geliyor (`/designer/...` → management + designer), bileşen
-// kendi rol kontrolünü yapmaz; backend uçları ayrıca zorluyor.
+// The role gate comes from the ROUTE (`/designer/...` → management + designer),
+// the component does not do its own role check; the backend endpoints also enforce it.
 import { useMemo, useState } from "react"
 import {
   AlertTriangle, ChevronDown, Download, FolderOpen, History, Loader2,
@@ -21,6 +21,7 @@ import {
   type DesignFileItem, type DesignVersion,
 } from "@/lib/design-files"
 import { UploadDialog } from "@/components/design-files/UploadDialog"
+import { useI18n } from "@/lib/i18n"
 import { trFold } from "@/lib/week"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -28,16 +29,17 @@ import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { cn } from "@/lib/utils"
 
-function gecenSure(iso: string | null) {
+function gecenSure(iso: string | null, t: (key: string, vars?: Record<string, string | number>) => string, lang: "tr" | "en") {
   if (!iso) return "—"
   const gun = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000)
-  if (gun <= 0) return "bugün"
-  if (gun === 1) return "dün"
-  if (gun < 30) return `${gun} gün önce`
-  return new Date(iso).toLocaleDateString("tr-TR", { day: "numeric", month: "short" })
+  if (gun <= 0) return t("components.designFiles.clientDesignFiles.today")
+  if (gun === 1) return t("components.designFiles.clientDesignFiles.yesterday")
+  if (gun < 30) return t("components.designFiles.clientDesignFiles.daysAgo", { count: gun })
+  return new Date(iso).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { day: "numeric", month: "short" })
 }
 
 function SurumGecmisi({ fileId }: { fileId: number }) {
+  const { t, lang } = useI18n()
   const { data, isLoading } = useFileVersions(fileId)
   const sil = useDeleteVersion()
   if (isLoading) return <Skeleton className="h-16 w-full" />
@@ -47,23 +49,23 @@ function SurumGecmisi({ fileId }: { fileId: number }) {
       {liste.map((v) => (
         <div key={v.id} className="flex flex-wrap items-center gap-2 text-xs">
           <Badge variant="outline" className="font-mono">v{v.version_no}</Badge>
-          <span className="text-muted-foreground">{gecenSure(v.uploaded_at)}</span>
+          <span className="text-muted-foreground">{gecenSure(v.uploaded_at, t, lang)}</span>
           <span className="text-muted-foreground">·</span>
           <span>{v.uploader_name ?? "—"}</span>
           {v.note && <span className="text-muted-foreground">· “{v.note}”</span>}
           <span className="text-muted-foreground">· {formatBytes(v.file_size)}</span>
           <a href={designFileDownloadUrl(v.id)}
             className="ml-auto inline-flex items-center gap-1 text-primary hover:underline">
-            <Download className="h-3 w-3" /> İndir
+            <Download className="h-3 w-3" /> {t("components.designFiles.clientDesignFiles.download")}
           </a>
           {v.can_delete && liste.length > 1 && (
-            <button type="button" title="Bu sürümü sil"
+            <button type="button" title={t("components.designFiles.clientDesignFiles.deleteVersionTitle")}
               onClick={async () => {
                 try {
                   await sil.mutateAsync(v.id)
-                  toast.success(`v${v.version_no} çöp kutusuna taşındı`)
+                  toast.success(t("components.designFiles.clientDesignFiles.versionMovedToTrash", { n: v.version_no }))
                 } catch (e) {
-                  toast.error(e instanceof Error ? e.message : "Silinemedi")
+                  toast.error(e instanceof Error ? e.message : t("components.designFiles.clientDesignFiles.deleteFailed"))
                 }
               }}
               className="text-muted-foreground hover:text-destructive">
@@ -80,20 +82,21 @@ function DosyaSatiri({ f, onYeniSurum }: {
   f: DesignFileItem
   onYeniSurum: (f: DesignFileItem) => void
 }) {
+  const { t, lang } = useI18n()
   const [acik, setAcik] = useState(false)
   const [duzenle, setDuzenle] = useState(false)
   const [baslik, setBaslik] = useState(f.title)
   const patch = usePatchDesignFile()
   const sil = useDeleteDesignFile()
   const v = f.current
-  const rozet = extBadge(v?.file_name ?? "")
+  const rozet = extBadge(v?.file_name ?? "", t("components.designFiles.clientDesignFiles.noExtension"))
 
   async function kaydet() {
     try {
       await patch.mutateAsync({ fileId: f.id, title: baslik.trim() })
       setDuzenle(false)
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Kaydedilemedi")
+      toast.error(e instanceof Error ? e.message : t("components.designFiles.clientDesignFiles.saveFailed"))
     }
   }
 
@@ -116,44 +119,44 @@ function DosyaSatiri({ f, onYeniSurum }: {
         {v && <span className="text-xs text-muted-foreground">{formatBytes(v.file_size)}</span>}
         {v && !v.drive_ok && (
           <Badge variant="outline" className="text-amber-700 dark:text-amber-400"
-            title="Dosya sunucuda güvende; yalnız Drive yedeği alınamadı">
-            Drive'a kopyalanmadı
+            title={t("components.designFiles.clientDesignFiles.driveBackupFailedTitle")}>
+            {t("components.designFiles.clientDesignFiles.notCopiedToDrive")}
           </Badge>
         )}
 
         <div className="ml-auto flex items-center gap-1">
           {duzenle ? (
-            <Button size="sm" onClick={kaydet} disabled={patch.isPending}>Kaydet</Button>
+            <Button size="sm" onClick={kaydet} disabled={patch.isPending}>{t("components.designFiles.clientDesignFiles.save")}</Button>
           ) : (
             <>
               {v && (
                 <a href={designFileDownloadUrl(v.id)}
                   className="inline-flex h-8 items-center gap-1 rounded-md px-2 text-sm text-primary hover:bg-muted">
-                  <Download className="h-3.5 w-3.5" /> İndir
+                  <Download className="h-3.5 w-3.5" /> {t("components.designFiles.clientDesignFiles.download")}
                 </a>
               )}
               <Button variant="ghost" size="sm" onClick={() => onYeniSurum(f)}>
-                <Plus className="mr-1 h-3.5 w-3.5" /> Yeni sürüm
+                <Plus className="mr-1 h-3.5 w-3.5" /> {t("components.designFiles.clientDesignFiles.newVersion")}
               </Button>
-              <Button variant="ghost" size="sm" title="Sürüm geçmişi"
+              <Button variant="ghost" size="sm" title={t("components.designFiles.clientDesignFiles.versionHistory")}
                 onClick={() => setAcik((a) => !a)}>
                 <History className="h-3.5 w-3.5" />
                 <ChevronDown className={cn("ml-0.5 h-3 w-3 transition-transform",
                   !acik && "-rotate-90")} />
               </Button>
-              <Button variant="ghost" size="sm" title="Adı düzenle"
+              <Button variant="ghost" size="sm" title={t("components.designFiles.clientDesignFiles.editName")}
                 onClick={() => setDuzenle(true)}>
                 <Pencil className="h-3.5 w-3.5" />
               </Button>
               {f.can_delete && (
-                <Button variant="ghost" size="sm" title="Dosyayı sil"
+                <Button variant="ghost" size="sm" title={t("components.designFiles.clientDesignFiles.deleteFileTitle")}
                   onClick={async () => {
-                    if (!confirm(`"${f.title}" çöp kutusuna taşınsın mı? Tüm sürümleriyle birlikte geri alınabilir.`)) return
+                    if (!confirm(t("components.designFiles.clientDesignFiles.deleteFileConfirm", { title: f.title }))) return
                     try {
                       await sil.mutateAsync(f.id)
-                      toast.success("Dosya çöp kutusuna taşındı")
+                      toast.success(t("components.designFiles.clientDesignFiles.movedToTrash"))
                     } catch (e) {
-                      toast.error(e instanceof Error ? e.message : "Silinemedi")
+                      toast.error(e instanceof Error ? e.message : t("components.designFiles.clientDesignFiles.deleteFailed"))
                     }
                   }}>
                   {sil.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -166,11 +169,11 @@ function DosyaSatiri({ f, onYeniSurum }: {
       </div>
 
       <div className="flex flex-wrap items-center gap-2 px-3 pb-2 text-xs text-muted-foreground">
-        <span className="truncate">{v?.file_name ?? "sürüm yok"}</span>
-        {v && <span>· {v.uploader_name ?? "—"} · {gecenSure(v.uploaded_at)}</span>}
-        {f.version_count > 1 && <span>· {f.version_count} sürüm</span>}
-        {f.tags.map((t) => (
-          <Badge key={t} variant="outline" className="text-[10px]">{t}</Badge>
+        <span className="truncate">{v?.file_name ?? t("components.designFiles.clientDesignFiles.noVersion")}</span>
+        {v && <span>· {v.uploader_name ?? "—"} · {gecenSure(v.uploaded_at, t, lang)}</span>}
+        {f.version_count > 1 && <span>· {t("components.designFiles.clientDesignFiles.versionCount", { count: f.version_count })}</span>}
+        {f.tags.map((tag) => (
+          <Badge key={tag} variant="outline" className="text-[10px]">{tag}</Badge>
         ))}
       </div>
 
@@ -179,20 +182,21 @@ function DosyaSatiri({ f, onYeniSurum }: {
   )
 }
 
-// --- çöp kutusu -------------------------------------------------------------
+// --- trash --------------------------------------------------------------------
 //
-// Silinen dosya/sürümler geri alınabilir bir onay kuyruğuna düşer (proje sahibi kararı,
-// 2026-08-08) — yönetim ya geri alır ya kalıcı siler; tasarımcı yalnız "kalıcı
-// silinsin" işareti bırakabilir. Yetki bayrakları (`can_restore`/`can_purge`)
-// BACKEND'ten gelir, burada yeniden kurulmaz.
+// Deleted files/versions land in a reversible approval queue (project owner's
+// decision, 2026-08-08) — management either restores or permanently deletes;
+// the designer can only leave a "permanently delete" flag. Permission flags
+// (`can_restore`/`can_purge`) come from the BACKEND, not re-derived here.
 
 function CopKutusuDosyaSatiri({ f }: { f: DesignFileItem }) {
+  const { t, lang } = useI18n()
   const restore = useRestoreFile()
   const purgeReq = usePurgeRequest()
   const purge = usePurgeFile()
   const talepVar = !!f.purge_requested_at
   const v = f.current
-  const rozet = extBadge(v?.file_name ?? "")
+  const rozet = extBadge(v?.file_name ?? "", t("components.designFiles.clientDesignFiles.noExtension"))
 
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-2 text-sm">
@@ -204,15 +208,15 @@ function CopKutusuDosyaSatiri({ f }: { f: DesignFileItem }) {
       <span className="font-medium">{f.title}</span>
       {v && <span className="text-xs text-muted-foreground">{formatBytes(v.file_size)}</span>}
       {f.version_count > 1 && (
-        <span className="text-xs text-muted-foreground">· {f.version_count} sürüm</span>
+        <span className="text-xs text-muted-foreground">· {t("components.designFiles.clientDesignFiles.versionCount", { count: f.version_count })}</span>
       )}
       <span className="text-xs text-muted-foreground">
-        {f.deleter_name ?? "—"} · {gecenSure(f.deleted_at)} sildi
+        {t("components.designFiles.clientDesignFiles.deletedBy", { who: f.deleter_name ?? "—", when: gecenSure(f.deleted_at, t, lang) })}
       </span>
       {talepVar && (
         <Badge variant="outline" className="gap-1 text-amber-700 dark:text-amber-400">
           <AlertTriangle className="h-3 w-3" />
-          {f.purge_requester_name ?? "birisi"} kalıcı silinmesini istedi
+          {t("components.designFiles.clientDesignFiles.purgeRequestedBy", { who: f.purge_requester_name ?? t("components.designFiles.clientDesignFiles.someone") })}
         </Badge>
       )}
 
@@ -222,12 +226,12 @@ function CopKutusuDosyaSatiri({ f }: { f: DesignFileItem }) {
             onClick={async () => {
               try {
                 await restore.mutateAsync(f.id)
-                toast.success(`"${f.title}" geri alındı`)
+                toast.success(t("components.designFiles.clientDesignFiles.restored", { title: f.title }))
               } catch (e) {
-                toast.error(e instanceof Error ? e.message : "Geri alınamadı")
+                toast.error(e instanceof Error ? e.message : t("components.designFiles.clientDesignFiles.restoreFailed"))
               }
             }}>
-            <RotateCcw className="mr-1 h-3.5 w-3.5" /> Geri al
+            <RotateCcw className="mr-1 h-3.5 w-3.5" /> {t("components.designFiles.clientDesignFiles.restore")}
           </Button>
         )}
         {!f.can_purge && (
@@ -235,23 +239,25 @@ function CopKutusuDosyaSatiri({ f }: { f: DesignFileItem }) {
             onClick={async () => {
               try {
                 await purgeReq.mutateAsync({ fileId: f.id, requested: !talepVar })
-                toast.success(talepVar ? "Kalıcı silme talebi geri çekildi" : "Kalıcı silme talep edildi")
+                toast.success(talepVar
+                  ? t("components.designFiles.clientDesignFiles.purgeRequestWithdrawn")
+                  : t("components.designFiles.clientDesignFiles.purgeRequested"))
               } catch (e) {
-                toast.error(e instanceof Error ? e.message : "İşlem başarısız")
+                toast.error(e instanceof Error ? e.message : t("components.designFiles.clientDesignFiles.actionFailed"))
               }
             }}>
-            {talepVar ? "Talebi geri çek" : "Kalıcı silme iste"}
+            {talepVar ? t("components.designFiles.clientDesignFiles.withdrawRequest") : t("components.designFiles.clientDesignFiles.requestPurge")}
           </Button>
         )}
         {f.can_purge && (
-          <Button variant="ghost" size="sm" title="Kalıcı sil" disabled={purge.isPending}
+          <Button variant="ghost" size="sm" title={t("components.designFiles.clientDesignFiles.purgeTitle")} disabled={purge.isPending}
             onClick={async () => {
-              if (!confirm(`"${f.title}" ve tüm sürümleri KALICI olarak silinsin mi? Bu işlem GERİ ALINAMAZ.`)) return
+              if (!confirm(t("components.designFiles.clientDesignFiles.purgeFileConfirm", { title: f.title }))) return
               try {
                 await purge.mutateAsync(f.id)
-                toast.success(`"${f.title}" kalıcı silindi`)
+                toast.success(t("components.designFiles.clientDesignFiles.purged", { title: f.title }))
               } catch (e) {
-                toast.error(e instanceof Error ? e.message : "Kalıcı silinemedi")
+                toast.error(e instanceof Error ? e.message : t("components.designFiles.clientDesignFiles.purgeFailed"))
               }
             }}>
             {purge.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -264,6 +270,7 @@ function CopKutusuDosyaSatiri({ f }: { f: DesignFileItem }) {
 }
 
 function CopKutusuSurumSatiri({ v }: { v: DesignVersion }) {
+  const { t, lang } = useI18n()
   const restore = useRestoreVersion()
   const purge = usePurgeVersion()
 
@@ -272,7 +279,7 @@ function CopKutusuSurumSatiri({ v }: { v: DesignVersion }) {
       <Badge variant="outline" className="font-mono">v{v.version_no}</Badge>
       <span className="truncate">{v.file_name}</span>
       <span className="text-xs text-muted-foreground">
-        {v.deleter_name ?? "—"} · {gecenSure(v.deleted_at)} sildi
+        {t("components.designFiles.clientDesignFiles.deletedBy", { who: v.deleter_name ?? "—", when: gecenSure(v.deleted_at, t, lang) })}
       </span>
       <span className="text-xs text-muted-foreground">· {formatBytes(v.file_size)}</span>
 
@@ -282,23 +289,23 @@ function CopKutusuSurumSatiri({ v }: { v: DesignVersion }) {
             onClick={async () => {
               try {
                 await restore.mutateAsync(v.id)
-                toast.success(`v${v.version_no} geri alındı`)
+                toast.success(t("components.designFiles.clientDesignFiles.versionRestored", { n: v.version_no }))
               } catch (e) {
-                toast.error(e instanceof Error ? e.message : "Geri alınamadı")
+                toast.error(e instanceof Error ? e.message : t("components.designFiles.clientDesignFiles.restoreFailed"))
               }
             }}>
-            <RotateCcw className="mr-1 h-3.5 w-3.5" /> Geri al
+            <RotateCcw className="mr-1 h-3.5 w-3.5" /> {t("components.designFiles.clientDesignFiles.restore")}
           </Button>
         )}
         {v.can_purge && (
-          <Button variant="ghost" size="sm" title="Kalıcı sil" disabled={purge.isPending}
+          <Button variant="ghost" size="sm" title={t("components.designFiles.clientDesignFiles.purgeTitle")} disabled={purge.isPending}
             onClick={async () => {
-              if (!confirm(`v${v.version_no} (${v.file_name}) KALICI olarak silinsin mi? Bu işlem GERİ ALINAMAZ.`)) return
+              if (!confirm(t("components.designFiles.clientDesignFiles.purgeVersionConfirm", { n: v.version_no, name: v.file_name }))) return
               try {
                 await purge.mutateAsync(v.id)
-                toast.success(`v${v.version_no} kalıcı silindi`)
+                toast.success(t("components.designFiles.clientDesignFiles.versionPurged", { n: v.version_no }))
               } catch (e) {
-                toast.error(e instanceof Error ? e.message : "Kalıcı silinemedi")
+                toast.error(e instanceof Error ? e.message : t("components.designFiles.clientDesignFiles.purgeFailed"))
               }
             }}>
             {purge.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -311,21 +318,24 @@ function CopKutusuSurumSatiri({ v }: { v: DesignVersion }) {
 }
 
 function CopKutusu({ clientId }: { clientId: number }) {
+  const { t } = useI18n()
   const { data, isLoading, isError } = useTrash(clientId)
   const dosyalar = data?.files ?? []
   const surumler = data?.versions ?? []
   const toplamBoyut = data?.trash_bytes ?? 0
 
   if (isLoading) return <Skeleton className="m-3 h-16" />
-  if (isError) return <p className="px-3 py-2 text-sm text-destructive">Çöp kutusu yüklenemedi.</p>
+  if (isError) return <p className="px-3 py-2 text-sm text-destructive">{t("components.designFiles.clientDesignFiles.trashLoadFailed")}</p>
   if (dosyalar.length === 0 && surumler.length === 0) {
-    return <p className="px-3 py-2 text-sm text-muted-foreground">Çöp kutusu boş.</p>
+    return <p className="px-3 py-2 text-sm text-muted-foreground">{t("components.designFiles.clientDesignFiles.trashEmpty")}</p>
   }
 
   return (
     <div className="space-y-1.5 p-3">
       <p className="text-xs text-muted-foreground">
-        {dosyalar.length + surumler.length} öğe · en az {formatBytes(toplamBoyut)}
+        {t("components.designFiles.clientDesignFiles.trashSummary", {
+          count: dosyalar.length + surumler.length, size: formatBytes(toplamBoyut),
+        })}
       </p>
       {dosyalar.map((f) => <CopKutusuDosyaSatiri key={`f${f.id}`} f={f} />)}
       {surumler.map((v) => <CopKutusuSurumSatiri key={`v${v.id}`} v={v} />)}
@@ -334,6 +344,7 @@ function CopKutusu({ clientId }: { clientId: number }) {
 }
 
 export function ClientDesignFiles({ clientId }: { clientId: number }) {
+  const { t } = useI18n()
   const { data, isLoading, isError } = useDesignFiles(clientId)
   const [acik, setAcik] = useState(true)
   const [copAcik, setCopAcik] = useState(false)
@@ -344,15 +355,15 @@ export function ClientDesignFiles({ clientId }: { clientId: number }) {
   const files = data?.files ?? []
   const quota = data?.quota
 
-  // Süzgeç çipleri O MÜŞTERİDEKİ etiketlerden türer — sabit liste yok.
+  // Filter chips are derived from the tags on THAT CLIENT — no fixed list.
   const etiketler = useMemo(() => {
     const g = new Map<string, string>()
-    for (const f of files) for (const t of f.tags) if (!g.has(trFold(t))) g.set(trFold(t), t)
+    for (const f of files) for (const tag of f.tags) if (!g.has(trFold(tag))) g.set(trFold(tag), tag)
     return [...g.values()].sort((a, b) => trFold(a).localeCompare(trFold(b), "tr"))
   }, [files])
 
   const gorunen = etiket
-    ? files.filter((f) => f.tags.some((t) => trFold(t) === trFold(etiket)))
+    ? files.filter((f) => f.tags.some((tag) => trFold(tag) === trFold(etiket)))
     : files
 
   return (
@@ -363,7 +374,7 @@ export function ClientDesignFiles({ clientId }: { clientId: number }) {
             className="flex items-center gap-1.5 text-sm font-medium">
             <ChevronDown className={cn("h-4 w-4 transition-transform", !acik && "-rotate-90")} />
             <FolderOpen className="h-4 w-4 text-muted-foreground" />
-            Çalışma Dosyaları
+            {t("components.designFiles.clientDesignFiles.workingFiles")}
             {files.length > 0 && <Badge variant="outline">{files.length}</Badge>}
           </button>
 
@@ -381,7 +392,7 @@ export function ClientDesignFiles({ clientId }: { clientId: number }) {
 
           <Button variant="ghost" size="sm" className="ml-auto"
             onClick={() => setYukleAcik(true)}>
-            <Plus className="mr-1 h-3.5 w-3.5" /> Yeni dosya
+            <Plus className="mr-1 h-3.5 w-3.5" /> {t("components.designFiles.clientDesignFiles.newFile")}
           </Button>
         </div>
 
@@ -392,25 +403,24 @@ export function ClientDesignFiles({ clientId }: { clientId: number }) {
                 <button type="button" onClick={() => setEtiket(null)}
                   className={cn("rounded-full border px-2 py-0.5 text-xs",
                     !etiket && "border-primary bg-primary/10 text-primary")}>
-                  tümü
+                  {t("components.designFiles.clientDesignFiles.allTags")}
                 </button>
-                {etiketler.map((t) => (
-                  <button key={t} type="button"
-                    onClick={() => setEtiket(etiket === t ? null : t)}
+                {etiketler.map((tag) => (
+                  <button key={tag} type="button"
+                    onClick={() => setEtiket(etiket === tag ? null : tag)}
                     className={cn("rounded-full border px-2 py-0.5 text-xs",
-                      etiket === t && "border-primary bg-primary/10 text-primary")}>
-                    {t}
+                      etiket === tag && "border-primary bg-primary/10 text-primary")}>
+                    {tag}
                   </button>
                 ))}
               </div>
             )}
 
             {isLoading && <Skeleton className="h-20 w-full" />}
-            {isError && <p className="text-sm text-destructive">Çalışma dosyaları yüklenemedi.</p>}
+            {isError && <p className="text-sm text-destructive">{t("components.designFiles.clientDesignFiles.loadFailed")}</p>}
             {!isLoading && gorunen.length === 0 && (
               <p className="text-sm text-muted-foreground">
-                Bu müşteri için çalışma dosyası yok — .psd, .ai gibi kaynak dosyaları
-                buraya yükleyebilirsin.
+                {t("components.designFiles.clientDesignFiles.emptyState")}
               </p>
             )}
             {gorunen.map((f) => (
@@ -426,7 +436,7 @@ export function ClientDesignFiles({ clientId }: { clientId: number }) {
             copAcik && "border-b bg-muted/30")}>
           <ChevronDown className={cn("h-4 w-4 transition-transform", !copAcik && "-rotate-90")} />
           <Trash2 className="h-4 w-4 text-muted-foreground" />
-          Çöp kutusu
+          {t("components.designFiles.clientDesignFiles.trash")}
         </button>
         {copAcik && <CopKutusu clientId={clientId} />}
       </div>

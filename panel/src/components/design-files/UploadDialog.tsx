@@ -1,13 +1,14 @@
-// Çalışma dosyası yükleme diyaloğu (2026-08-07) — iki kipte çalışır:
-// yeni dosya (başlık + etiket ister) ve yeni sürüm (yalnız not).
+// Working file upload dialog (2026-08-07) — operates in two modes:
+// new file (requires a title + tags) and new version (note only).
 //
-// İlerleme çubuğu şart: 1 GB'lık dosya yavaş bağlantıda dakikalarca sürer,
-// geri bildirimsiz bir bekleme kullanıcıya "panel dondu" dedirtir.
+// A progress bar is essential: a 1 GB file can take minutes on a slow connection,
+// and a wait with no feedback makes the user think "the panel froze".
 import { useRef, useState } from "react"
 import { Loader2, Upload } from "lucide-react"
 import { toast } from "sonner"
 
 import { useUploadDesignFile, useUploadVersion } from "@/lib/design-files"
+import { useI18n } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -18,10 +19,11 @@ export function UploadDialog({ open, onClose, clientId, fileId, fileTitle }: {
   open: boolean
   onClose: () => void
   clientId: number
-  /** Doluysa "yeni sürüm" kipi; boşsa yeni dosya. */
+  /** If set, "new version" mode; if empty, a new file. */
   fileId?: number
   fileTitle?: string
 }) {
+  const { t } = useI18n()
   const yeniSurum = fileId != null
   const yeniDosya = useUploadDesignFile(clientId)
   const yeniSurumM = useUploadVersion()
@@ -50,11 +52,11 @@ export function UploadDialog({ open, onClose, clientId, fileId, fileTitle }: {
         await yeniDosya.mutateAsync({ file: dosya, title: baslik.trim(), tags, note: not,
           onProgress: setPct })
       }
-      toast.success(yeniSurum ? "Yeni sürüm yüklendi" : "Dosya yüklendi")
+      toast.success(yeniSurum ? t("components.designFiles.uploadDialog.versionUploaded") : t("components.designFiles.uploadDialog.fileUploaded"))
       kapat()
     } catch (e) {
       setPct(0)
-      toast.error(e instanceof Error ? e.message : "Yüklenemedi")
+      toast.error(e instanceof Error ? e.message : t("components.designFiles.uploadDialog.uploadFailed"))
     }
   }
 
@@ -65,7 +67,7 @@ export function UploadDialog({ open, onClose, clientId, fileId, fileTitle }: {
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>
-            {yeniSurum ? `Yeni sürüm — ${fileTitle}` : "Yeni çalışma dosyası"}
+            {yeniSurum ? t("components.designFiles.uploadDialog.newVersionTitle", { title: fileTitle ?? "" }) : t("components.designFiles.uploadDialog.newFileTitle")}
           </DialogTitle>
         </DialogHeader>
 
@@ -75,32 +77,32 @@ export function UploadDialog({ open, onClose, clientId, fileId, fileTitle }: {
           <Button type="button" variant="outline" className="w-full"
             onClick={() => inputRef.current?.click()} disabled={calisiyor}>
             <Upload className="mr-1 h-4 w-4" />
-            {dosya ? dosya.name : "Dosya seç (en fazla 1 GB)"}
+            {dosya ? dosya.name : t("components.designFiles.uploadDialog.pickFile")}
           </Button>
 
           {!yeniSurum && (
             <>
               <div className="space-y-1">
-                <label className="text-xs text-muted-foreground">Başlık</label>
+                <label className="text-xs text-muted-foreground">{t("components.designFiles.uploadDialog.titleLabel")}</label>
                 <Input value={baslik} onChange={(e) => setBaslik(e.target.value)}
-                  placeholder="Ana Şablon" disabled={calisiyor} />
+                  placeholder={t("components.designFiles.uploadDialog.titlePlaceholder")} disabled={calisiyor} />
               </div>
               <div className="space-y-1">
                 <label className="text-xs text-muted-foreground">
-                  Etiketler (virgülle ayır)
+                  {t("components.designFiles.uploadDialog.tagsLabel")}
                 </label>
                 <Input value={etiketler} onChange={(e) => setEtiketler(e.target.value)}
-                  placeholder="şablon, kurumsal" disabled={calisiyor} />
+                  placeholder={t("components.designFiles.uploadDialog.tagsPlaceholder")} disabled={calisiyor} />
               </div>
             </>
           )}
 
           <div className="space-y-1">
             <label className="text-xs text-muted-foreground">
-              Not {yeniSurum && "(bu sürümde ne değişti?)"}
+              {t("components.designFiles.uploadDialog.noteLabel")} {yeniSurum && t("components.designFiles.uploadDialog.noteVersionHint")}
             </label>
             <Input value={not} onChange={(e) => setNot(e.target.value)}
-              placeholder={yeniSurum ? "logo güncellendi" : "ilk sürüm"}
+              placeholder={yeniSurum ? t("components.designFiles.uploadDialog.notePlaceholderVersion") : t("components.designFiles.uploadDialog.notePlaceholderFirst")}
               disabled={calisiyor} />
           </div>
 
@@ -110,16 +112,16 @@ export function UploadDialog({ open, onClose, clientId, fileId, fileTitle }: {
                 <div className="h-full bg-primary transition-all"
                   style={{ width: `${pct}%` }} />
               </div>
-              <p className="text-xs text-muted-foreground">Yükleniyor… %{pct}</p>
+              <p className="text-xs text-muted-foreground">{t("components.designFiles.uploadDialog.uploadingPct", { pct })}</p>
             </div>
           )}
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" onClick={kapat} disabled={calisiyor}>Vazgeç</Button>
+          <Button variant="ghost" onClick={kapat} disabled={calisiyor}>{t("components.designFiles.uploadDialog.cancel")}</Button>
           <Button onClick={gonder} disabled={!gonderilebilir}>
             {calisiyor && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
-            Yükle
+            {t("components.designFiles.uploadDialog.upload")}
           </Button>
         </DialogFooter>
       </DialogContent>

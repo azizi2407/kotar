@@ -1,4 +1,4 @@
-// Font havuzu (2026-08-05) — merkezi havuz + müşteri ataması + önizleme yükleyici.
+// Font pool (2026-08-05) — central pool + client assignment + preview loader.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiDelete, apiGet, apiJson, apiUpload } from "./api"
@@ -18,8 +18,8 @@ export interface FontItem {
   sha256: string
   uploader_name: string | null
   uploaded_at: string | null
-  /** Silme yetkisi BACKEND'te hesaplanır (yönetim ayrımsız / tasarımcı yalnız
-   *  kendi yüklediği). Panel kuralı yeniden kurmaz — ayrışırsa düğme yalan söyler. */
+  /** Delete permission is computed on the BACKEND (management: unrestricted / designer:
+   *  only what they uploaded). The panel does not re-derive the rule — if it drifted, the button would lie. */
   can_delete: boolean
   clients: FontClientRef[]
 }
@@ -39,7 +39,7 @@ export function useClientFonts(clientId: number | null) {
   })
 }
 
-// Havuz ve müşteri listesi aynı veriden besleniyor → her mutasyon ikisini de tazeler.
+// The pool and the client list are fed from the same data → every mutation invalidates both.
 function useFontInvalidator() {
   const qc = useQueryClient()
   return () => {
@@ -48,8 +48,8 @@ function useFontInvalidator() {
   }
 }
 
-// Yanıt İKİ şekilli: tek dosyada `{font}`, ZIP'te `{fonts, skipped}` (2026-08-06).
-// Çağıran `sonucOzeti` ile ikisini de tek metne indirger.
+// The response has TWO shapes: `{font}` for a single file, `{fonts, skipped}` for a ZIP (2026-08-06).
+// The caller collapses both into a single message via `sonucOzeti`.
 export interface UploadResult {
   font?: FontItem
   fonts?: FontItem[]
@@ -73,14 +73,16 @@ export function useUploadFont() {
   })
 }
 
-// "2 font eklendi (Bigbelow) · 3 dosya atlandı" — zip'ten ne alındığı ve NEyin
-// atlandığı görünür olmalı; sessizce yutulan dosya kullanıcıyı şaşırtır.
-export function sonucOzeti(d: UploadResult): string {
-  if (d.font) return `${d.font.family} ${d.font.style} eklendi`
+// "2 fonts added (Bigbelow) · 3 files skipped" — what was taken from the zip and
+// WHAT was skipped must be visible; a silently swallowed file would confuse the user.
+export function sonucOzeti(d: UploadResult, t: (key: string, vars?: Record<string, string | number>) => string): string {
+  if (d.font) return t("lib.fonts.singleAdded", { family: d.font.family, style: d.font.style })
   const eklenen = d.fonts ?? []
   const aileler = [...new Set(eklenen.map((f) => f.family))].join(", ")
-  const parcalar = [`${eklenen.length} font eklendi${aileler ? ` (${aileler})` : ""}`]
-  if (d.skipped?.length) parcalar.push(`${d.skipped.length} dosya atlandı`)
+  const parcalar = [aileler
+    ? t("lib.fonts.multiAddedWithFamilies", { count: eklenen.length, families: aileler })
+    : t("lib.fonts.multiAdded", { count: eklenen.length })]
+  if (d.skipped?.length) parcalar.push(t("lib.fonts.skippedCount", { count: d.skipped.length }))
   return parcalar.join(" · ")
 }
 
@@ -124,10 +126,10 @@ export function downloadFont(font: FontItem) {
   a.remove()
 }
 
-// Tarayıcıya font yükleme (önizleme). `FontFace` API'si CSS enjekte etmekten
-// temiz: aynı font iki kez eklenmez, yükleme sözü (promise) beklenebilir ve
-// kaldırma mümkün. Aile adı ID'yle benzersizleştirilir — havuzda aynı isimli
-// iki dosya olabilir ("Montserrat" Regular ve Bold ayrı satır).
+// Loading a font into the browser (preview). The `FontFace` API is cleaner than
+// injecting CSS: the same font isn't added twice, the load promise can be awaited,
+// and removal is possible. The family name is made unique with the ID — the pool
+// can have two files with the same name ("Montserrat" Regular and Bold are separate rows).
 const YUKLENEN = new Map<number, Promise<void>>()
 
 export function cssFamily(font: FontItem) {
@@ -142,7 +144,7 @@ export function loadFontFace(font: FontItem): Promise<void> {
     await face.load()
     document.fonts.add(face)
   })().catch((e) => {
-    YUKLENEN.delete(font.id)      // hata kalıcı olmasın, sonraki denemede tekrar dene
+    YUKLENEN.delete(font.id)      // the failure shouldn't be permanent, retry on the next attempt
     throw e
   })
   YUKLENEN.set(font.id, p)

@@ -1,12 +1,14 @@
-"""Özel gün botu enqueue script'i (Faz 3, step 11) — sonraki ay için `special_days`
-job'unu düşük öncelikle kuyruğa atar. systemd `--user` (proje sahibi) `agency-special-days.timer`
-bunu çağırır (ayın 3. Pzt 03:30); kuyruktan `ai_worker.special_days_handler` çeker.
+"""Special-day bot enqueue script (Phase 3, step 11) — pushes the next
+month's `special_days` job onto the queue at low priority. systemd `--user`
+(project owner) `agency-special-days.timer` calls this (3rd Monday of the
+month, 03:30); `ai_worker.special_days_handler` pulls it from the queue.
 
-Dedup: aynı ay için aktif (queued|running) bir job zaten varsa YENİ INSERT yapılmaz
-(`dedup_key=special_days:{year}-{month}`) — timer + elle-tetik üst üste basarsa mükerrer
-job olmaz. `run()` DB'ye yazan test edilebilir çekirdek; testler doğrudan çağırır.
+Dedup: if an active (queued|running) job for the same month already exists,
+NO new INSERT happens (`dedup_key=special_days:{year}-{month}`) — so a timer
++ manual trigger overlapping doesn't produce a duplicate job. `run()` is the
+testable core that writes to the DB; tests call it directly.
 
-Kullanım:
+Usage:
     venv/bin/python scripts/enqueue_special_days.py --created-by systemd-timer
     venv/bin/python scripts/enqueue_special_days.py --month 6 --year 2026
 """
@@ -16,19 +18,21 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import app  # noqa: E402  (env yüklü olmalı)
+from app import app  # noqa: E402  (env must be loaded)
 import ai_worker  # noqa: E402
 import jobqueue  # noqa: E402
 
 
 def run(month=None, year=None, created_by=None):
-    """Verilen ay (yoksa sonraki ay) için bir `special_days` Job'u oluşturur/döner.
+    """Creates/returns a `special_days` Job for the given month (or next month if unspecified).
 
-    Düşük priority (0 = batch): interaktif caption'ı (priority=10) bloklamaz.
-    dedup_key ile aynı ay iki kez atılırsa tek job kalır (aktif job döner).
+    Low priority (0 = batch): doesn't block interactive captioning (priority=10).
+    If the same month is enqueued twice via dedup_key, only one job remains
+    (the active job is returned).
 
-    NOT: app context AÇMAZ — çağıranın sorumluluğu (bkz. `main()`); testler
-    conftest'in autouse context'i içinde doğrudan çağırır (bkz. enqueue_job.py).
+    NOTE: does NOT open an app context — that's the caller's responsibility
+    (see `main()`); tests call this directly inside conftest's autouse
+    context (see enqueue_job.py).
     """
     if not month or not year:
         month, year = ai_worker._next_month()

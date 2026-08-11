@@ -1,6 +1,6 @@
-"""ai_context.py — AI akışları için ortak bağlam okuma servisi (Faz 0 Task 2).
+"""ai_context.py — shared context-reading service for AI flows (Phase 0 Task 2).
 
-Saf okuma testleri: client_profile, global_rules, recent_captions, week_context.
+Pure read tests: client_profile, global_rules, recent_captions, week_context.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -53,7 +53,7 @@ def test_client_profile_birlesim(client):
 
 
 def test_client_profile_brand_profile_dict_degil_bos_alanlar(client):
-    """JSON kolonunda bozuk/dict-olmayan veri (ör. liste) varsa patlamamalı."""
+    """Must not blow up if the JSON column has malformed/non-dict data (e.g. a list)."""
     c = Client(name="Bozuk Profil", sector="kafe", brand_profile=["not", "a", "dict"])
     db.session.add(c)
     db.session.commit()
@@ -66,7 +66,7 @@ def test_client_profile_brand_profile_dict_degil_bos_alanlar(client):
 
 
 def test_client_profile_renk_paleti_ve_icerik_dagilimi(client):
-    """brand_profile'da color_palette/content_mix varsa aynen yansır (brief'in ihtiyacı)."""
+    """If brand_profile has color_palette/content_mix, they're reflected as-is (needed by the brief)."""
     c = Client(name="Brief Profili", sector="kafe", brand_profile={
         'color_palette': ['#123456', '#abcdef'],
         'content_mix': {'foto_slogan': 3, 'reel': 1, 'carousel': 1},
@@ -80,8 +80,8 @@ def test_client_profile_renk_paleti_ve_icerik_dagilimi(client):
 
 
 def test_client_profile_content_pillars(client):
-    """brand_profile'da content_pillars varsa aynen yansır (brief steering'in ihtiyacı);
-    yoksa boş string (brief prompt'u sütun bloğunu atlar)."""
+    """If brand_profile has content_pillars, it's reflected as-is (needed by brief steering);
+    otherwise an empty string (the brief prompt skips the pillars block)."""
     c = Client(name="Sütunlu Profil", sector="hukuk", brand_profile={
         'content_pillars': '- Hak farkındalığı\n- Güncel/mevsimsel risk\n- KOBİ hukuku',
     })
@@ -96,7 +96,7 @@ def test_client_profile_content_pillars(client):
 
 
 def test_client_profile_hashtags_ve_ideas_per_week(client):
-    """brand_profile'da hashtags/ideas_per_week varsa yansır; yoksa {} / 5 (brief steering)."""
+    """If brand_profile has hashtags/ideas_per_week, they're reflected; otherwise {} / 5 (brief steering)."""
     c = Client(name="Hashtag Profili", sector="hukuk", brand_profile={
         'hashtags': {'konu': ['#HukukBilgisi'], 'marka': ['#AfHukuk']},
         'ideas_per_week': 7,
@@ -177,10 +177,10 @@ def test_recent_captions_baska_musteri_karismaz(client):
 
 
 def test_recent_captions_silinmis_share_haric(client):
-    """Soft-delete edilmiş (deleted_at dolu) Share'in caption'ı dönmemeli.
+    """A soft-deleted (deleted_at set) Share's caption must not be returned.
 
-    Konvansiyon: review.py, sharing.py her yerde Share.deleted_at.is_(None)
-    uyguluyor; recent_captions de aynı kurala uymalı.
+    Convention: review.py, sharing.py apply Share.deleted_at.is_(None) everywhere;
+    recent_captions must follow the same rule.
     """
     c = Client(name="Silinmiş Caption Müşterisi")
     db.session.add(c)
@@ -199,8 +199,8 @@ def test_recent_captions_silinmis_share_haric(client):
 # --- week_context ---
 
 def _event(**kw):
-    # Varsayılan status='approved': week_context onay kapısı yalnız approved okur;
-    # mevcut (onaylı) etkinlikleri temsil eder. Draft senaryosu ayrıca status='draft' ile.
+    # Default status='approved': week_context's approval gate only reads approved;
+    # represents existing (approved) events. Draft scenario uses status='draft' separately.
     base = {'day_name': 'Test Günü', 'active': True, 'type': 'day', 'status': 'approved'}
     base.update(kw)
     e = SpecialDayEvent(**base)
@@ -209,7 +209,7 @@ def _event(**kw):
 
 
 def test_week_context_ozel_gun_filtresi_ve_mevsim(client):
-    # 2026-W03 → 12-18 Ocak (Perşembe 15 Ocak → kış)
+    # 2026-W03 → Jan 12-18 (Thursday Jan 15 → winter)
     icinde = _event(day_name="Hafta İçinde", month=1, year=2026, date_num=14)
     disinda = _event(day_name="Hafta Dışında", month=1, year=2026, date_num=25)
     pasif = _event(day_name="Pasif", month=1, year=2026, date_num=13, active=False)
@@ -224,7 +224,7 @@ def test_week_context_ozel_gun_filtresi_ve_mevsim(client):
 
 
 def test_week_context_tarih_araligi_ortusme(client):
-    # date_start/date_end aralığı haftayla kısmen örtüşüyorsa dahil edilir.
+    # If the date_start/date_end range partially overlaps the week, it's included.
     _event(day_name="Hafta Aralığı", month=1, year=2026, date_start=17, date_end=20)
     db.session.commit()
 
@@ -246,7 +246,7 @@ def test_week_context_musteriye_ozel_dahil_sektorel_filtre_yok(client):
 
 
 def test_week_context_farkli_mevsim(client):
-    # 2026-W16 → Nisan → ilkbahar
+    # 2026-W16 → April → spring
     d = ai_context.week_context('2026-W16')
     assert d['season'] == 'ilkbahar'
 
@@ -264,15 +264,15 @@ def test_week_context_bozuk_week_iso_patlamaz():
 
 
 def test_week_context_brief_ready_week_iso_iceriyor(client):
-    """week_context brief-ready yapı döndürür: season + special_days + week_iso."""
+    """week_context returns a brief-ready structure: season + special_days + week_iso."""
     d = ai_context.week_context('2026-W03')
     assert d['week_iso'] == '2026-W03'
     assert set(d.keys()) == {'season', 'special_days', 'week_iso'}
 
 
 def test_week_context_yalniz_approved_taslak_sizmaz(client):
-    """Onay kapısı (NEGATİF): draft özel gün week_context çıktısında GÖRÜNMEZ,
-    approved GÖRÜNÜR. Downstream AI bağlamına onaysız içerik sızmamalı."""
+    """Approval gate (NEGATIVE case): a draft special day does NOT APPEAR in week_context's
+    output, an approved one DOES. Unapproved content must not leak into downstream AI context."""
     onayli = _event(day_name="Onaylı Gün", month=1, year=2026, date_num=14, status='approved')
     taslak = _event(day_name="Taslak Gün", month=1, year=2026, date_num=14, status='draft')
     db.session.commit()
@@ -281,5 +281,5 @@ def test_week_context_yalniz_approved_taslak_sizmaz(client):
     ids = {e['id'] for e in d['special_days']}
     names = {e['day_name'] for e in d['special_days']}
     assert onayli.id in ids
-    assert taslak.id not in ids          # draft SIZMADI
+    assert taslak.id not in ids          # draft did NOT leak
     assert "Taslak Gün" not in names

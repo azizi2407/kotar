@@ -1,18 +1,18 @@
-// Otomatik düzen — SAF fonksiyonlar (React/DOM yok, girdi→çıktı).
+// Auto layout — PURE functions (no React/DOM, input→output).
 //
-// Neden ayrı dosya: hizalama/dağıtma/ızgara matematiği tuval bileşeninin içinde
-// yaşarsa test edilemez ve her render'da yeniden okunur. Buradaki her fonksiyon
-// `{item_key, x, y}` yamaları döndürür — doğrudan `store.commit()`'e verilebilir.
+// Why a separate file: if the align/distribute/grid math lived inside the canvas
+// component, it couldn't be tested and would be re-read on every render. Every
+// function here returns `{item_key, x, y}` patches — passable directly to `store.commit()`.
 import { DEFAULT_SIZE, parentKeyOf, SNAP, snap8, type PlanningItem } from "@/lib/planlama"
 
 export interface Box { item_key: string; x: number; y: number; width: number; height: number }
 export type Move = { item_key: string; x: number; y: number }
 
-/** Bir okun bağlanacağı kenar — `PlanningNodes`taki `Handle` id'leriyle AYNI. */
+/** The edge an arrow connects to — SAME as the `Handle` ids in `PlanningNodes`. */
 export type Yon = "l" | "r" | "t" | "b"
 
-/** Öğenin gerçek ölçüsü — `width/height` NULL ise tür varsayılanı.
- *  Eski kayıtlarda NULL yaygın; normalize etmezsek hizalama NaN üretir. */
+/** The item's actual size — falls back to the type default if `width/height` is NULL.
+ *  NULL is common in old records; without normalizing, alignment would produce NaN. */
 export function boxOf(it: PlanningItem): Box {
   const d = DEFAULT_SIZE[it.type] || DEFAULT_SIZE.card
   return {
@@ -24,21 +24,21 @@ export function boxOf(it: PlanningItem): Box {
 function sortByX(b: Box[]) { return [...b].sort((p, q) => p.x - q.x || p.y - q.y) }
 function sortByY(b: Box[]) { return [...b].sort((p, q) => p.y - q.y || p.x - q.x) }
 
-/** Sol kenarları en soldakine hizala. */
+/** Align left edges to the leftmost one. */
 export function alignLeft(boxes: Box[]): Move[] {
   if (boxes.length < 2) return []
   const x = snap8(Math.min(...boxes.map((b) => b.x)))
   return boxes.filter((b) => b.x !== x).map((b) => ({ item_key: b.item_key, x, y: b.y }))
 }
 
-/** Üst kenarları en yukarıdakine hizala. */
+/** Align top edges to the topmost one. */
 export function alignTop(boxes: Box[]): Move[] {
   if (boxes.length < 2) return []
   const y = snap8(Math.min(...boxes.map((b) => b.y)))
   return boxes.filter((b) => b.y !== y).map((b) => ({ item_key: b.item_key, x: b.x, y }))
 }
 
-/** Dikey eksende ortala (ortak merkez X). */
+/** Center on the vertical axis (shared center X). */
 export function alignCenterX(boxes: Box[]): Move[] {
   if (boxes.length < 2) return []
   const cx = boxes.reduce((s, b) => s + b.x + b.width / 2, 0) / boxes.length
@@ -46,7 +46,7 @@ export function alignCenterX(boxes: Box[]): Move[] {
                 .filter((m, i) => m.x !== boxes[i].x)
 }
 
-/** Dikey aralıkları eşitle — uçtaki iki öğe sabit kalır, aradakiler dağıtılır. */
+/** Equalize vertical gaps — the two end items stay fixed, the ones in between are distributed. */
 export function distributeY(boxes: Box[], gap = 24): Move[] {
   if (boxes.length < 3) return []
   const s = sortByY(boxes)
@@ -60,7 +60,7 @@ export function distributeY(boxes: Box[], gap = 24): Move[] {
   return moves
 }
 
-/** Yatay aralıkları eşitle. */
+/** Equalize horizontal gaps. */
 export function distributeX(boxes: Box[], gap = 24): Move[] {
   if (boxes.length < 3) return []
   const s = sortByX(boxes)
@@ -74,8 +74,8 @@ export function distributeX(boxes: Box[], gap = 24): Move[] {
   return moves
 }
 
-/** Seçimi ızgaraya diz — sol-üst köşe korunur, satır başına `cols` öğe.
- *  Hücre genişliği en geniş öğeye göre: farklı boyutlu kartlar çakışmasın. */
+/** Arrange the selection into a grid — top-left corner is preserved, `cols` items per row.
+ *  Cell width is based on the widest item, so differently-sized cards don't overlap. */
 export function gridLayout(boxes: Box[], cols = 4, gap = 24): Move[] {
   if (!boxes.length) return []
   const ordered = sortByY(sortByX(boxes))
@@ -92,20 +92,20 @@ export function gridLayout(boxes: Box[], cols = 4, gap = 24): Move[] {
   return moves
 }
 
-/** Tek kolona diz (dikey liste). */
+/** Arrange into a single column (vertical list). */
 export function columnLayout(boxes: Box[], gap = 16): Move[] {
   return gridLayout(boxes, 1, gap)
 }
 
-/** Çoğaltma/yapıştırma ofseti — üst üste binmesin diye sabit kaydırma. */
+/** Duplicate/paste offset — a fixed shift so items don't stack on top of each other. */
 export const PASTE_OFFSET = SNAP * 3
 
-/** Öğenin MUTLAK kutusu.
+/** The item's ABSOLUTE box.
  *
- *  Ebeveynli (bir bölgeye alınmış) öğede `x/y` EBEVEYNE GÖRELİDİR — React Flow'un
- *  sözleşmesi böyle ve DB'de de öyle saklanıyor. Ok uçlarını hesaplarken göreli
- *  koordinatla çalışmak, gruptaki bir kartın okunu tamamen yanlış kenardan
- *  çıkarırdı. Bölgeler iç içe geçmediği için tek seviye yeterli. */
+ *  For an item with a parent (grouped into a region), `x/y` are RELATIVE TO THE PARENT
+ *  — that's React Flow's contract, and it's stored that way in the DB too. Working with
+ *  relative coordinates when computing arrow endpoints would make a grouped card's arrow
+ *  come out from entirely the wrong edge. Since regions don't nest, a single level suffices. */
 export function absBoxOf(it: PlanningItem, byKey: Map<string, PlanningItem>): Box {
   const b = boxOf(it)
   const pk = parentKeyOf(it)
@@ -114,19 +114,20 @@ export function absBoxOf(it: PlanningItem, byKey: Map<string, PlanningItem>): Bo
   return p ? { ...b, x: b.x + p.x, y: b.y + p.y } : b
 }
 
-/** İki kutu arasındaki okun hangi kenarlardan çıkıp gireceği.
+/** Which edges an arrow between two boxes should exit and enter from.
  *
- *  NEDEN HESAPLANIYOR: `onConnect` kullanıcının çektiği tutamağı (`sourceHandle`/
- *  `targetHandle`) kaydetmiyordu ve kenar nesnesine de tutamak yazılmıyordu; React
- *  Flow tutamak verilmeyince listedeki İLKİNE düşüyor (bizde `l` = sol). Sonuç:
- *  sağdaki bir karta çekilen ok bile SOLDAN çıkıp dolanıyordu.
+ *  WHY THIS IS COMPUTED: `onConnect` wasn't saving the handle the user dragged from
+ *  (`sourceHandle`/`targetHandle`), and the edge object didn't store a handle either;
+ *  when no handle is given, React Flow falls back to the FIRST one in the list (`l` = left
+ *  for us). The result: even an arrow dragged to a card on the right would exit from the
+ *  LEFT and wrap around.
  *
- *  Kaydedilmiş tutamak yerine geometriye bakmayı seçtik: (1) hiçbir tutamak
- *  bilgisi taşımayan ESKİ oklar da kendiliğinden düzelir, (2) kart taşınınca ok
- *  kendini toplar — sabitlenmiş bir kenar taşımadan sonra yine dolanırdı.
+ *  We chose to look at geometry instead of a stored handle: (1) OLD arrows carrying no
+ *  handle info at all self-correct automatically, (2) when a card moves, the arrow
+ *  straightens itself — a pinned edge would still wrap around after a move.
  *
- *  Eşitlikte (|dx| == |dy|) yatay tercih edilir; köşegen yerleşimde yatay ok
- *  gözle daha okunur.
+ *  On a tie (|dx| == |dy|), horizontal is preferred; a horizontal arrow reads better
+ *  visually for diagonal placements.
  */
 export function bestHandles(a: Box, b: Box): [Yon, Yon] {
   const dx = (b.x + b.width / 2) - (a.x + a.width / 2)
@@ -137,18 +138,19 @@ export function bestHandles(a: Box, b: Box): [Yon, Yon] {
 
 const YONLER: Yon[] = ["l", "r", "t", "b"]
 
-/** `extra`ya yazılmış tutamağı OKU ve doğrula.
+/** READ and validate the handle stored in `extra`.
  *
- *  `extra` serbest JSON: eski kayıtlarda alan hiç yok, elle düzenlenmiş bir panoda
- *  saçma bir değer olabilir. Tanımadığımız her şey `null` sayılır → hesaplanana düşer. */
+ *  `extra` is free-form JSON: old records don't have the field at all, and a manually
+ *  edited board could hold a nonsensical value. Anything we don't recognize counts as
+ *  `null` → falls back to the computed value. */
 export function storedHandle(extra: Record<string, unknown> | null | undefined,
                              alan: "from_handle" | "to_handle"): Yon | null {
   const v = extra?.[alan]
   return typeof v === "string" && (YONLER as string[]).includes(v) ? (v as Yon) : null
 }
 
-/** Bir yön, hedef vektörüyle tutarlı mı?
- *  `r` yalnız hedef sağdayken, `t` yalnız hedef yukarıdayken makul. */
+/** Is a direction consistent with the target vector?
+ *  `r` only makes sense when the target is to the right, `t` only when it's above. */
 function yonMakul(y: Yon, dx: number, dy: number): boolean {
   if (y === "r") return dx >= 0
   if (y === "l") return dx <= 0
@@ -156,16 +158,17 @@ function yonMakul(y: Yon, dx: number, dy: number): boolean {
   return dy <= 0
 }
 
-/** Okun kenar çifti: KULLANICININ SEÇTİĞİ tutamak öncelikli, geometri yedek.
+/** The arrow's edge pair: the handle the USER CHOSE takes priority, geometry is the fallback.
  *
- *  Neden düz "saklananı kullan" değil: tutamak sabitlenirse, kart okun ters
- *  tarafına taşındığında ok yine kartın etrafından dolanır — bildirilen hatanın ta
- *  kendisi. Bu yüzden saklanan yön yalnız hedef O YÖNDE durduğu sürece geçerli;
- *  ters düştüğü anda hesaplanana düşer. Kart geri taşınırsa seçim yine devreye girer
- *  (saklanan değer SİLİNMİYOR, sadece o an yok sayılıyor).
+ *  Why not simply "use whatever's stored": if the handle were pinned, moving the card to
+ *  the opposite side of the arrow would still make the arrow wrap around the card — the
+ *  exact bug that was reported. So the stored direction is only valid as long as the target
+ *  is STILL in THAT direction; the moment it isn't, it falls back to the computed one. If the
+ *  card is moved back, the stored choice kicks back in (the stored value is NOT DELETED, just
+ *  ignored for the moment).
  *
- *  Kaynak ve hedef ayrı ayrı değerlendirilir: biri saklıyken diğeri boş olabilir
- *  (ör. boşluğa çekilerek yaratılan kartta hedef tutamağı yoktur). */
+ *  Source and target are evaluated separately: one may have a stored handle while the other
+ *  doesn't (e.g. a card created by dragging into empty space has no target handle). */
 export function resolveHandles(a: Box, b: Box,
                                stored: { from: Yon | null; to: Yon | null }): [Yon, Yon] {
   const [gs, gt] = bestHandles(a, b)
@@ -173,23 +176,23 @@ export function resolveHandles(a: Box, b: Box,
   const dy = (b.y + b.height / 2) - (a.y + a.height / 2)
   return [
     stored.from && yonMakul(stored.from, dx, dy) ? stored.from : gs,
-    // Hedef kutunun bakış açısından vektör TERSTİR.
+    // From the target box's perspective, the vector is REVERSED.
     stored.to && yonMakul(stored.to, -dx, -dy) ? stored.to : gt,
   ]
 }
 
 export type ZMod = "one" | "arkaya" | "enOne" | "enArkaya"
 
-/** Katman sırası yamaları.
+/** Layer order patches.
  *
- *  Dört mod: bir adım öne/arkaya (`one`/`arkaya`) ve en öne/en arkaya
- *  (`enOne`/`enArkaya`).
+ *  Four modes: one step forward/backward (`one`/`arkaya`) and bring to front/send to
+ *  back (`enOne`/`enArkaya`).
  *
- *  Mutlak modlarda seçimin KENDİ İÇİNDEKİ sırası korunur: mevcut `z`'ye göre
- *  sıralanıp ardışık değer verilir. Hepsine aynı `z` verilseydi üst üste binen
- *  kartların birbirine göre düzeni her "en öne"de bozulurdu.
+ *  In the absolute modes, the selection's INTERNAL order is preserved: items are sorted
+ *  by their current `z` and given consecutive values. If they all got the same `z`, the
+ *  relative order of overlapping cards would break every time "bring to front" is used.
  *
- *  `kutular` = panodaki tüm kutular (kenarlar hariç) — uç değerler oradan gelir. */
+ *  `kutular` = all boxes on the board (edges excluded) — the extreme values come from there. */
 export function zMoves(liste: PlanningItem[], kutular: PlanningItem[],
                        mod: ZMod): { item_key: string; z: number }[] {
   if (!liste.length) return []
@@ -205,17 +208,17 @@ export function zMoves(liste: PlanningItem[], kutular: PlanningItem[],
   }))
 }
 
-/** Silinen öğelere bağlı okların anahtarları.
+/** Keys of arrows connected to deleted items.
  *
- *  NEDEN VAR: kart silindiğinde okları geride kalıyordu. React Flow'un KENDİ silme
- *  yolu (Delete tuşu → `deleteElements`) bağlı kenarları da kaldırır, ama panelin
- *  kendi silme yolları (kart üstündeki çöp kutusu, sağ tık menüsü, toplu silme) RF'e
- *  uğramadan doğrudan store'a gider ve okları öksüz bırakırdı. Öksüz ok DB'de
- *  görünmez bir satır olarak kalır ve RF her render'da `error008` basar
- *  ("Couldn't create edge for source handle id"). Canlıda 3 böyle satır bulundu
- *  (management panosu, 2026-08-09).
+ *  WHY THIS EXISTS: deleting a card used to leave its arrows behind. React Flow's OWN
+ *  delete path (Delete key → `deleteElements`) also removes connected edges, but the
+ *  panel's own delete paths (the trash icon on a card, the right-click menu, bulk delete)
+ *  bypass RF and go straight to the store, leaving arrows orphaned. An orphaned arrow
+ *  stays in the DB as an invisible row, and RF prints `error008` on every render
+ *  ("Couldn't create edge for source handle id"). 3 such rows were found in production
+ *  (management board, 2026-08-09).
  *
- *  Zaten silinmekte olan okları tekrar döndürmez. */
+ *  Doesn't re-return arrows that are already being deleted. */
 export function connectedEdgeKeys(silinen: Iterable<string>,
                                   items: PlanningItem[]): string[] {
   const set = new Set(silinen)
@@ -226,7 +229,7 @@ export function connectedEdgeKeys(silinen: Iterable<string>,
     .map((it) => it.item_key)
 }
 
-/** Bir kutu kümesinin sınırlayıcı dikdörtgeni (yapıştırmada imleci hizalamak için). */
+/** Bounding rectangle of a set of boxes (used to align the cursor on paste). */
 export function boundsOf(boxes: Box[]) {
   if (!boxes.length) return { x: 0, y: 0, width: 0, height: 0 }
   const x0 = Math.min(...boxes.map((b) => b.x))

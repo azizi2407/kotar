@@ -1,4 +1,4 @@
-"""Panel-içi bildirim: push (DB yaz), GET/read uçları, yetki sınırları."""
+"""In-panel notifications: push (DB write), GET/read endpoints, authorization boundaries."""
 from datetime import timedelta
 
 from sqlalchemy import event
@@ -16,7 +16,7 @@ from models import Notification, UserRef, utcnow
 def test_push_bir_satir_yazar(client):
     n = notifications.push(MANAGER["sub"], "revision_requested", "Başlık", "Gövde",
                             link="/panel/x")
-    db.session.commit()  # push commit etmez — satırı kalıcılaştırmak çağıranın işi
+    db.session.commit()  # push doesn't commit — persisting the row is the caller's job
     assert Notification.query.count() == 1
     row = db.session.get(Notification, n.id)
     assert row.recipient_sub == MANAGER["sub"]
@@ -29,18 +29,18 @@ def test_push_bir_satir_yazar(client):
 
 
 def test_push_commit_etmez_caller_rollback_ederse_bildirim_kaybolur(client):
-    """push() yalnız add+flush yapar; çağıran commit etmeden rollback ederse
-    bildirim satırı kalıcı olmamalı (Faz 0 review I1)."""
+    """push() only does add+flush; if the caller rolls back without committing,
+    the notification row must not persist (Faz 0 review I1)."""
     notifications.push(MANAGER["sub"], "revision_requested", "Başlık", "x")
-    # flush sayesinde aynı session içinde satır görünür ama henüz commit edilmedi
+    # thanks to flush the row is visible within the same session but not yet committed
     assert Notification.query.count() == 1
     db.session.rollback()
     assert Notification.query.count() == 0
 
 
 def test_push_to_client_team_coklu_alicida_tek_commit_atar(client):
-    """_push_to_client_team N alıcıya yazsa da toplam bir kez commit etmeli
-    (alıcı başına ayrı commit yerine — bkz Faz 0 review M1)."""
+    """_push_to_client_team should commit exactly once overall even when writing to N
+    recipients (instead of a separate commit per recipient — see Faz 0 review M1)."""
     from models import UserRef
 
     db.session.add(UserRef(sub=MANAGER["sub"], email=MANAGER["email"],
@@ -90,7 +90,7 @@ def test_read_kendi_bildirimini_isaretler(client):
     row = db.session.get(Notification, n.id)
     assert row.read_at is not None
 
-    # okunan artık okunmamışlar arasında dönmemeli
+    # the read one must no longer show up among the unread
     r2 = client.get("/api/notifications")
     assert r2.get_json()["unread_count"] == 0
 
@@ -115,14 +115,14 @@ def test_read_all_tumunu_isaretler(client):
 
     unread = Notification.query.filter_by(recipient_sub=MANAGER["sub"], read_at=None).count()
     assert unread == 0
-    # başkasının bildirimi etkilenmemeli
+    # someone else's notification must not be affected
     other_unread = Notification.query.filter_by(recipient_sub=DESIGNER["sub"], read_at=None).count()
     assert other_unread == 1
 
 
 def test_unread_count_limit_disinda_kalan_okunmamislari_da_sayar(client):
-    """unread_count SQL COUNT ile hesaplanır — liste son N ile sınırlı kalsa da
-    rozet sayısı gerçek toplam okunmamış sayısını göstermeli (bkz Faz 0 review M4)."""
+    """unread_count is computed with SQL COUNT — even though the list is capped at
+    the last N, the badge count must show the real total unread count (see Faz 0 review M4)."""
     for i in range(NOTIFICATION_LIST_LIMIT + 5):
         notifications.push(MANAGER["sub"], "revision_requested", f"Bildirim {i}", "x")
     db.session.commit()
@@ -138,7 +138,7 @@ def test_revizyon_talebi_yoneticilere_ve_atanan_ekibe_bildirim_yazar(client, app
     from extensions import db as _db
     from models import Client, ClientTeamAssignment, UserRef
 
-    # yönetici UserRef'i + müşteriye atanan tasarımcı
+    # manager UserRef + designer assigned to the client
     _db.session.add(UserRef(sub=MANAGER["sub"], email=MANAGER["email"],
                             name=MANAGER["name"], role="management"))
     _db.session.add(UserRef(sub=DESIGNER["sub"], email=DESIGNER["email"],
@@ -175,7 +175,7 @@ def _mgmt_ve_atanan_designer(client):
 
 
 def test_client_review_onaylandi_yalniz_yonetime(client, app):
-    """Müşteri 'onaylandı' → yalnız yönetim; atanan tasarımcıya GİTMEZ (2026-07-21)."""
+    """Client 'approved' → management only; does NOT go to the assigned designer (2026-07-21)."""
     c = _mgmt_ve_atanan_designer(client)
     notifications.notify_client_review(c.id, "2026-W29", "approved")
     assert Notification.query.filter_by(recipient_sub=MANAGER["sub"],
@@ -185,7 +185,7 @@ def test_client_review_onaylandi_yalniz_yonetime(client, app):
 
 
 def test_client_review_revizyon_ekibe_de(client, app):
-    """Müşteri 'revizyon istedi' → yönetim + atanan ekip (yeniden çalışma gerekir)."""
+    """Client 'requested revision' → management + assigned team (rework is needed)."""
     c = _mgmt_ve_atanan_designer(client)
     notifications.notify_client_review(c.id, "2026-W29", "revision_requested")
     assert Notification.query.filter_by(recipient_sub=MANAGER["sub"],
@@ -194,7 +194,7 @@ def test_client_review_revizyon_ekibe_de(client, app):
                                         kind="client_review").count() == 1
 
 
-# --- job-failure / stuck bildirim bağlama (adım 05) ---
+# --- job-failure / stuck notification wiring (step 05) ---
 
 def _yonetici_user_ref():
     db.session.add(UserRef(sub=MANAGER["sub"], email=MANAGER["email"],
@@ -203,7 +203,7 @@ def _yonetici_user_ref():
 
 
 def test_job_terminal_fail_yonetime_bildirim_yazar(client):
-    """Un-gameable: terminal fail ÖNCESİ job_failed sayısı 0, SONRASI ≥1, doğru alıcı."""
+    """Un-gameable: job_failed count is 0 BEFORE the terminal fail, ≥1 AFTER, with the right recipient."""
     _yonetici_user_ref()
     jobqueue.enqueue("caption", {"share_id": 1})
     j = jobqueue.claim(["caption"])
@@ -216,7 +216,7 @@ def test_job_terminal_fail_yonetime_bildirim_yazar(client):
 
 
 def test_job_transient_requeue_bildirim_atmaz(client):
-    """Negatif kontrol: transient + attempts<max → yalnız requeue, bildirim OLUŞMAZ."""
+    """Negative check: transient + attempts<max → only requeue, no notification is CREATED."""
     _yonetici_user_ref()
     jobqueue.enqueue("caption", {})
     j = jobqueue.claim(["caption"])  # attempts=1
@@ -238,8 +238,8 @@ def test_reap_stuck_yonetime_bildirim_yazar(client):
 
 
 def test_ops_digest_report_yalniz_yonetime_yazar(client):
-    """notify_ops_digest_report yalnız management alıcılarına ops_digest_report bildirimi
-    yazar (designer'a değil). push() flush eder; test commit ile kalıcılaştırır."""
+    """notify_ops_digest_report writes ops_digest_report notifications only to management
+    recipients (not to designer). push() flushes; the test persists it with commit."""
     db.session.add(UserRef(sub=MANAGER["sub"], email=MANAGER["email"],
                            name=MANAGER["name"], role="management"))
     db.session.add(UserRef(sub=DESIGNER["sub"], email=DESIGNER["email"],
@@ -250,7 +250,7 @@ def test_ops_digest_report_yalniz_yonetime_yazar(client):
     db.session.commit()
 
     rows = Notification.query.filter_by(kind="ops_digest_report").all()
-    assert len(notifs) == 1                       # yalnız management alıcı
+    assert len(notifs) == 1                       # management recipient only
     assert len(rows) == 1
     assert rows[0].recipient_sub == MANAGER["sub"]
     assert rows[0].title == "Ops Digest takip raporu"
@@ -258,9 +258,9 @@ def test_ops_digest_report_yalniz_yonetime_yazar(client):
 
 
 def test_job_failed_spam_coalesce_ikinci_bildirim_olusmaz(client):
-    """Aynı job_type için kısa pencerede İKİ terminal-fail → İKİNCİ bildirim OLUŞMAZ
-    (okunmamış eşleşen varken atlanır). Un-gameable: iki fail sonrası eşleşen
-    okunmamış bildirim sayısı 1."""
+    """TWO terminal-fails for the same job_type in a short window → the SECOND notification
+    is NOT created (skipped while a matching unread one exists). Un-gameable: after two
+    fails, the matching unread notification count is 1."""
     _yonetici_user_ref()
     j1 = jobqueue.enqueue("caption", {"n": 1})
     j1 = jobqueue.claim(["caption"])
@@ -273,7 +273,7 @@ def test_job_failed_spam_coalesce_ikinci_bildirim_olusmaz(client):
 
 
 def test_get_notifications_sayfalama_has_more(client):
-    # 3 bildirim; limit=2 istenirse ilk sayfa 2 satır + has_more True döner.
+    # 3 notifications; requesting limit=2 returns 2 rows on the first page + has_more True.
     for i in range(3):
         notifications.push(MANAGER["sub"], "revision_requested", f"Bildirim {i}", "x")
     db.session.commit()
@@ -283,9 +283,9 @@ def test_get_notifications_sayfalama_has_more(client):
     d = r.get_json()
     assert len(d["notifications"]) == 2
     assert d["has_more"] is True
-    assert d["unread_count"] == 3  # unread_count sayfalamadan bağımsız (global)
+    assert d["unread_count"] == 3  # unread_count is independent of pagination (global)
 
-    # offset ile ikinci sayfa: kalan 1 satır, has_more False.
+    # second page via offset: the remaining 1 row, has_more False.
     r2 = client.get("/api/notifications?limit=2&offset=2")
     d2 = r2.get_json()
     assert len(d2["notifications"]) == 1
@@ -293,7 +293,7 @@ def test_get_notifications_sayfalama_has_more(client):
 
 
 def test_ops_digest_report_link_yok(client):
-    # Ops Digest raporunun tamamı gövdede; /panel/jobs sayfası olmadığından link=None.
+    # The entire Ops Digest report is in the body; link=None since there's no /panel/jobs page.
     db.session.add(UserRef(sub=MANAGER["sub"], email=MANAGER["email"], name="M", role="management"))
     db.session.commit()
     notifications.notify_ops_digest_report("Ops Digest takip raporu", "tüm rapor gövdede")

@@ -1,4 +1,4 @@
-"""/api/sharing — Sharing Board API testleri (Faz 2a)."""
+"""/api/sharing — Sharing Board API tests (Phase 2a)."""
 import pytest
 from conftest import DESIGNER, MANAGER, login_as
 from test_session_csrf import csrf_headers
@@ -8,7 +8,7 @@ WK = "2026-W21"
 
 @pytest.fixture
 def client_id(client):
-    """Bir müşteri oluştur, id'sini döndür (management oturumu açık kalır)."""
+    """Create a client, return its id (management session stays open)."""
     login_as(client, MANAGER)
     r = client.post("/api/clients", json={"name": "Board Müşteri"}, headers=csrf_headers(client))
     return r.get_json()["client"]["id"]
@@ -22,14 +22,14 @@ def mk_share(client, cid, **kw):
     return r.get_json()["share"]
 
 
-# --- yetki ---
+# --- permissions ---
 
 def test_cards_oturumsuz_401(client):
     assert client.get(f"/api/sharing/cards?week_iso={WK}").status_code == 401
 
 
 def test_cards_designer_403(client, client_id):
-    # Faz 2a: yönetim board'ı, yalnız management
+    # Phase 2a: management board, management only
     login_as(client, DESIGNER)
     assert client.get(f"/api/sharing/cards?week_iso={WK}").status_code == 403
 
@@ -94,7 +94,7 @@ def test_share_publish_dosyali(client, client_id):
 
 
 def test_share_publish_dosyasiz_notsuz_400(client, client_id):
-    """Dosyasız paylaşımda not zorunlu (eski kural)."""
+    """Note is required for a share without a file (old rule)."""
     s = mk_share(client, client_id)
     r = client.post(f"/api/sharing/shares/{s['id']}/publish", headers=csrf_headers(client))
     assert r.status_code == 400
@@ -123,7 +123,7 @@ def test_share_platform_mark_toggle(client, client_id):
                     json={"platform": "linkedin"}, headers=csrf_headers(client))
     assert r.status_code == 200
     assert "linkedin" in r.get_json()["share"]["platforms"]
-    # tekrar → kaldır
+    # again → remove
     r = client.post(f"/api/sharing/shares/{s['id']}/platform-mark",
                     json={"platform": "linkedin"}, headers=csrf_headers(client))
     assert "linkedin" not in r.get_json()["share"]["platforms"]
@@ -133,13 +133,13 @@ def test_share_soft_delete(client, client_id):
     s = mk_share(client, client_id)
     r = client.delete(f"/api/sharing/shares/{s['id']}", headers=csrf_headers(client))
     assert r.status_code == 200
-    # kartlarda görünmez
+    # not visible in cards
     cards = client.get(f"/api/sharing/cards?week_iso={WK}").get_json()
     ids = [sh["id"] for row in cards["rows"] for sh in row["shares"]]
     assert s["id"] not in ids
 
 
-# --- haftalık kart matrisi ---
+# --- weekly card matrix ---
 
 def test_cards_musteri_satiri_ve_shares(client, client_id):
     mk_share(client, client_id, file_id="f1")
@@ -171,7 +171,7 @@ def test_cards_ilerleme_sayaci(client, client_id):
 
 
 def test_cards_video_sadece_son_revizyon(client, client_id):
-    """Video: yalnız en yüksek revision görünür (eski görünürlük kuralı)."""
+    """Video: only the highest revision is visible (old visibility rule)."""
     mk_share(client, client_id, kind="video", revision=0, file_id="v0")
     mk_share(client, client_id, kind="video", revision=1, file_id="v1")
     r = client.get(f"/api/sharing/cards?week_iso={WK}").get_json()
@@ -189,7 +189,7 @@ def test_priority_toggle(client, client_id):
     cards = client.get(f"/api/sharing/cards?week_iso={WK}").get_json()
     row = next(x for x in cards["rows"] if x["client"]["id"] == client_id)
     assert row["priority"] is True
-    # tekrar → kapat
+    # again → close
     r = client.post("/api/sharing/priority",
                     json={"client_id": client_id, "week_iso": WK}, headers=csrf_headers(client))
     assert r.get_json()["active"] is False
@@ -205,7 +205,7 @@ def test_review_link_uret_idempotent(client, client_id):
     assert len(t1) >= 32
     r2 = client.post("/api/sharing/review-link",
                      json={"client_id": client_id, "week_iso": WK}, headers=csrf_headers(client))
-    assert r2.get_json()["token"] == t1  # aynı (client,week) → aynı token
+    assert r2.get_json()["token"] == t1  # same (client,week) → same token
 
 
 def test_review_link_revoke_sonra_yeni(client, client_id):
@@ -220,7 +220,7 @@ def test_review_link_revoke_sonra_yeni(client, client_id):
     assert t2 != t1
 
 
-# --- özel gün kartı ---
+# --- special day card ---
 
 def test_special_card_publish_unpublish(client, client_id):
     from extensions import db
@@ -244,7 +244,7 @@ def test_special_card_publish_unpublish(client, client_id):
     assert row["special_cards"] == []
 
 
-# --- uploads (seçici kaynağı) ---
+# --- uploads (picker source) ---
 
 def test_uploads_listesi(client, client_id):
     from extensions import db
@@ -259,7 +259,8 @@ def test_uploads_listesi(client, client_id):
 
 
 def test_magnific_credits_cache_okur(client, client_id):
-    """Kredi ucu AppSetting cache'inden okur; cache boşsa credits=null, canlı çağrı yok."""
+    """The credits endpoint reads from the AppSetting cache; if the cache is empty,
+    credits=null, no live call."""
     import json as _json
 
     from extensions import db
@@ -294,7 +295,8 @@ def _brief_for(client, cid, ideas=None):
 
 
 def test_prompt_examples_job_enqueue(client, client_id):
-    """Uç senkron claude KOŞMAZ (svc-agency'de CLI yok) — job enqueue edip 202 döner."""
+    """The endpoint does NOT run claude synchronously (no CLI in svc-agency) — it
+    enqueues a job and returns 202."""
     from extensions import db
     from models import Job
     b = _brief_for(client, client_id)
@@ -331,7 +333,7 @@ def test_convert_prompt_bos_400(client, client_id):
     assert r.status_code == 400
 
 
-# --- müşteri marka görselleri (logo + standart) ---
+# --- client brand images (logo + standard) ---
 
 def _asset_drive_mocks(monkeypatch):
     import sharing as sharing_mod
@@ -370,7 +372,7 @@ def test_client_asset_yukle_listele_sil(client, client_id, monkeypatch):
 
 
 def test_client_asset_logo_tekil(client, client_id, monkeypatch):
-    """Yeni logo eskisini soft-delete eder — listede hep TEK logo kalır."""
+    """New logo soft-deletes the old one — the list always keeps a SINGLE logo."""
     import io
     _asset_drive_mocks(monkeypatch)
     _set_drive_meta(client_id)
@@ -396,10 +398,10 @@ def test_client_asset_gorsel_disi_reddedilir(client, client_id, monkeypatch):
     assert r.status_code == 400
 
 
-# --- marka görseli okuma/indirme rol kapısı (2026-08-04) ---
+# --- brand image read/download permission gate (2026-08-04) ---
 
 def _make_asset(client, client_id, monkeypatch, name="logo.png"):
-    """Management olarak bir marka görseli yükler, asset dict'i döndürür."""
+    """Uploads a brand image as management, returns the asset dict."""
     import io
     _asset_drive_mocks(monkeypatch)
     _set_drive_meta(client_id)
@@ -418,8 +420,8 @@ def _assign(client_id, sub, slot):
 
 
 def test_asset_indirme_management_ve_designer(client, client_id, monkeypatch):
-    """İndirme servis hesabıyla stream eder; designer atanmasa da erişir (board'da
-    'Diğer Müşteriler' tile'ları da tam aksiyonlu)."""
+    """Download streams via the service account; the designer has access even when not
+    assigned (the 'Other Clients' tiles on the board are also fully actionable)."""
     import sharing as sharing_mod
     from conftest import DESIGNER, login_as
     asset = _make_asset(client, client_id, monkeypatch, "marka.png")
@@ -462,7 +464,7 @@ def test_asset_indirme_oturumsuz_401_ve_yok_404(client, client_id, monkeypatch):
     asset = _make_asset(client, client_id, monkeypatch)
     assert client.get(
         f"/api/sharing/clients/{client_id}/assets/999999/download").status_code == 404
-    # silinmiş asset de 404
+    # a deleted asset is also 404
     client.delete(f"/api/sharing/clients/{client_id}/assets/{asset['id']}",
                   headers=csrf_headers(client))
     assert client.get(

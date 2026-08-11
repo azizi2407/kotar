@@ -1,8 +1,9 @@
-// Codex görsel üretimi (2026-08-10) — `/api/imagegen/*` sarmalayıcıları.
+// Codex image generation (2026-08-10) — wrappers for `/api/imagegen/*`.
 //
-// `lib/sharing.ts`'teki Magnific hattından AYRI: o hat Drive'a yazar, onay kapısı ve
-// kredi rozeti taşır. Bu hat ChatGPT aboneliği üzerinden üretir, çıktı sunucuda lokal
-// durur ve v1'de onay/varyasyon yüzeyi yoktur.
+// SEPARATE from the Magnific pipeline in `lib/sharing.ts`: that pipeline writes to
+// Drive and carries an approval gate and a credit badge. This pipeline generates via
+// the ChatGPT subscription, output stays local on the server, and there's no
+// approval/variation surface in v1.
 import { apiGet, apiJson } from "./api"
 
 export type ImageJob = {
@@ -30,16 +31,18 @@ export const ASPECTS: [string, string][] = [
 
 export const MAX_REFERENCES = 3
 
-// Durum → kullanıcıya gösterilecek etiket (backend STATUSES ile eş).
-export const STATUS_LABEL: Record<string, string> = {
-  queued: "Sırada",
-  preparing: "Hazırlanıyor",
-  running: "Üretiliyor",
-  validating: "Doğrulanıyor",
-  storing: "Kaydediliyor",
-  completed: "Tamamlandı",
-  failed: "Başarısız",
-  cancelled: "İptal",
+// Status → translation key (matches backend STATUSES). The label text is produced
+// in the page component with t() (this file can't use React hooks) — see media-tools.ts
+// "pages.codexImage.status.*".
+export const STATUS_LABEL_KEY: Record<string, string> = {
+  queued: "pages.codexImage.status.queued",
+  preparing: "pages.codexImage.status.preparing",
+  running: "pages.codexImage.status.running",
+  validating: "pages.codexImage.status.validating",
+  storing: "pages.codexImage.status.storing",
+  completed: "pages.codexImage.status.completed",
+  failed: "pages.codexImage.status.failed",
+  cancelled: "pages.codexImage.status.cancelled",
 }
 
 export async function listImageJobs(clientId: number): Promise<ImageJob[]> {
@@ -61,16 +64,22 @@ export async function imagegenHealth(): Promise<{ ok: boolean; detail: string; e
   return apiGet("/imagegen/health")
 }
 
-/** İşi bitene dek yokla.
+/** The message of the Error thrown on timeout — a fixed/untranslated marker (this
+ *  file can't use React hooks, so it can't translate via t()). The calling component
+ *  catches this marker and shows it to the user with its own t() call. */
+export const IMAGEGEN_TIMEOUT_MARKER = "IMAGEGEN_TIMEOUT"
+
+/** Poll until the job finishes.
  *
- * `sharing.pollJob` BİLEREK kullanılmıyor: onun timeout'u 180 sn, Codex üretimi ise
- * spike'ta 3,5 dakika sürdü — o sarmalayıcı üretimi tam da biterken hata atardı. */
+ * `sharing.pollJob` is DELIBERATELY not used: its timeout is 180s, while Codex
+ * generation took 3.5 minutes at a spike — that wrapper would throw an error right as
+ * the generation finished. */
 export async function pollImageJob(
   id: number,
   opts: { interval?: number; timeout?: number } = {},
 ): Promise<ImageJob> {
   const interval = opts.interval ?? 3000
-  const timeout = opts.timeout ?? 900000 // 15 dk
+  const timeout = opts.timeout ?? 900000 // 15 min
   const start = Date.now()
   while (Date.now() - start < timeout) {
     const d = await apiGet(`/imagegen/jobs/${id}`)
@@ -78,14 +87,14 @@ export async function pollImageJob(
     if (ij.status === "completed" || ij.status === "failed" || ij.status === "cancelled") return ij
     await new Promise((r) => setTimeout(r, interval))
   }
-  throw new Error("Üretim zaman aşımına uğradı")
+  throw new Error(IMAGEGEN_TIMEOUT_MARKER)
 }
 
 export function imageUrl(id: number) {
   return `/api/imagegen/jobs/${id}/image`
 }
 
-// --- Haftalık parti üretimi (2026-08-10) ---
+// --- Weekly batch generation (2026-08-10) ---
 
 export type BriefWeek = { week_iso: string; brief_id: number; title: string | null }
 export type SkippedIdea = { index: number; baslik: string; sebep: string }
@@ -95,9 +104,10 @@ export type BatchGroup = {
   jobs: Partial<Record<"with_text" | "clean", ImageJob>>
 }
 
-export const VARIANT_LABEL: Record<string, string> = {
-  with_text: "Metinli",
-  clean: "Metinsiz",
+// Variant → translation key (see media-tools.ts "pages.codexImage.variant.*").
+export const VARIANT_LABEL_KEY: Record<string, string> = {
+  with_text: "pages.codexImage.variant.withText",
+  clean: "pages.codexImage.variant.clean",
 }
 
 export async function listWeeks(clientId: number): Promise<BriefWeek[]> {

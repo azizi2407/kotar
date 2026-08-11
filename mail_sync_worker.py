@@ -1,9 +1,9 @@
-"""Mail poller — poll_enabled hesapların INBOX'ını periyodik IMAP→DB senkronlar.
+"""Mail poller — periodically syncs poll_enabled accounts' INBOX from IMAP→DB.
 
-systemd --user oneshot + timer (agency-mail-sync.timer, ~5 dk). Infisical
-enjeksiyonlu (scripts/mail_sync_start.sh → MAIL_ENC_KEY). Hata izole: bir hesap
-patlarsa diğerleri sürer, last_error yazılır. Yeni mailde notifications.push
-(mail_service.sync_account içinde)."""
+systemd --user oneshot + timer (agency-mail-sync.timer, ~5 min). Infisical-injected
+(scripts/mail_sync_start.sh → MAIL_ENC_KEY). Errors are isolated: if one account
+blows up, the others keep going, last_error is written. notifications.push on new
+mail (inside mail_service.sync_account)."""
 import logging
 
 import mail_service
@@ -14,7 +14,7 @@ log = logging.getLogger('agency.mail_sync')
 
 
 def run_once():
-    """poll_enabled + active hesapları senkronla. Döner: {account_email: yeni_sayısı}."""
+    """Sync poll_enabled + active accounts. Returns: {account_email: new_count}."""
     result = {}
     accounts = MailAccount.query.filter_by(poll_enabled=True, active=True).all()
     for acc in accounts:
@@ -23,7 +23,7 @@ def run_once():
             result[acc.email] = n
             if n:
                 log.info('mail_sync %s: %d yeni', acc.email, n)
-        except Exception as e:  # noqa: BLE001 — bir hesap diğerlerini engellemesin
+        except Exception as e:  # noqa: BLE001 — one account shouldn't block the others
             db.session.rollback()
             acc.last_error = str(e)
             db.session.commit()

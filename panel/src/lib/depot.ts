@@ -1,6 +1,7 @@
-// Videograf Deposu — /api/depot. ORTAK 5 GB alan (tüm videograflar + yönetim),
-// dosya başına 500 MB. Kota her zaman SUNUCU yanıtından okunur; aşağıdaki sabitler
-// yalnız istemci ön-kontrolü içindir (kullanıcıyı boşuna yükleme yapmaktan kurtarır).
+// Videographer Depot — /api/depot. SHARED 5 GB space (all videographers +
+// management), 500 MB per file. The quota is always read from the SERVER
+// response; the constants below are for client-side pre-checks only (saves
+// the user from a pointless upload).
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiDelete, apiGet, apiUpload } from "@/lib/api"
@@ -26,8 +27,8 @@ export interface DepotQuota {
   over_quota: boolean
 }
 
-/** Backend `depot.BLOCKED_EXT` aynası — çalıştırılabilir dosyalar depoya girmez
- *  (dosyalar bağlantıyla herkese açık; konan bir .exe kimlik avı aracına döner). */
+/** Mirrors backend `depot.BLOCKED_EXT` — executable files don't get into the
+ *  depot (files are publicly accessible via link; a placed .exe would turn into a phishing tool). */
 export const BLOCKED_EXT = new Set([
   "exe", "msi", "bat", "cmd", "com", "scr", "pif", "ps1", "sh", "bash",
   "apk", "jar", "vbs", "wsf", "lnk", "dll", "deb", "rpm",
@@ -38,6 +39,9 @@ export function isBlockedFile(name: string): boolean {
   return BLOCKED_EXT.has(ext)
 }
 
+// Note: "0 MB"/"GB"/"MB" units are already language-independent (Latin
+// abbreviations) — only the number format is localized (Intl.NumberFormat
+// uses the "tr-TR" decimal separator, left unchanged to stay consistent with the rest of the panel).
 export function fmtBytes(n: number): string {
   if (!n) return "0 MB"
   if (n >= 1024 ** 3) {

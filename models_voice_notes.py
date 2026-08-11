@@ -1,12 +1,12 @@
-"""Sesli not (2026-08-09) — ses → transkript → yapılandırılmış not.
+"""Voice note (2026-08-09) — audio → transcript → structured note.
 
-Fethi (yönetim) not tutmakta iyi değil; konuşup bıraksın, sistem yazıya
-çevirsin ve çıkan görevler planlama panosuna aktarılabilsin.
+Fethi (management) isn't good at keeping notes; let him talk and leave it, have the
+system transcribe it, and let the resulting tasks be pushed to the planning board.
 
-**Neden ayrı tablo (`shares`/`card_uploads` değil):** bu bir TESLİM değil,
-kişisel bir düşünme alanı. Müşteriye/haftaya bağlı değil, sahibinden
-başkasına görünmüyor ve yaşam döngüsü (kuyruk durumu → ajan çıktısı →
-panoya aktarım) tamamen kendine ait.
+**Why a separate table (not `shares`/`card_uploads`):** this isn't a DELIVERABLE,
+it's a personal thinking space. It's not tied to a client/week, isn't visible to
+anyone but its owner, and its lifecycle (queue status → agent output → push to
+board) is entirely its own.
 """
 import re
 from datetime import date
@@ -16,28 +16,28 @@ from models import JSON_, iso, utcnow
 
 STATUSES = ('queued', 'running', 'done', 'failed')
 
-# Ajan çıktısındaki tarih: YALNIZ ISO (YYYY-MM-DD). Göreli ifadeyi
-# ("önümüzdeki salı") ajan bugünün tarihine göre çözmekle yükümlü;
-# çözemediyse null bırakmalı. Buraya sızan serbest metin panelde tarih
-# alanını bozardı.
+# Date in the agent's output: ISO ONLY (YYYY-MM-DD). The agent is responsible for
+# resolving relative expressions ("next Tuesday") against today's date;
+# if it can't resolve one, it must leave it null. Free text leaking through here
+# would break the date field in the panel.
 #
-# Doğrulama İKİ AŞAMALI olmak ZORUNDA:
-#   1) biçim: yalnız `YYYY-MM-DD` (regex) — `date.fromisoformat` tek başına
-#      yetmez, çünkü Python 3.11+'ta ayırıcısız `20260220` ve ISO hafta
-#      biçimi `2026-W07-3` gibi panonun beklemediği biçimleri de kabul eder.
-#   2) takvim: biçim doğru olsa da `2026-02-30` veya `2026-13-01` gibi var
-#      olmayan bir tarih olabilir — regex bunu yakalayamaz, `date.fromisoformat`
-#      ile gerçekten çözülebildiği doğrulanır.
-# Bu alan sonunda planlama panosunun `PlanningItem.due_date` (Postgres `Date`)
-# kolonuna yazılıyor; takvimsel olarak geçersiz bir değer regex'i geçip oraya
-# ulaşırsa `DataError` ile patlar ve kullanıcı "Panoya ekle"de 500 görür.
-# `normalize_structured` ajan çıktısına karşı TEK savunma hattı olduğu için
-# doğrulama tam burada, eksiksiz yapılmalı.
+# Validation MUST be TWO-STAGE:
+#   1) format: `YYYY-MM-DD` only (regex) — `date.fromisoformat` alone isn't
+#      enough, because on Python 3.11+ it also accepts unseparated `20260220`
+#      and ISO week format `2026-W07-3`, forms the board doesn't expect.
+#   2) calendar: even with the right format, it could be a date that doesn't
+#      exist, like `2026-02-30` or `2026-13-01` — the regex can't catch that,
+#      so `date.fromisoformat` confirms it's actually resolvable.
+# This field ultimately gets written to the planning board's `PlanningItem.due_date`
+# (Postgres `Date`) column; if a calendrically invalid value slips past the regex
+# and reaches there, it blows up with `DataError` and the user sees a 500 on
+# "Add to board". Since `normalize_structured` is the ONLY line of defense against
+# agent output, validation has to be complete right here.
 _ISO_TARIH = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 
 
 def _gecerli_iso_tarih(v):
-    """`YYYY-MM-DD` biçiminde VE takvimsel olarak var olan bir tarih mi?"""
+    """Is it in `YYYY-MM-DD` format AND a calendrically real date?"""
     if not _ISO_TARIH.match(v):
         return False
     try:
@@ -49,12 +49,12 @@ def _gecerli_iso_tarih(v):
 TITLE_MAX = 200
 OZET_MAX = 2000
 MADDE_MAX = 500
-# Pano `planning.TITLE_MAX` (300) ile HİZALI olmak ZORUNDA: görev metni panoya
-# `PlanningItem.title` olarak yazılıyor (`NoteDetail.tsx` panoyaEkle). Daha
-# önce 500'dü — 300'ü aşan bir görev panoya PATCH edilince `planning._clean_text`
-# ValueError fırlatıyor ve TÜM parti 400 ile geri dönüyordu (partideki DİĞER
-# görevler de dahil, hiçbiri eklenmiyordu). 300'ü aşarsa burada kırpılır, panoya
-# giden metin zaten sınır içinde kalır.
+# MUST stay ALIGNED with the board's `planning.TITLE_MAX` (300): task text gets
+# written to the board as `PlanningItem.title` (`NoteDetail.tsx` panoyaEkle). It
+# used to be 500 — when a task over 300 chars got PATCHed to the board,
+# `planning._clean_text` raised ValueError and the WHOLE batch came back with a 400
+# (including the OTHER tasks in the batch — none of them got added). If it exceeds
+# 300 it's truncated right here, so text going to the board already stays within the limit.
 GOREV_MAX = 300
 MADDE_ADET_MAX = 30
 GOREV_ADET_MAX = 30
@@ -65,7 +65,7 @@ def _metin(v, sinir):
 
 
 def _gorev(ham):
-    """Tek görev önerisini süz. `metin` yoksa görev yok sayılır (None döner)."""
+    """Filter a single task suggestion. If `metin` is missing the task is discarded (returns None)."""
     if not isinstance(ham, dict):
         return None
     metin = _metin(ham.get('metin'), GOREV_MAX)
@@ -84,12 +84,12 @@ def _gorev(ham):
 
 
 def normalize_structured(raw):
-    """Ajan çıktısını GÜVENİLMEZ sayıp şemaya indirger.
+    """Treats the agent's output as UNTRUSTED and reduces it to the schema.
 
-    Her zaman dört anahtar döner. Bilinmeyen anahtarlar atılır, tipler
-    zorlanır, sınırlar uygulanır. Ajan JSON üretse bile alan adlarını
-    uydurabilir veya `client_id` yerine müşteri ADI yazabilir — panel bu
-    sözlüğü doğrudan render ettiği için temizlik BURADA yapılır."""
+    Always returns four keys. Unknown keys are dropped, types are coerced,
+    limits are enforced. Even when the agent produces JSON, it can make up
+    field names or write the client's NAME instead of `client_id` — since the
+    panel renders this dict directly, the cleanup happens RIGHT HERE."""
     raw = raw if isinstance(raw, dict) else {}
     maddeler = raw.get('maddeler')
     maddeler = maddeler if isinstance(maddeler, list) else []
@@ -106,34 +106,34 @@ def normalize_structured(raw):
 
 
 class VoiceNote(db.Model):
-    """Tek sesli not: ses dosyası + transkript + ajan çıktısı + kuyruk durumu."""
+    """A single voice note: audio file + transcript + agent output + queue status."""
     __tablename__ = 'voice_notes'
     __table_args__ = (
         db.Index('ix_voice_notes_owner', 'owner_sub', 'deleted_at', 'created_at'),
     )
 
     id = db.Column(db.Integer, primary_key=True)
-    owner_sub = db.Column(db.String(64), nullable=False)   # SSO sub (FK DEĞİL — kimlik SSO'da)
+    owner_sub = db.Column(db.String(64), nullable=False)   # SSO sub (NOT an FK — identity lives in SSO)
 
-    audio_sha256 = db.Column(db.String(64), nullable=False)   # disk adı VE içerik hash'i
+    audio_sha256 = db.Column(db.String(64), nullable=False)   # both the disk name AND the content hash
     audio_ext = db.Column(db.String(8), nullable=False)
     mime_type = db.Column(db.String(120))
     file_size = db.Column(db.BigInteger, nullable=False, default=0)
-    duration_sec = db.Column(db.Integer)                   # ffprobe; okunamazsa NULL
+    duration_sec = db.Column(db.Integer)                   # ffprobe; NULL if unreadable
 
     status = db.Column(db.String(16), nullable=False, default='queued')
     transcript = db.Column(db.Text)
     structured = db.Column(JSON_)
     error = db.Column(db.String(500))
-    # Panoya aktarılan görevlerin item_key'leri — aynı görev iki kez eklenmesin.
+    # item_keys of tasks pushed to the board — so the same task isn't added twice.
     pushed_item_keys = db.Column(JSON_)
 
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     deleted_at = db.Column(db.DateTime(timezone=True))
 
     def to_dict(self, full=False):
-        """`full=False` liste görünümü — `transcript` TAŞIMAZ (kilobaytlarca
-        olabilir, liste her yoklamada tazeleniyor)."""
+        """`full=False` is the list view — does NOT carry `transcript` (can be
+        kilobytes, and the list refreshes on every poll)."""
         s = self.structured if isinstance(self.structured, dict) else {}
         d = {'id': self.id, 'status': self.status,
              'baslik': s.get('baslik') or '',

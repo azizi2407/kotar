@@ -1,19 +1,19 @@
-"""Görsel promptunun JSON şeması, doğrulaması ve Codex metnine dönüşümü (2026-08-10).
+"""Image prompt's JSON schema, validation, and conversion to Codex text (2026-08-10).
 
-Neden ayrı modül: şema doğrulaması bir GÜVENLİK katmanıdır ve HTTP'siz, DB'siz test
-edilebilmelidir. Brief untrusted veridir; `claude -p` çeviri adımı bir enjeksiyon
-fırsatıdır ve şemaya sığmayan hiçbir şey Codex'e geçmemelidir.
+Why a separate module: schema validation is a SECURITY layer and must be
+testable without HTTP or a DB. The brief is untrusted data; the `claude -p`
+translation step is an injection opportunity, and nothing that doesn't fit the schema should reach Codex.
 """
 import json
 import re
 
-MAX_VALUE_LEN = 400          # tek bir alanın prompt'u şişirmesini engeller
+MAX_VALUE_LEN = 400          # prevents a single field from bloating the prompt
 
-# Üst düzey string alanlar.
+# Top-level string fields.
 _STR_FIELDS = ('prompt', 'subject', 'environment', 'style', 'lighting', 'mood')
-# String listesi alanlar.
+# String-list fields.
 _LIST_FIELDS = ('color_palette', 'text_elements')
-# İç dict alanları ve İZİNLİ iç anahtarları (beyaz liste).
+# Nested dict fields and their ALLOWED inner keys (whitelist).
 _DICT_FIELDS = {
     'camera': ('angle', 'distance', 'depth_of_field', 'focus'),
     'composition': ('framing', 'subject_placement', 'foreground', 'background',
@@ -27,18 +27,18 @@ _URL_RE = re.compile(r'https?://\S+')
 
 
 def url_temizle(metin):
-    """Metinden URL'leri çıkarır ve fazla boşlukları toplar.
+    """Strips URLs from the text and collapses extra whitespace.
 
-    Prompt'a link gönderilmez (kullanıcı kuralı 2026-08-10). Şu an linkler yalnız
-    brief'in `pinterest` alanında ve o alan prompt'a hiç girmiyor; bu, brief ileride
-    başka alana link koyarsa diye savunmadır."""
+    Links aren't sent to the prompt (user rule 2026-08-10). Right now links only
+    appear in the brief's `pinterest` field and that field never enters the
+    prompt; this is a defense in case a future brief puts a link in another field."""
     if not isinstance(metin, str):
         return ''
     return ' '.join(_URL_RE.sub(' ', metin).split())
 
 
 def _str_deger(v):
-    """String'e indirger, URL'leri atar, uzunluğu sınırlar. Boşsa None."""
+    """Coerces to string, strips URLs, caps the length. None if empty."""
     if not isinstance(v, str):
         return None
     temiz = url_temizle(v)[:MAX_VALUE_LEN].strip()
@@ -46,10 +46,10 @@ def _str_deger(v):
 
 
 def validate_prompt_json(data):
-    """Claude'un döndürdüğü JSON'u şemaya indirger.
+    """Coerces the JSON returned by Claude down to the schema.
 
-    Bilinmeyen anahtarlar ATILIR, iç dict'ler beyaz listeden geçer, boş değerler
-    çıkarılır. Dönen dict BOŞSA girdi geçersizdir ve çağıran üretimi durdurmalıdır."""
+    Unknown keys are DROPPED, nested dicts pass through the whitelist, empty
+    values are removed. If the returned dict is EMPTY, the input was invalid and the caller should stop generation."""
     if not isinstance(data, dict):
         return {}
     out = {}
@@ -77,10 +77,10 @@ def validate_prompt_json(data):
 
 
 def parse_json_cikti(metin):
-    """Claude çıktısından ilk JSON nesnesini ayıklar; bulunamazsa None.
+    """Extracts the first JSON object from Claude's output; None if not found.
 
-    Model bazen JSON'u açıklama metniyle sarıyor — mevcut `prompt_convert_handler` da
-    aynı deseni kullanıyor (`re.search(r'\\{.*\\}', ..., re.DOTALL)`)."""
+    The model sometimes wraps the JSON in explanatory text — the existing
+    `prompt_convert_handler` uses the same pattern (`re.search(r'\\{.*\\}', ..., re.DOTALL)`)."""
     if not isinstance(metin, str):
         return None
     m = re.search(r'\{.*\}', metin, re.DOTALL)
@@ -92,8 +92,8 @@ def parse_json_cikti(metin):
         return None
 
 
-# Codex'e giden kısıtlar. TAMAMI İNGİLİZCE (kullanıcı kuralı 2026-08-10): Türkçe kalan
-# tek şey JSON'daki `text_elements` içeriğidir.
+# Constraints sent to Codex. ALL IN ENGLISH (user rule 2026-08-10): the only
+# thing that stays in Turkish is the `text_elements` content in the JSON.
 _TEXT_CONSTRAINT = (
     '- Render the strings in "text_elements" EXACTLY as written, in Turkish. '
     'The characters ş, ğ, ı, İ, ö, ü, ç must be rendered correctly — no '
@@ -109,11 +109,12 @@ _LOGO_CLEAN = (
 
 
 def build_codex_prompt(prompt_json, variant, aspect_ratio, has_logo):
-    """Doğrulanmış JSON'dan Codex'e gönderilecek nihai metni kurar.
+    """Builds the final text sent to Codex from validated JSON.
 
-    `clean` varyantında `text_elements` JSON'DAN DA çıkarılır: yalnız "metin ekleme"
-    kısıtı yazmak yetmez, model spesifikasyonda gördüğü başlığı yine de çizmeye
-    eğilimli olur (2026-08-10 dersi — çelişkili prompt üretimi bozuyordu)."""
+    In the `clean` variant, `text_elements` is ALSO removed FROM THE JSON: just
+    writing a "no text" constraint isn't enough, the model still tends to draw
+    the heading it sees in the specification (2026-08-10 lesson — a contradictory
+    prompt was breaking generation)."""
     from models_imagegen import ASPECTS
     w, h = ASPECTS.get(aspect_ratio, ASPECTS['social_post_4_5'])
 

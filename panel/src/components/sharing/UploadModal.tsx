@@ -1,12 +1,13 @@
-// Tasarımcı içerik yükleme modalı — batch başına tek kategori (Post/Story/LinkedIn),
-// çoklu dosya seçimi ve DOSYA BAŞINA ilerleme. Her dosya ayrı apiUpload çağrısıyla
-// paralel yüklenir; durum listesi modal içinden izlenir.
+// Designer content upload modal — one category per batch (Post/Story/LinkedIn),
+// multi-file selection, and PER-FILE progress. Each file uploads in parallel via
+// its own apiUpload call; the status list is tracked from within the modal.
 import { useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { AlertCircle, Check, Loader2, Upload, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { acceptsFile, ApiError, apiUpload, MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/lib/api"
+import { useI18n } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import {
@@ -17,9 +18,10 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 
-// Video (2026-08-05) tasarımcıya da açık: dosya backend'de videografın yüklediğiyle
-// AYNI yoldan geçer (kategori='video' → Drive'da "bağlantıya sahip herkes" izni +
-// web türevi transkodu + revize tespiti), ayrı bir akış yok.
+// Video (2026-08-05) is also open to the designer: on the backend the file goes
+// through the EXACT SAME path as one uploaded by the videographer (category='video' →
+// "anyone with the link" permission on Drive + web-variant transcoding + revision
+// detection) — there's no separate flow.
 const CATEGORIES = [
   { value: "post", label: "Post" },
   { value: "story", label: "Story" },
@@ -37,22 +39,23 @@ export function UploadModal({ open, onClose, clientId, clientName, weekIso, fixe
   clientId: number
   clientName: string
   weekIso: string
-  // fixedCategory: kategori seçici gizlenir, tüm dosyalar bu kategoriye gider
-  // (videografçı akışı: fixedCategory="video" + accept="video").
+  // fixedCategory: hides the category picker, all files go to this category
+  // (videographer flow: fixedCategory="video" + accept="video").
   fixedCategory?: string
   accept?: "image" | "video"
 }) {
+  const { t } = useI18n()
   const qc = useQueryClient()
   const [category, setCategory] = useState(fixedCategory ?? "post")
   const [items, setItems] = useState<Item[]>([])
   const [busy, setBusy] = useState(false)
-  // Beklenen dosya türü kategoriden türetilir: "Video" seçilince görsel değil video
-  // kabul edilir. `accept` prop'u yalnız kategori seçicisi gizliyken (videografçı
-  // akışı, fixedCategory) belirleyicidir.
+  // The expected file type is derived from the category: picking "Video" accepts
+  // video instead of images. The `accept` prop is only decisive when the category
+  // picker is hidden (videographer flow, fixedCategory).
   const kabul: "image" | "video" = category === "video" ? "video" : accept
 
-  // Kategori değişince listede kalan uyumsuz dosyaları at — kullanıcı 3 görsel
-  // seçip kategoriyi Video'ya çevirdiğinde onlar sessizce yüklenmemeli.
+  // Drop incompatible files remaining in the list when the category changes — if a
+  // user picked 3 images and then switches the category to Video, those shouldn't upload silently.
   function changeCategory(next: string) {
     setCategory(next)
     const nextKabul = next === "video" ? "video" : accept
@@ -61,7 +64,7 @@ export function UploadModal({ open, onClose, clientId, clientName, weekIso, fixe
       const atilan = s.length - kalan.length
       if (atilan > 0) {
         s.filter((it) => !kalan.includes(it)).forEach((it) => URL.revokeObjectURL(it.url))
-        toast.error(`${atilan} dosya listeden çıkarıldı (kategoriye uygun değil)`)
+        toast.error(t("components.sharing.uploadModal.removedForCategory", { count: atilan }))
       }
       return kalan
     })
@@ -71,10 +74,12 @@ export function UploadModal({ open, onClose, clientId, clientName, weekIso, fixe
     let imgs = files.filter((f) => acceptsFile(f, kabul))
     if (imgs.length < files.length) {
       const n = files.length - imgs.length
-      toast.error(`${n} dosya eklenmedi (${kabul === "video" ? "video" : "görsel"} değil)`)
+      toast.error(kabul === "video"
+        ? t("components.sharing.uploadModal.notAddedVideo", { count: n })
+        : t("components.sharing.uploadModal.notAddedImage", { count: n }))
     }
     const tooBig = imgs.filter((f) => f.size > MAX_UPLOAD_BYTES)
-    if (tooBig.length) toast.error(`${tooBig.length} dosya ${MAX_UPLOAD_MB} MB sınırını aşıyor, eklenmedi`)
+    if (tooBig.length) toast.error(t("components.sharing.uploadModal.tooBig", { count: tooBig.length, maxMb: MAX_UPLOAD_MB }))
     imgs = imgs.filter((f) => f.size <= MAX_UPLOAD_BYTES)
     if (imgs.length) {
       setItems((s) => [
@@ -108,7 +113,7 @@ export function UploadModal({ open, onClose, clientId, clientName, weekIso, fixe
       setItem(i, { status: "done", pct: 100 })
       return true
     } catch (err) {
-      setItem(i, { status: "error", error: err instanceof ApiError ? err.message : "Yükleme hatası" })
+      setItem(i, { status: "error", error: err instanceof ApiError ? err.message : t("components.sharing.uploadModal.uploadError") })
       return false
     }
   }
@@ -128,8 +133,8 @@ export function UploadModal({ open, onClose, clientId, clientName, weekIso, fixe
     qc.invalidateQueries({ queryKey: ["board"] })
     qc.invalidateQueries({ queryKey: ["drive-counts", weekIso] })
     qc.invalidateQueries({ queryKey: ["uploads", clientId, weekIso] })
-    if (ok) toast.success(`${clientName}: ${ok} dosya yüklendi`)
-    if (fail) toast.error(`${fail} dosya yüklenemedi`)
+    if (ok) toast.success(t("components.sharing.uploadModal.uploadedCount", { clientName, count: ok }))
+    if (fail) toast.error(t("components.sharing.uploadModal.failedCount", { count: fail }))
   }
 
   const doneCount = items.filter((i) => i.status === "done").length
@@ -148,20 +153,20 @@ export function UploadModal({ open, onClose, clientId, clientName, weekIso, fixe
     <Dialog open={open} onOpenChange={(o) => !o && handleClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>{clientName} · İçerik Yükle</DialogTitle>
+          <DialogTitle>{t("components.sharing.uploadModal.title", { clientName })}</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-3">
           {!fixedCategory && (
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm text-muted-foreground">Kategori</span>
+              <span className="text-sm text-muted-foreground">{t("components.sharing.uploadModal.category")}</span>
               <Select value={category} onValueChange={(v) => v && changeCategory(v)} disabled={busy}>
                 <SelectTrigger size="sm" className="w-32"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {CATEGORIES.map((c) => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}
                 </SelectContent>
               </Select>
-              <span className="text-xs text-muted-foreground">Tüm dosyalar bu kategoriye yüklenir.</span>
+              <span className="text-xs text-muted-foreground">{t("components.sharing.uploadModal.categoryHint")}</span>
             </div>
           )}
 
@@ -169,7 +174,8 @@ export function UploadModal({ open, onClose, clientId, clientName, weekIso, fixe
             className="flex w-full cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-muted-foreground/25 py-6 text-center text-sm transition-colors hover:border-primary/40">
             <Upload className="mb-1 h-5 w-5 text-muted-foreground" />
             <span className="text-muted-foreground">
-              {kabul === "video" ? "Videoları" : "Görselleri"} <span className="text-primary">seç</span> (çoklu)
+              {kabul === "video" ? t("components.sharing.uploadModal.videosLabel") : t("components.sharing.uploadModal.imagesLabel")}{" "}
+              <span className="text-primary">{t("components.sharing.uploadModal.pick")}</span> {t("components.sharing.uploadModal.multiple")}
             </span>
             <input type="file" accept={`${kabul}/*`} multiple className="hidden"
               onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = "" }} />
@@ -209,21 +215,26 @@ export function UploadModal({ open, onClose, clientId, clientName, weekIso, fixe
 
           {(doneCount > 0 || errCount > 0) && (
             <div className="text-xs">
-              {doneCount > 0 && <span className="text-emerald-600">{doneCount} tamam</span>}
+              {doneCount > 0 && <span className="text-emerald-600">{t("components.sharing.uploadModal.doneCount", { count: doneCount })}</span>}
               {doneCount > 0 && errCount > 0 && <span className="text-muted-foreground"> · </span>}
-              {errCount > 0 && <span className="text-destructive">{errCount} hata</span>}
+              {errCount > 0 && <span className="text-destructive">{t("components.sharing.uploadModal.errorCount", { count: errCount })}</span>}
             </div>
           )}
         </div>
 
         <DialogFooter>
           <Button variant="ghost" onClick={handleClose} disabled={busy}>
-            {doneCount > 0 && pendingCount === 0 ? "Kapat" : "İptal"}
+            {doneCount > 0 && pendingCount === 0
+              ? t("components.sharing.uploadModal.close")
+              : t("components.sharing.uploadModal.cancel")}
           </Button>
           <Button onClick={startUpload} disabled={busy || pendingCount === 0}>
             {busy
-              ? <><Loader2 className="mr-1 h-4 w-4 animate-spin" /> Yükleniyor…</>
-              : <><Upload className="mr-1 h-4 w-4" /> {pendingCount > 0 ? `${pendingCount} dosyayı yükle` : "Yükle"}</>}
+              ? <><Loader2 className="mr-1 h-4 w-4 animate-spin" /> {t("components.sharing.uploadModal.uploading")}</>
+              : <><Upload className="mr-1 h-4 w-4" />{" "}
+                  {pendingCount > 0
+                    ? t("components.sharing.uploadModal.uploadFilesCount", { count: pendingCount })
+                    : t("components.sharing.uploadModal.upload")}</>}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -232,8 +243,9 @@ export function UploadModal({ open, onClose, clientId, clientName, weekIso, fixe
 }
 
 function StatusBadge({ item }: { item: Item }) {
+  const { t } = useI18n()
   if (item.status === "done") return <Check className="h-4 w-4 shrink-0 text-emerald-600" />
   if (item.status === "error") return <AlertCircle className="h-4 w-4 shrink-0 text-destructive" />
   if (item.status === "uploading") return <span className="shrink-0 text-[11px] text-muted-foreground">%{item.pct}</span>
-  return <span className="shrink-0 text-[11px] text-muted-foreground">bekliyor</span>
+  return <span className="shrink-0 text-[11px] text-muted-foreground">{t("components.sharing.uploadModal.pending")}</span>
 }

@@ -1,4 +1,4 @@
-"""Media helper'ları (ffmpeg gerçek test videosuyla) + media_worker (mock'lu)."""
+"""Media helpers (with a real ffmpeg test video) + media_worker (mocked)."""
 import os
 import subprocess
 import tempfile
@@ -9,11 +9,11 @@ import media
 import media_worker
 
 _HAS_FFMPEG = subprocess.run(["which", "ffmpeg"], capture_output=True).returncode == 0
-ffmpeg_only = pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg yok")
+ffmpeg_only = pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg not available")
 
 
 def _make_video(with_audio, seconds=1):
-    """ffmpeg ile lavfi test videosu üret; (yol). Sesli/sessiz."""
+    """Generate an lavfi test video with ffmpeg; returns (path). With/without audio."""
     path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
     cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size=320x240:rate=10"]
     if with_audio:
@@ -40,7 +40,7 @@ def test_extract_frames():
     try:
         frames = media.extract_frames(v, 3)
         assert len(frames) >= 1
-        assert all(f[:2] == b"\xff\xd8" for f in frames)  # JPEG imzası
+        assert all(f[:2] == b"\xff\xd8" for f in frames)  # JPEG signature
     finally:
         os.remove(v)
 
@@ -50,12 +50,12 @@ def test_extract_audio_wav():
     v = _make_video(True)
     try:
         wav = media.extract_audio(v)
-        assert wav[:4] == b"RIFF"  # WAV imzası
+        assert wav[:4] == b"RIFF"  # WAV signature
     finally:
         os.remove(v)
 
 
-# --- media_worker (Drive/ffmpeg/whisper mock'lu) ---
+# --- media_worker (Drive/ffmpeg/whisper mocked) ---
 
 def test_media_worker_sesli_video(client, monkeypatch):
     import jobqueue
@@ -75,20 +75,20 @@ def test_media_worker_sesli_video(client, monkeypatch):
     monkeypatch.setattr(media, "transcribe", lambda b, **k: "merhaba bu videonun sesi")
     monkeypatch.setattr(media, "extract_frames", lambda p, n=3: [b"\xff\xd8jpegframe"])
 
-    # use_transcript=True istenirse whisper transkripti çıkarılır ve share'e yazılır.
+    # If use_transcript=True is requested, the whisper transcript is extracted and written to the share.
     jobqueue.enqueue("media", {"share_id": s.id, "use_transcript": True})
     assert media_worker.run_once() is True
     db.session.refresh(s)
     assert s.transcript == "merhaba bu videonun sesi"
-    # thumbnail cache'e ilk kare yazıldı (video 404 çözümü)
+    # first frame was written to the thumbnail cache (video 404 workaround)
     assert db.session.get(DriveThumbnail, ("VID1", 300)) is not None
     from models import Job
     assert Job.query.first().result["has_audio"] is True
 
 
 def test_media_worker_video_transkript_opsiyonel_varsayilan_kapali(client, monkeypatch):
-    """use_transcript verilmezse (varsayılan): ses olsa bile whisper ÇALIŞMAZ,
-    transcript None kalır; kareler yine çıkarılır (görsel bağlam korunur)."""
+    """If use_transcript is not given (default): whisper does NOT run even if there's
+    audio, transcript stays None; frames are still extracted (visual context is preserved)."""
     import jobqueue
     from extensions import db
     from models import Client, Job
@@ -110,12 +110,12 @@ def test_media_worker_video_transkript_opsiyonel_varsayilan_kapali(client, monke
     monkeypatch.setattr(media, "transcribe", _tr)
     monkeypatch.setattr(media, "extract_frames", lambda p, n=3: [b"\xff\xd8jpegframe"])
 
-    jobqueue.enqueue("media", {"share_id": s.id})  # use_transcript YOK
+    jobqueue.enqueue("media", {"share_id": s.id})  # no use_transcript
     assert media_worker.run_once() is True
     db.session.refresh(s)
-    assert s.transcript is None            # transkript çıkarılmadı
-    assert called["transcribe"] is False   # whisper hiç çağrılmadı
-    assert Job.query.first().result["frame_count"] == 1  # kare yine yazıldı
+    assert s.transcript is None            # transcript was not extracted
+    assert called["transcribe"] is False   # whisper was never called
+    assert Job.query.first().result["frame_count"] == 1  # frame was still written
 
 
 def test_downscale_image_genislik_ve_jpeg():
@@ -126,7 +126,7 @@ def test_downscale_image_genislik_ve_jpeg():
     out = media.downscale_image(buf.getvalue(), max_w=1280)
     assert out[:2] == b"\xff\xd8"  # JPEG
     im = Image.open(io.BytesIO(out))
-    assert im.width == 1280 and abs(im.height - 427) <= 1  # oran korunur
+    assert im.width == 1280 and abs(im.height - 427) <= 1  # aspect ratio preserved
 
 
 def test_downscale_image_kucukse_buyutmez():
@@ -136,11 +136,11 @@ def test_downscale_image_kucukse_buyutmez():
     Image.new("RGBA", (400, 300), (0, 0, 0, 0)).save(buf, "PNG")
     out = media.downscale_image(buf.getvalue(), max_w=1280)
     im = Image.open(io.BytesIO(out))
-    assert im.width == 400 and im.height == 300  # zaten küçük
+    assert im.width == 400 and im.height == 300  # already small
 
 
 def test_media_worker_gorsel_kareyi_kaydeder(client, monkeypatch):
-    """Görsel post: Drive'dan indir → küçült → frames dizinine kaydet (caption bağlamı)."""
+    """Image post: download from Drive → downscale → save to frames directory (caption context)."""
     import io
     import glob
     import shutil
@@ -184,9 +184,9 @@ def test_media_worker_sessiz_video_transcript_yok(client, monkeypatch):
     db.session.commit()
     monkeypatch.setattr(__import__("drive_gateway"), "download_file", lambda fid: b"x")
     monkeypatch.setattr(media, "has_audio", lambda p: False)
-    # Kare üretilir (gerçek videoda olduğu gibi); test edilen şey SESİN yokluğu.
-    # Kare de transkript de yoksa iş artık bilerek çöker — o yol
-    # test_media_worker.py::test_kare_cikmayan_video_anlasilir_hata_verir'de.
+    # A frame is produced (as in a real video); what's being tested is the ABSENCE of audio.
+    # If there's neither a frame nor a transcript, the job now deliberately fails — that
+    # path is covered in test_media_worker.py::test_kare_cikmayan_video_anlasilir_hata_verir.
     monkeypatch.setattr(media, "extract_frames", lambda p, n=3: [b"\xff\xd8kare"])
     monkeypatch.setattr(media_worker, "_write_frames", lambda fdir, fr: None)
     jobqueue.enqueue("media", {"share_id": s.id})
@@ -197,12 +197,12 @@ def test_media_worker_sessiz_video_transcript_yok(client, monkeypatch):
     assert Job.query.first().result["has_audio"] is False
 
 
-# --- transkript sözlüğü (2026-08-08) ---------------------------------------
+# --- transcript vocabulary (2026-08-08) ---------------------------------------
 #
-# Ölçümle doğrulanan davranış: whisper'a marka/ekip adları `initial_prompt`
-# olarak verilince listedeki adlar düzeliyor ("Busto Mahallesi hanesi" →
-# "Mavi Nova"). Buradaki testler sözlüğün ÜRETİMİNİ ve uçtan uca GEÇİŞİNİ
-# kilitler — transkripsiyon kalitesini değil (o whisper'ın işi, mock'lu).
+# Behavior verified by measurement: when brand/team names are passed to whisper
+# as `initial_prompt`, the names in the list come out correctly ("Busto Mahallesi
+# hanesi" → "Mavi Nova"). The tests here lock in the vocabulary's GENERATION and
+# end-to-end PASS-THROUGH — not transcription quality (that's whisper's job, mocked).
 
 def test_sozluk_musteri_ve_ekip_adlarini_icerir(client):
     import ai_context
@@ -214,7 +214,7 @@ def test_sozluk_musteri_ve_ekip_adlarini_icerir(client):
     v = ai_context.transcript_vocabulary()
     assert "Mavi Nova" in v
     assert "Deniz Yıldız" in v
-    assert "Kotar" in v          # ajans sabiti — hiçbir kayıttan öğrenilemez
+    assert "Kotar" in v          # agency constant — can't be learned from any record
 
 
 def test_sozluk_silinmis_musteriyi_almaz(client):
@@ -227,7 +227,7 @@ def test_sozluk_silinmis_musteriyi_almaz(client):
 
 
 def test_sozluk_extra_basa_gelir(client):
-    """Kırpılma olursa videonun kendi müşterisi hayatta kalmalı → en başta."""
+    """If truncation happens, the video's own client must survive → at the very front."""
     import ai_context
     v = ai_context.transcript_vocabulary(extra=["Öncelikli Marka"])
     assert v.startswith("Öncelikli Marka")
@@ -241,7 +241,7 @@ def test_sozluk_tekrari_turkce_duyarli_eler(client):
     db.session.add(Client(name="İdeal"))
     db.session.commit()
     v = ai_context.transcript_vocabulary()
-    # 'IDEAL' ve 'İdeal' aynı ad sayılır (TR casefold) — biri elenmeli.
+    # 'IDEAL' and 'İdeal' count as the same name (TR casefold) — one should be eliminated.
     assert sum(1 for a in v.rstrip('.').split(', ') if a.casefold() in ('ideal',)) <= 1
 
 
@@ -253,13 +253,13 @@ def test_sozluk_karakter_sinirini_asmaz(client):
         db.session.add(Client(name=f"Çok Uzun Marka Adı Numara {i:03d}"))
     db.session.commit()
     v = ai_context.transcript_vocabulary()
-    assert len(v) <= ai_context.VOCAB_MAX_CHARS + 1     # +1: kapanış noktası
-    # Kırpma ad ORTASINDAN olmamalı — her parça tam bir ad olmalı.
+    assert len(v) <= ai_context.VOCAB_MAX_CHARS + 1     # +1: trailing period
+    # Truncation must not happen in the MIDDLE of a name — each piece must be a complete name.
     assert not v.rstrip('.').split(', ')[-1].endswith(('Numara', 'Marka'))
 
 
 def test_transcribe_initial_prompt_gonderir(monkeypatch):
-    """media.transcribe sözlüğü whisper servisine form alanı olarak geçmeli."""
+    """media.transcribe must pass the vocabulary to the whisper service as a form field."""
     import media
     yakalanan = {}
 
@@ -277,8 +277,9 @@ def test_transcribe_initial_prompt_gonderir(monkeypatch):
 
 
 def test_transcribe_sozluksuz_alan_gondermez(monkeypatch):
-    """Sözlük yoksa alan hiç gitmemeli — servis eski davranışında kalsın
-    (uç paylaşımlı: notion-asistan da aynı servisi çağırıyor)."""
+    """If there's no vocabulary, the field must not be sent at all — the service should
+    keep its old behavior (the endpoint is shared: notion-asistan also calls the same
+    service)."""
     import media
     yakalanan = {}
 

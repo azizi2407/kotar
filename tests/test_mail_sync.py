@@ -1,4 +1,4 @@
-"""mail_sync_worker — poll_enabled hesaplar işlenir, hata izole edilir."""
+"""mail_sync_worker — poll_enabled accounts are processed, errors are isolated."""
 import mail_service
 import mail_sync_worker as worker
 from extensions import db
@@ -17,7 +17,7 @@ def _mk(email, poll_enabled=True, active=True):
 
 def test_run_once_only_poll_enabled(monkeypatch):
     _mk('a@example.com', poll_enabled=True)
-    _mk('b@example.com', poll_enabled=False)          # atlanmalı
+    _mk('b@example.com', poll_enabled=False)          # should be skipped
     calls = []
     monkeypatch.setattr(mail_service, 'sync_account', lambda acc: calls.append(acc.email) or 3)
     res = worker.run_once()

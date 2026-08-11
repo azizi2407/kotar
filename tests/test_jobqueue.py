@@ -10,7 +10,7 @@ from test_session_csrf import csrf_headers
 
 
 def _aware(dt):
-    """sqlite naive datetime'ı UTC-aware'e çevir (karşılaştırma için)."""
+    """Convert a naive sqlite datetime to UTC-aware (for comparison)."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
@@ -37,7 +37,7 @@ def test_claim_fifo(client):
     b = jobqueue.enqueue("caption", {"n": 2})
     assert jobqueue.claim(["caption"]).id == a.id
     assert jobqueue.claim(["caption"]).id == b.id
-    assert jobqueue.claim(["caption"]) is None  # kuyruk boş
+    assert jobqueue.claim(["caption"]) is None  # queue empty
 
 
 def test_complete(client):
@@ -56,19 +56,19 @@ def test_fail(client):
 
 
 def test_fail_rollback_temizler_session(client):
-    """fail() İLK satırda rollback yapar: kirli/pending-rollback session'ı toparlar,
-    istisna fırlatmaz ve sonrasında sorgu çalışır."""
+    """fail() does a rollback as its FIRST line: it recovers a dirty/pending-rollback
+    session, doesn't raise an exception, and a query works afterward."""
     jobqueue.enqueue("caption", {})
     j = jobqueue.claim(["caption"])
-    # Session'ı kirlet: NOT NULL ihlali flush'ı (type=None)
+    # Dirty the session: a NOT NULL violation flush (type=None)
     from extensions import db
     db.session.add(Job(type=None, status="queued"))
     try:
         db.session.flush()
     except Exception:
-        pass  # session artık pending-rollback
-    jobqueue.fail(j, "patladi")  # istisna FIRLATMAMALI
-    # session temiz → sorgu başarıyla çalışır
+        pass  # session is now pending-rollback
+    jobqueue.fail(j, "patladi")  # must NOT raise an exception
+    # session clean → query runs successfully
     assert db.session.query(Job).count() >= 1
     assert j.status == "failed"
 
@@ -80,7 +80,7 @@ def test_fail_transient_requeue_backoff(client):
     jobqueue.fail(j, "rate limit exceeded", transient=True, max_attempts=3)
     assert j.status == "queued"
     assert j.available_at is not None
-    assert _aware(j.available_at) > utcnow()  # backoff gelecekte
+    assert _aware(j.available_at) > utcnow()  # backoff is in the future
     assert j.result["retry"] is True
 
 
@@ -91,7 +91,7 @@ def test_fail_transient_max_attempts_terminal(client):
     j.attempts = 3
     db.session.commit()
     jobqueue.fail(j, "rate limit", transient=True, max_attempts=3)
-    assert j.status == "failed"  # requeue YOK
+    assert j.status == "failed"  # NO requeue
     assert j.result.get("retry") is None
 
 
@@ -132,7 +132,7 @@ def test_reap_stuck_requeue(client):
 def test_reap_stuck_timeout_icinde_dokunmaz(client):
     from extensions import db
     jobqueue.enqueue("caption", {})
-    j = jobqueue.claim(["caption"])  # claimed_at ~ şimdi
+    j = jobqueue.claim(["caption"])  # claimed_at ~ now
     reaped = jobqueue.reap_stuck(timeout_seconds=1800)
     assert j.id not in [r.id for r in reaped]
     db.session.refresh(j)
@@ -140,7 +140,7 @@ def test_reap_stuck_timeout_icinde_dokunmaz(client):
 
 
 def test_claim_skip_locked_pg_compile(client):
-    """PG dalı sessizce kaybolmasın: derlenmiş SQL 'SKIP LOCKED' içermeli."""
+    """The PG branch shouldn't silently disappear: the compiled SQL must contain 'SKIP LOCKED'."""
     q = jobqueue._select_query(["caption"], utcnow(), for_update=True)
     sql = str(q.statement.compile(dialect=postgresql.dialect()))
     assert "SKIP LOCKED" in sql
@@ -151,26 +151,26 @@ def test_is_transient_klasiflendirir(client):
     assert ai_worker._is_transient(Exception("rate limit exceeded"))
     assert ai_worker._is_transient(TimeoutError("timed out after 240 seconds"))
     assert ai_worker._is_transient(Exception("Overloaded 429"))
-    # Her hata transient DEĞİL — sonsuz retry riskine karşı
+    # NOT every error is transient — guards against infinite retry risk
     assert not ai_worker._is_transient(ValueError("paylaşım yok: 5"))
 
 
-# --- priority sırası (step 02) ---
+# --- priority order (step 02) ---
 
 def test_claim_priority_once_id_sonra(client):
-    """Un-gameable: düşük-priority job ÖNCE (küçük id) enqueue edilir, yüksek-priority
-    SONRA (büyük id). claim id sırasına RAĞMEN yüksek priority'yi ÖNCE döndürmeli."""
+    """Un-gameable: the low-priority job is enqueued FIRST (small id), the high-priority
+    one SECOND (large id). claim must return the high priority one FIRST, DESPITE the id order."""
     dusuk = jobqueue.enqueue("caption", {"p": "dusuk"}, priority=0)
     yuksek = jobqueue.enqueue("caption", {"p": "yuksek"}, priority=10)
-    assert dusuk.id < yuksek.id  # id ters: düşük öncelikli olan daha eski
+    assert dusuk.id < yuksek.id  # ids are reversed: the low-priority one is older
     ilk = jobqueue.claim(["caption"])
-    assert ilk.id == yuksek.id  # priority DESC — id'ye rağmen yüksek önce
+    assert ilk.id == yuksek.id  # priority DESC — high priority first despite the id
     ikinci = jobqueue.claim(["caption"])
     assert ikinci.id == dusuk.id
 
 
 def test_claim_esit_priority_fifo(client):
-    """Eşit priority'de küçük id önce (FIFO korunur)."""
+    """With equal priority, the smaller id goes first (FIFO is preserved)."""
     a = jobqueue.enqueue("caption", {"n": 1}, priority=5)
     b = jobqueue.enqueue("caption", {"n": 2}, priority=5)
     assert jobqueue.claim(["caption"]).id == a.id
@@ -185,7 +185,7 @@ def test_enqueue_priority_default_0(client):
 # --- fan-out (step 02) ---
 
 def test_enqueue_per_client_ayri_joblar(client):
-    """TAM 3 ayrı Job; her biri doğru client_id payload'ı ve verilen priority."""
+    """EXACTLY 3 separate Jobs; each with the correct client_id payload and the given priority."""
     jobs = jobqueue.enqueue_per_client(
         "brief", [1, 2, 3],
         payload_fn=lambda cid: {"client_id": cid},
@@ -194,7 +194,7 @@ def test_enqueue_per_client_ayri_joblar(client):
     assert len(jobs) == 3
     assert sorted(j.payload["client_id"] for j in jobs) == [1, 2, 3]
     assert all(j.type == "brief" for j in jobs)
-    # AYRI job'lar — farklı id
+    # SEPARATE jobs — different ids
     assert len({j.id for j in jobs}) == 3
 
 
@@ -207,15 +207,15 @@ def test_enqueue_per_client_priority_iletilir(client):
 
 
 def test_enqueue_per_client_per_client_dedup_key(client):
-    """dedup_key_fn her müşteri için FARKLI anahtar üretir (tek skaler DEĞİL);
-    anahtar payload'da _dedup_key olarak görünür. Dedup davranışı 04'te — burada
-    sadece per-client iletim doğrulanır."""
+    """dedup_key_fn produces a DIFFERENT key for each client (NOT a single scalar);
+    the key shows up in the payload as _dedup_key. Dedup behavior is covered in 04 —
+    here only per-client propagation is verified."""
     jobs = jobqueue.enqueue_per_client(
         "brief", [1, 2, 3],
         payload_fn=lambda cid: {"client_id": cid},
         dedup_key_fn=lambda cid: f"brief:{cid}")
     keys = [j.payload["_dedup_key"] for j in jobs]
-    assert keys == ["brief:1", "brief:2", "brief:3"]  # müşteri-başı FARKLI
+    assert keys == ["brief:1", "brief:2", "brief:3"]  # DIFFERENT per client
     assert len(set(keys)) == 3
 
 
@@ -227,7 +227,7 @@ def test_enqueue_dedup_key_yoksa_payload_dokunulmaz(client):
 # --- dedup (step 04) ---
 
 def test_enqueue_dedup_ikinci_cagri_no_op(client):
-    """Aynı (type, dedup_key) ile iki kez enqueue → tek job; ikinci çağrı birinciyi döndürür."""
+    """Enqueueing twice with the same (type, dedup_key) → one job; the second call returns the first."""
     a = jobqueue.enqueue("caption", {"share_id": 7}, dedup_key="caption:7")
     b = jobqueue.enqueue("caption", {"share_id": 7}, dedup_key="caption:7")
     assert Job.query.count() == 1
@@ -241,24 +241,24 @@ def test_enqueue_dedup_farkli_key_iki_job(client):
 
 
 def test_enqueue_dedup_farkli_type_carismaz(client):
-    """Dedup yalnız aynı type içinde: aynı key ama farklı type → 2 job."""
+    """Dedup is scoped to the same type only: same key but different type → 2 jobs."""
     jobqueue.enqueue("caption", {"share_id": 7}, dedup_key="k")
     jobqueue.enqueue("media", {"share_id": 7}, dedup_key="k")
     assert Job.query.count() == 2
 
 
 def test_enqueue_dedup_yalniz_aktif_isleri_kapsar(client):
-    """Aktif job done olduktan SONRA aynı key → yeni job (dedup yalnız queued|running)."""
+    """Same key AFTER the active job is done → new job (dedup only covers queued|running)."""
     a = jobqueue.enqueue("caption", {"share_id": 7}, dedup_key="caption:7")
     j = jobqueue.claim(["caption"])
-    jobqueue.complete(j, {"ok": True})  # artık done
+    jobqueue.complete(j, {"ok": True})  # now done
     b = jobqueue.enqueue("caption", {"share_id": 7}, dedup_key="caption:7")
     assert b.id != a.id
     assert Job.query.count() == 2
 
 
 def test_enqueue_dedup_running_de_kapsar(client):
-    """Aktif job running iken (henüz bitmemiş) aynı key → yeni job atılmaz."""
+    """Same key while the active job is running (not yet finished) → no new job is created."""
     a = jobqueue.enqueue("caption", {"share_id": 7}, dedup_key="caption:7")
     jobqueue.claim(["caption"])  # running
     b = jobqueue.enqueue("caption", {"share_id": 7}, dedup_key="caption:7")
@@ -267,12 +267,12 @@ def test_enqueue_dedup_running_de_kapsar(client):
 
 
 def test_enqueue_dedup_eszamanli_tek_aktif_job(app):
-    """TOCTOU yarışı: iki thread AYNI ANDA aynı (type, dedup_key) ile enqueue eder
-    (barrier ile check'leri örtüşür). check-then-act kilitsiz olsaydı ikisi de
-    `_active_dupe`'u boş bulup 2 job üretirdi (gthread 2×4 production topolojisi).
-    Fix (enqueue içinde serileştirme) → yalnız 1 aktif job kalmalı, ikinci çağrı
-    birincinin job'unu döndürmeli. Un-gameable: gerçek eşzamanlılık kurulur, sıralı
-    değil."""
+    """TOCTOU race: two threads enqueue SIMULTANEOUSLY with the same (type, dedup_key)
+    (a barrier overlaps their checks). If check-then-act were unlocked, both would find
+    `_active_dupe` empty and produce 2 jobs (gthread 2x4 production topology).
+    Fix (serialization inside enqueue) → only 1 active job should remain, the second
+    call should return the first one's job. Un-gameable: real concurrency is set up,
+    not sequential."""
     import threading
 
     from extensions import db
@@ -285,11 +285,11 @@ def test_enqueue_dedup_eszamanli_tek_aktif_job(app):
         try:
             with app.app_context():
                 try:
-                    barrier.wait(timeout=5)  # iki thread check'e beraber girsin
+                    barrier.wait(timeout=5)  # so both threads enter the check together
                     j = jobqueue.enqueue("caption", {"share_id": 7}, dedup_key="caption:7")
                     ids.append(j.id)
                 finally:
-                    db.session.remove()  # context İÇİNDE temizle
+                    db.session.remove()  # clean up INSIDE the context
         except Exception as exc:  # noqa: BLE001
             errors.append(exc)
 
@@ -299,30 +299,30 @@ def test_enqueue_dedup_eszamanli_tek_aktif_job(app):
     t1.join(); t2.join()
 
     assert not errors, errors
-    assert Job.query.filter_by(type="caption").count() == 1  # tek aktif job
-    assert len(set(ids)) == 1  # iki çağrı aynı job'u gördü
+    assert Job.query.filter_by(type="caption").count() == 1  # a single active job
+    assert len(set(ids)) == 1  # both calls saw the same job
 
 
 def test_enqueue_dedup_hit_cagiranin_pending_degisikligini_korur(client):
-    """Dedup-HIT dalı advisory lock'u bırakırken çağıranın enqueue'dan ÖNCE yaptığı
-    (henüz commit edilmemiş) ilgisiz pending değişikliği KORUMALI. Regresyon: r1'de
-    kilit `db.session.rollback()` ile bırakılıyordu → dedup-hit tüm session'ı geri
-    alıp bu değişikliği sessizce siliyordu. Fix: rollback yerine commit (SELECT hiçbir
-    şey değiştirmez; commit hem lock'u bırakır hem pending state'i korur). Un-gameable:
-    değişiklik DB'ye yansımalı."""
+    """When the dedup-HIT branch releases the advisory lock, it MUST preserve an unrelated
+    pending change the caller made BEFORE enqueue (not yet committed). Regression: in r1
+    the lock was released with `db.session.rollback()` → dedup-hit rolled back the whole
+    session and silently erased this change. Fix: commit instead of rollback (SELECT
+    changes nothing; commit both releases the lock and preserves pending state). Un-gameable:
+    the change must land in the DB."""
     from extensions import db
     from models import Client
 
     c = Client(name="Once")
     db.session.add(c)
     db.session.commit()
-    # aktif job — sonraki enqueue dedup-HIT olacak
+    # active job — the next enqueue will be a dedup-HIT
     jobqueue.enqueue("caption", {"share_id": c.id}, dedup_key=f"caption:{c.id}")
-    # çağıran enqueue'dan ÖNCE bir alan değiştirir (henüz commit edilmemiş)
+    # the caller changes a field BEFORE enqueue (not yet committed)
     c.name = "SONRA-DEGISTI"
-    # dedup-HIT: yeni INSERT yok, mevcut job döner
+    # dedup-HIT: no new INSERT, the existing job is returned
     jobqueue.enqueue("caption", {"share_id": c.id}, dedup_key=f"caption:{c.id}")
-    # pending değişiklik korunmalı ve DB'ye yazılmış olmalı
+    # the pending change must be preserved and written to the DB
     db.session.refresh(c)
     assert c.name == "SONRA-DEGISTI"
 
@@ -330,9 +330,9 @@ def test_enqueue_dedup_hit_cagiranin_pending_degisikligini_korur(client):
 # --- caption enqueue priority (step 02) ---
 
 def test_caption_enqueue_priority_10(client):
-    """İnteraktif caption yüksek öncelikle (priority=10) kuyruğa girmeli — batch
-    işlerin arkasında head-of-line beklememesi için (step 02). Uçtan uca: caption
-    enqueue eden API çağrısı priority=10'lu Job yaratmalı."""
+    """An interactive caption must enter the queue with high priority (priority=10) — so
+    it doesn't wait head-of-line behind batch jobs (step 02). End-to-end: the API call
+    that enqueues a caption must create a Job with priority=10."""
     from extensions import db
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "C"}, headers=csrf_headers(client)).get_json()["client"]["id"]
@@ -345,7 +345,7 @@ def test_caption_enqueue_priority_10(client):
 
 
 def test_caption_ucu_iki_kez_tek_aktif_job(client):
-    """Aynı share'e arka arkaya POST .../caption → tek aktif job (dedup no-op)."""
+    """Back-to-back POST .../caption on the same share → a single active job (dedup no-op)."""
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "C"}, headers=csrf_headers(client)).get_json()["client"]["id"]
     s = client.post("/api/sharing/shares", json={"client_id": cid, "week_iso": "2026-W21", "kind": "post"},
@@ -358,8 +358,8 @@ def test_caption_ucu_iki_kez_tek_aktif_job(client):
 
 
 def test_caption_feedback_fresh_job_dedupsuz(client):
-    """Feedback'li yeniden üret HER SEFERİNDE yeni job üretir (dedup=None) ve payload'a
-    feedback + previous_caption geçer — aynı share'e normal caption dedup'undan bağımsız."""
+    """Regenerating with feedback creates a new job EVERY TIME (dedup=None), and feedback +
+    previous_caption are passed into the payload — independent of the normal caption dedup for the same share."""
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "C"}, headers=csrf_headers(client)).get_json()["client"]["id"]
     s = client.post("/api/sharing/shares", json={"client_id": cid, "week_iso": "2026-W21", "kind": "post"},
@@ -369,7 +369,7 @@ def test_caption_feedback_fresh_job_dedupsuz(client):
     r2 = client.post(f"/api/sharing/shares/{s['id']}/caption", json=body, headers=csrf_headers(client))
     from extensions import db
     assert r1.status_code == 202 and r2.status_code == 202
-    assert r1.get_json()["job"]["id"] != r2.get_json()["job"]["id"]  # fresh her seferinde
+    assert r1.get_json()["job"]["id"] != r2.get_json()["job"]["id"]  # fresh every time
     j1 = db.session.get(Job, r1.get_json()["job"]["id"])
     assert j1.payload["feedback"] == "daha kısa"
     assert j1.payload["previous_caption"] == "eski caption"

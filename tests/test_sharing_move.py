@@ -1,4 +1,4 @@
-"""Drive klasör linki + önceki/sonraki hafta paylaşılmamış içerik taşıma modalı."""
+"""Drive folder link + previous/next week unpublished-content move modal."""
 import pytest
 from conftest import DESIGNER, MANAGER, login_as
 from test_session_csrf import csrf_headers
@@ -19,7 +19,7 @@ def _week_folder(client_id, week_number, folder_id):
     db.session.commit()
 
 
-# --- board satırında Drive klasör linki ---
+# --- Drive folder link on the board row ---
 
 def test_cards_drive_folder_url(client, cid):
     _week_folder(cid, 21, "WK21FOLDER")
@@ -34,7 +34,7 @@ def test_cards_drive_folder_url_yoksa_none(client, cid):
     assert row["drive_folder_url"] is None
 
 
-# --- movable-files: önceki/sonraki hafta klasöründeki paylaşılmamış dosyalar ---
+# --- movable-files: unpublished files in the previous/next week's folder ---
 
 def test_movable_files_designer_403(client, cid):
     login_as(client, DESIGNER)
@@ -43,8 +43,8 @@ def test_movable_files_designer_403(client, cid):
 
 def test_movable_files_onceki_sonraki(client, cid, monkeypatch):
     import drive_gateway
-    _week_folder(cid, 20, "WK20")  # önceki hafta
-    _week_folder(cid, 22, "WK22")  # sonraki hafta
+    _week_folder(cid, 20, "WK20")  # previous week
+    _week_folder(cid, 22, "WK22")  # next week
     files = {
         "WK20": [{"id": "f1", "name": "a.jpg", "mimeType": "image/jpeg"},
                  {"id": "f2", "name": "b.jpg", "mimeType": "image/jpeg"}],
@@ -52,7 +52,7 @@ def test_movable_files_onceki_sonraki(client, cid, monkeypatch):
     }
     monkeypatch.setattr(drive_gateway, "available", lambda: True)
     monkeypatch.setattr(drive_gateway, "list_files", lambda fid, media_only=False: files.get(fid, []))
-    # f1 yayınlanmış → paylaşılmış sayılır, listeden çıkar
+    # f1 is published → counts as shared, drops out of the list
     from extensions import db
     from models_sharing import Share
     db.session.add(Share(client_id=cid, week_iso="2026-W20", kind="post",
@@ -62,12 +62,12 @@ def test_movable_files_onceki_sonraki(client, cid, monkeypatch):
     assert r.status_code == 200
     d = r.get_json()
     prev_ids = [f["id"] for f in d["previous"]["files"]]
-    assert prev_ids == ["f2"]  # f1 paylaşıldığı için elendi
+    assert prev_ids == ["f2"]  # f1 was excluded because it's shared
     assert d["previous"]["week_iso"] == "2026-W20"
     assert [f["id"] for f in d["next"]["files"]] == ["f3"]
 
 
-# --- move-files: seçilenleri bu haftaya taşı ---
+# --- move-files: move selected items to this week ---
 
 def test_move_files_designer_403(client, cid):
     login_as(client, DESIGNER)
@@ -84,7 +84,7 @@ def test_move_files_tasir_ve_gunceller(client, cid, monkeypatch):
     from models_sharing import CardUpload
     _week_folder(cid, 20, "WK20")
     _week_folder(cid, 21, "WK21")
-    # taşınacak dosyanın CardUpload kaydı (önceki hafta)
+    # CardUpload record of the file to be moved (previous week)
     db.session.add(CardUpload(client_id=cid, week_iso="2026-W20", category="post",
                              file_id="f2", file_name="b.jpg"))
     db.session.commit()
@@ -99,9 +99,9 @@ def test_move_files_tasir_ve_gunceller(client, cid, monkeypatch):
                     headers=csrf_headers(client))
     assert r.status_code == 200, r.get_json()
     assert r.get_json()["moved"] == 1
-    # doğru parent'lar
+    # correct parents
     assert moves == [("f2", "WK21", "WK20")]
-    # CardUpload güncellendi
+    # CardUpload was updated
     up = CardUpload.query.filter_by(file_id="f2").first()
     assert up.week_iso == "2026-W21" and up.moved_from_week_iso == "2026-W20"
     assert up.moved_at is not None

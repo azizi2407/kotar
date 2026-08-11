@@ -1,15 +1,16 @@
-// Sesli not kaydedici (2026-08-09) — tek düğme, süre sayacı.
+// Voice note recorder (2026-08-09) — single button, duration counter.
 //
-// Tarayıcı MediaRecorder biçimi cihaza göre değişiyor: Chrome/Android
-// `audio/webm;codecs=opus`, Safari/iOS `audio/mp4`. Desteklenen İLK biçim
-// seçilir; ffmpeg sunucuda ikisini de okuyor.
+// The browser's MediaRecorder format varies by device: Chrome/Android uses
+// `audio/webm;codecs=opus`, Safari/iOS uses `audio/mp4`. The FIRST supported format
+// is picked; ffmpeg on the server can read both.
 //
-// Kayıt bitince otomatik yüklenir — kullanıcı ikinci bir düğmeye basmasın.
+// Uploads automatically once recording stops — the user shouldn't have to press a second button.
 import { useEffect, useRef, useState } from "react"
 import { Loader2, Mic, Square } from "lucide-react"
 import { toast } from "sonner"
 
 import { useUploadVoiceNote } from "@/lib/voice-notes"
+import { useI18n } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -21,6 +22,7 @@ function desteklenenBicim() {
 }
 
 export function Recorder({ onUploaded }: { onUploaded?: (id: number) => void }) {
+  const { t } = useI18n()
   const [kaydediyor, setKaydediyor] = useState(false)
   const [saniye, setSaniye] = useState(0)
   const [pct, setPct] = useState(0)
@@ -30,36 +32,36 @@ export function Recorder({ onUploaded }: { onUploaded?: (id: number) => void }) 
 
   useEffect(() => {
     if (!kaydediyor) return
-    const t = setInterval(() => setSaniye((s) => s + 1), 1000)
-    return () => clearInterval(t)
+    const iv = setInterval(() => setSaniye((s) => s + 1), 1000)
+    return () => clearInterval(iv)
   }, [kaydediyor])
 
-  // Sekme kapanırken mikrofonu bırak (kırmızı kayıt göstergesi asılı kalmasın).
+  // Release the microphone when the tab closes (so the red recording indicator doesn't stay stuck on).
   useEffect(() => () => {
-    recRef.current?.stream.getTracks().forEach((t) => t.stop())
+    recRef.current?.stream.getTracks().forEach((track) => track.stop())
   }, [])
 
   async function basla() {
     const bicim = desteklenenBicim()
     if (!bicim) {
-      toast.error("Bu tarayıcı ses kaydını desteklemiyor.")
+      toast.error(t("components.voiceNotes.recorder.notSupported"))
       return
     }
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     } catch {
-      toast.error("Mikrofon izni verilmedi. Tarayıcı ayarlarından izin ver.")
+      toast.error(t("components.voiceNotes.recorder.micDenied"))
       return
     }
     parcalarRef.current = []
     const rec = new MediaRecorder(stream, { mimeType: bicim })
     rec.ondataavailable = (e) => { if (e.data.size) parcalarRef.current.push(e.data) }
     rec.onstop = async () => {
-      stream.getTracks().forEach((t) => t.stop())
+      stream.getTracks().forEach((track) => track.stop())
       const blob = new Blob(parcalarRef.current, { type: bicim })
       if (blob.size === 0) {
-        toast.error("Kayıt boş — bir şey duyulmadı.")
+        toast.error(t("components.voiceNotes.recorder.emptyRecording"))
         return
       }
       const uzanti = bicim.includes("mp4") ? "mp4" : bicim.includes("ogg") ? "ogg" : "webm"
@@ -67,10 +69,10 @@ export function Recorder({ onUploaded }: { onUploaded?: (id: number) => void }) 
         const d = await yukle.mutateAsync({
           blob, adi: `kayit.${uzanti}`, onProgress: setPct,
         })
-        toast.success("Kayıt alındı, not hazırlanıyor…")
+        toast.success(t("components.voiceNotes.recorder.recorded"))
         onUploaded?.(d.note.id)
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Yüklenemedi")
+        toast.error(e instanceof Error ? e.message : t("components.voiceNotes.recorder.uploadFailed"))
       } finally {
         setPct(0)
       }
@@ -108,10 +110,10 @@ export function Recorder({ onUploaded }: { onUploaded?: (id: number) => void }) 
           {dk}:{String(sn).padStart(2, "0")}
         </p>
       ) : yukle.isPending ? (
-        <p className="text-sm text-muted-foreground">Yükleniyor… %{pct}</p>
+        <p className="text-sm text-muted-foreground">{t("components.voiceNotes.recorder.uploadingPct", { pct })}</p>
       ) : (
         <p className="text-sm text-muted-foreground">
-          Konuşmaya başlamak için bas — bitince tekrar bas.
+          {t("components.voiceNotes.recorder.pressToStart")}
         </p>
       )}
     </div>

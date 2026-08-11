@@ -1,5 +1,5 @@
-// Sesli not (2026-08-09) — ses → transkript → yapılandırılmış not.
-// İşleme kuyrukta olduğu için liste ve tek not YOKLANIR (3 sn); WebSocket yok.
+// Voice note (2026-08-09) — audio → transcript → structured note.
+// Since processing happens in a queue, the list and single note are POLLED (3s); no WebSocket.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiDelete, apiGet, apiJson, apiUpload } from "./api"
@@ -33,27 +33,28 @@ export interface VoiceNoteItem {
 export interface VoiceNoteFull extends VoiceNoteItem {
   transcript: string
   structured: Structured
-  /** Panoya aktarılmış görevlerin anahtarları — tekrar eklemeyi engeller. */
+  /** Keys of tasks already pushed to the board — prevents re-adding them. */
   pushed_item_keys: string[]
 }
 
-/** İş bitene kadar yoklanır; biten notta yoklama durur (gereksiz istek yok). */
+/** Polled until the job finishes; polling stops once the note is done (no wasted requests). */
 const YOKLAMA_MS = 3000
 
-// `failed` GÖRÜNDÜKTEN SONRA da bir süre yoklamaya devam edilir: `jobqueue.fail`
-// geçici hataları (kota aşımı, aşırı yük) en fazla 3 denemeye kadar backoff'la
-// (60 sn + 300 sn = en kötü toplam 360 sn bekleme, üçüncü deneme kalıcı başarısız
-// olursa artık requeue YOK) yeniden kuyruğa alır — bu sırada `voice_note_handler`
-// notu tekrar `running`'e, sonra `done`'a çevirebilir. Burada yoklamayı hemen
-// KESERSEK panel kalıcı "Not oluşturulamadı" gösterirken not arkada `done`'a
-// dönebilir (kullanıcı hiç haberdar olmaz). Öte yandan GERÇEKTEN kalıcı
-// başarısız olmuş bir notu SONSUZA dek yoklamak boşuna istek demek — üst sınır
-// olarak not oluşturulduktan sonraki 15 dk'yı seçtik: en kötü backoff toplamının
-// (360 sn) rahat üstünde, iki denemenin işlenme süresi payı da eklenmiş.
+// Polling continues for a while EVEN AFTER `failed` is shown: `jobqueue.fail`
+// requeues transient errors (quota exceeded, overload) with backoff up to 3
+// attempts (60s + 300s = 360s worst-case total wait; once the third attempt
+// fails permanently there's no more requeue) — during this time
+// `voice_note_handler` can flip the note back to `running`, then `done`. If we
+// STOPPED polling right away, the panel would keep showing "Note could not be
+// created" while the note quietly turns `done` in the background (the user
+// never finds out). On the other hand, polling a note that has REALLY failed
+// permanently FOREVER is pointless requests — as an upper bound we picked 15
+// minutes after note creation: comfortably above the worst-case backoff total
+// (360s), with margin added for the processing time of the two attempts.
 const FAILED_YOKLAMA_SINIRI_MS = 15 * 60 * 1000
 
-/** Bu not hâlâ "taze" mi — yoklamaya değer mi? Liste ve tekil not sorgusu AYNI
- *  kuralı kullanır (ikisi ayrışırsa biri gereksiz yoklar, öteki erken keser). */
+/** Is this note still "fresh" — worth polling? The list and single-note query
+ *  use the SAME rule (if they diverged, one would poll needlessly while the other cuts off too early). */
 function _yoklamayaDeger(n: { status: VoiceStatus; created_at: string | null }) {
   if (n.status === "queued" || n.status === "running") return true
   if (n.status === "failed" && n.created_at) {
@@ -97,8 +98,8 @@ export function useUploadVoiceNote() {
     }) => {
       const form = new FormData()
       form.append("audio", blob, adi)
-      // retry KAPALI: bu uç idempotent değil — her POST yeni bir not yaratır
-      // (design-files yüklemesinde aynı gerekçe).
+      // retry DISABLED: this endpoint is not idempotent — every POST creates a
+      // new note (same reasoning as the design-files upload).
       return apiUpload("/voice-notes", form, onProgress, false) as Promise<{ note: VoiceNoteFull }>
     },
     onSuccess: tazele,
@@ -135,9 +136,11 @@ export function sureMetni(sn: number | null) {
   return `${d}:${String(s).padStart(2, "0")}`
 }
 
-export const DURUM_METNI: Record<VoiceStatus, string> = {
-  queued: "sırada",
-  running: "işleniyor",
-  done: "hazır",
-  failed: "başarısız",
+// Status → translation key (this file cannot use React hooks — see
+// media-tools.ts "pages.voiceNote.status.*"). Label text is produced in the component with t().
+export const DURUM_METNI_KEY: Record<VoiceStatus, string> = {
+  queued: "pages.voiceNote.status.queued",
+  running: "pages.voiceNote.status.running",
+  done: "pages.voiceNote.status.done",
+  failed: "pages.voiceNote.status.failed",
 }

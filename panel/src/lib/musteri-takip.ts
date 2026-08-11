@@ -1,6 +1,6 @@
-// Müşteri Takip veri hook'ları — /api/client-tracking (yalnız management).
-// Kalem kataloğu + müşteri × kalem durum hücreleri + tarihli aktivite günlüğü;
-// son reklam / son çekim / sorumlu ekip backend'de TÜRETİLİR (buradan yazılamaz).
+// Client Tracking data hooks — /api/client-tracking (management only).
+// Item catalog + client × item status cells + a dated activity log;
+// last ad / last shoot / responsible team are DERIVED on the backend (cannot be written from here).
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   BookOpen, Camera, Clapperboard, Globe, MapPin, Megaphone, Palette, Printer,
@@ -8,6 +8,7 @@ import {
 } from "lucide-react"
 
 import { apiDelete, apiGet, apiJson } from "@/lib/api"
+import { useI18n } from "@/lib/i18n"
 
 export type EntryStatus = "var" | "yok" | "surecte" | "ilgilenmiyor"
 
@@ -57,7 +58,7 @@ export interface TrackingRow {
   client_id: number
   client_name: string
   sector: string | null
-  /** Anahtar = item_id ama STRING (JSON nesne anahtarı). Erişim: entries[String(item.id)] */
+  /** Key = item_id but as a STRING (JSON object key). Access via: entries[String(item.id)] */
   entries: Record<string, TrackingEntry>
   signals: TrackingSignals
   last_note: ActivityNote | null
@@ -71,16 +72,19 @@ export interface TrackingDetail {
   shoots: { id: number; title: string | null; status: string; scheduled_date: string }[]
 }
 
-// --- etiketler & tonlar --------------------------------------------------
+// --- labels & tones --------------------------------------------------
 
-export const ENTRY_STATUS_LABELS: Record<string, string> = {
-  var: "Var",
-  surecte: "Süreçte",
-  yok: "Yok",
-  ilgilenmiyor: "İlgilenmiyor",
+export function useEntryStatusLabels(): Record<string, string> {
+  const { t } = useI18n()
+  return {
+    var: t("pages.clientTracking.entryStatus.var"),
+    surecte: t("pages.clientTracking.entryStatus.surecte"),
+    yok: t("pages.clientTracking.entryStatus.yok"),
+    ilgilenmiyor: t("pages.clientTracking.entryStatus.ilgilenmiyor"),
+  }
 }
 
-/** Rozet tonları — AdsPage'in STATUS_TONE sözlüğüyle aynı sınıf dili. */
+/** Badge tones — same class language as AdsPage's STATUS_TONE dictionary. */
 export const ENTRY_STATUS_TONE: Record<string, string> = {
   var: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200",
   surecte: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
@@ -88,7 +92,7 @@ export const ENTRY_STATUS_TONE: Record<string, string> = {
   ilgilenmiyor: "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200",
 }
 
-/** Satırdaki kapsam şeridinin nokta renkleri (sayfanın imza öğesi). */
+/** Dot colors for the row's scope strip (the page's signature element). */
 export const ENTRY_STATUS_DOT: Record<string, string> = {
   var: "bg-emerald-500",
   surecte: "bg-amber-500",
@@ -96,25 +100,31 @@ export const ENTRY_STATUS_DOT: Record<string, string> = {
   ilgilenmiyor: "bg-rose-400/50",
 }
 
-export const CATEGORY_LABELS: Record<string, string> = {
-  hukuki: "Hukuki",
-  dijital: "Dijital",
-  tasarim: "Tasarım",
-  uretim: "Üretim",
-  reklam: "Reklam",
-  diger: "Diğer",
+export function useCategoryLabels(): Record<string, string> {
+  const { t } = useI18n()
+  return {
+    hukuki: t("pages.clientTracking.category.hukuki"),
+    dijital: t("pages.clientTracking.category.dijital"),
+    tasarim: t("pages.clientTracking.category.tasarim"),
+    uretim: t("pages.clientTracking.category.uretim"),
+    reklam: t("pages.clientTracking.category.reklam"),
+    diger: t("pages.clientTracking.category.diger"),
+  }
 }
 
-export const ROLE_SLOT_LABELS: Record<string, string> = {
-  designer: "Tasarımcı",
-  content_creator: "İçerik",
-  videographer_shoot: "Çekim",
-  videographer_edit: "Kurgu",
-  manager: "Yönetici",
+export function useRoleSlotLabels(): Record<string, string> {
+  const { t } = useI18n()
+  return {
+    designer: t("pages.clientTracking.roleSlot.designer"),
+    content_creator: t("pages.clientTracking.roleSlot.contentCreator"),
+    videographer_shoot: t("pages.clientTracking.roleSlot.videographerShoot"),
+    videographer_edit: t("pages.clientTracking.roleSlot.videographerEdit"),
+    manager: t("pages.clientTracking.roleSlot.manager"),
+  }
 }
 
-/** Katalogdaki `icon` string'i BEYAZ LİSTE ile çözülür — tüm lucide'ı dinamik
- *  import etmek bundle'ı şişirir. Bilinmeyen ad sessizce `Tag`'e düşer. */
+/** The catalog's `icon` string is resolved via an ALLOWLIST — dynamically importing
+ *  all of lucide would bloat the bundle. An unknown name silently falls back to `Tag`. */
 export const ITEM_ICONS: Record<string, LucideIcon> = {
   ShieldCheck, Palette, Globe, ShoppingCart, MapPin, Share2,
   Megaphone, BookOpen, Printer, Camera, Clapperboard, Sparkles, Tag,
@@ -124,7 +134,7 @@ export function itemIcon(name: string | null): LucideIcon {
   return (name && ITEM_ICONS[name]) || Tag
 }
 
-// --- biçimlendirme -------------------------------------------------------
+// --- formatting -------------------------------------------------------
 
 export function fmtDay(iso: string | null): string {
   if (!iso) return "—"
@@ -133,7 +143,7 @@ export function fmtDay(iso: string | null): string {
   })
 }
 
-/** Bugünden kaç gün önce? Gelecek tarihte negatif döner. null = tarih yok. */
+/** How many days ago from today? Returns negative for a future date. null = no date. */
 export function daysSince(iso: string | null): number | null {
   if (!iso) return null
   const then = new Date(iso)
@@ -142,8 +152,8 @@ export function daysSince(iso: string | null): number | null {
   return Math.floor((today.setHours(0, 0, 0, 0) - then.setHours(0, 0, 0, 0)) / 86_400_000)
 }
 
-/** Bayatlık rengi: hiç yok veya 180+ gün → kırmızı, 90-180 → amber, aksi → normal.
- *  Sayfanın "kime ne satabiliriz" amacını görsel olarak taşıyan şey bu. */
+/** Staleness color: none at all or 180+ days → red, 90-180 → amber, otherwise → normal.
+ *  This is what visually carries the page's "what can we sell to whom" purpose. */
 export function stalenessTone(iso: string | null): string {
   const days = daysSince(iso)
   if (days == null || days > 180) return "text-red-600 dark:text-red-400"
@@ -151,7 +161,7 @@ export function stalenessTone(iso: string | null): string {
   return ""
 }
 
-// --- hook'lar ------------------------------------------------------------
+// --- hooks ------------------------------------------------------------
 
 export function useClientTracking(params: { q?: string } = {}) {
   const qs = params.q ? `?q=${encodeURIComponent(params.q)}` : ""

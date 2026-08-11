@@ -1,4 +1,4 @@
-"""Görsel araçları — image_splitter (split fonksiyonu + /api/tools/image-split)."""
+"""Image tools — image_splitter (split function + /api/tools/image-split)."""
 import io
 
 import pytest
@@ -16,7 +16,7 @@ def _img_bytes(w, h, fmt="PNG"):
     return buf.getvalue()
 
 
-# --- pure fonksiyon ---
+# --- pure function ---
 
 def test_split_wide_uc_parca():
     img = Image.new("RGB", (3120, 1350))
@@ -45,7 +45,7 @@ def _post(client, data, name="w.png"):
 
 
 def test_image_split_oturumsuz_403(client):
-    # CSRF gate önce (POST) → 403
+    # CSRF gate first (POST) → 403
     r = client.post("/api/tools/image-split")
     assert r.status_code == 403
 
@@ -72,12 +72,12 @@ def test_image_split_yanlis_boyut_400(client):
     assert "3120" in r.get_json()["error"]
 
 
-# --- reels-cover (video kapağı) alt modu ---
+# --- reels-cover (video cover) submode ---
 
 def test_make_reels_cover_boyutlar():
     img = Image.new("RGB", (3120, 1350), (40, 80, 120))
     parts = image_tools.make_reels_cover(img)
-    # sol (1080×1350) · orta video kapağı (1080×1920) · sağ (1080×1350)
+    # left (1080×1350) · middle video cover (1080×1920) · right (1080×1350)
     assert [p.size for p in parts] == [(1080, 1350), (1080, 1920), (1080, 1350)]
 
 
@@ -105,7 +105,7 @@ def test_image_split_reels_modu(client):
 
 
 def test_image_split_zip_ciktisi(client):
-    # Yanıt, parçaları içeren indirilebilir bir zip data-URL'i de taşır.
+    # The response also carries a downloadable zip data-URL containing the pieces.
     import base64
     import zipfile
     login_as(client, DESIGNER)

@@ -1,17 +1,18 @@
-"""Sertleştirilmiş `codex exec` çalıştırıcısı — `ai_claude.py`'nin Codex karşılığı.
+"""Hardened `codex exec` runner — the Codex counterpart of `ai_claude.py`.
 
-Spike'lardan çıkan üç kural bu modülde yaşar:
+Three rules that came out of the spikes live in this module:
 
-1. **Prompt stdin'den.** `-i` bayrağı variadic (`<FILE>...`); prompt argüman olarak
-   verilirse onu da dosya sanıp yutar ("No prompt provided via stdin", exit 1 —
-   spike 2'nin ilk denemesi tam olarak buydu). Komut `-` ile biter, metin stdin'e
-   yazılır. Yan fayda: kullanıcı metni argv'ye HİÇ girmez → command injection
-   yüzeyi yapısal olarak yok olur.
-2. **`shell_environment_policy.inherit=none`.** Codex `$imagegen` çıktısını Bash ile
-   (`cp`) taşır ve bu kapatılamaz. Worker'ın env'i alt kabuğa geçseydi
-   `/etc/kotar/agency/env` değerleri o kabukta görünürdü.
-3. **`~/.codex/generated_images/<thread_id>` temizliği.** Codex görseli önce oraya
-   üretir; temizlenmezse müşteri görselleri kullanıcı ev dizininde birikir.
+1. **Prompt via stdin.** The `-i` flag is variadic (`<FILE>...`); if the prompt is
+   given as an argument, it gets swallowed as a file too ("No prompt provided via
+   stdin", exit 1 — that's exactly what spike 2's first attempt hit). The command
+   ends with `-`, the text is written to stdin. Side benefit: user text NEVER
+   enters argv → the command injection surface is structurally eliminated.
+2. **`shell_environment_policy.inherit=none`.** Codex moves the `$imagegen` output
+   with Bash (`cp`), and this can't be turned off. If the worker's env leaked into
+   that subshell, the `/etc/kotar/agency/env` values would be visible in it.
+3. **`~/.codex/generated_images/<thread_id>` cleanup.** Codex generates the image
+   there first; if it isn't cleaned up, client images pile up in the user's home
+   directory.
 """
 import json
 import os
@@ -19,11 +20,11 @@ import shutil
 import subprocess
 
 CODEX_BIN = os.environ.get('CODEX_BIN', 'codex')
-DEFAULT_TIMEOUT = 600          # spike 2 ~3,5 dk sürdü; pay bırakıldı
+DEFAULT_TIMEOUT = 600          # spike 2 took ~3.5 min; margin left
 
-# Hata sınıflandırma desenleri. Kota ÖNCE denenir: kota mesajı bazen "login" gibi
-# kelimeler de taşır, ama çözümü yeniden giriş DEĞİL beklemektir — sıra yanlış olsa
-# operatör boşuna oturum yenilerdi.
+# Error classification patterns. Quota is tried FIRST: a quota message sometimes
+# also carries words like "login", but the fix is waiting, NOT re-logging-in — if
+# the order were wrong, an operator would refresh the session for nothing.
 _QUOTA = ('usage limit', 'rate limit', 'quota', 'too many requests', '429')
 _AUTH = ('not logged in', 'unauthorized', '401', 'forbidden', '403',
          'authentication', 'codex login')
@@ -37,7 +38,7 @@ _PUBLIC = {
 
 
 class CodexError(Exception):
-    """Codex çağrısı başarısız. `public` kullanıcıya gösterilir, `internal` DB'de kalır."""
+    """Codex call failed. `public` is shown to the user, `internal` stays in the DB."""
 
     def __init__(self, code, internal):
         self.code = code
@@ -47,8 +48,8 @@ class CodexError(Exception):
 
 
 def classify(text):
-    """Hata metnini sınıfa indirger. Eşleşme yoksa 'internal' (güvenli taraf:
-    bilinmeyen hata kalıcı sayılır, sonsuz retry'a girmez)."""
+    """Reduces the error text to a class. 'internal' if there's no match (safe side:
+    an unknown error is treated as permanent, doesn't enter infinite retry)."""
     t = (text or '').lower()
     if any(k in t for k in _QUOTA):
         return 'quota'
@@ -58,40 +59,44 @@ def classify(text):
 
 
 def generated_root():
-    """Codex'in ürettiği görselleri bıraktığı dizin (spike 1'de gözlendi)."""
+    """The directory where Codex drops the images it generates (observed in spike 1)."""
     return os.path.join(os.path.expanduser('~'), '.codex', 'generated_images')
 
 
 def build_cmd(refs):
-    """argv listesi. Shell string birleştirme YOK — liste doğrudan Popen'a gider."""
-    # `-a/--ask-for-approval` BİLEREK YOK: o bayrak `codex` üst komutunda var ama
-    # `codex exec` alt komutunda YOK — eklendiğinde CLI anında
-    # "error: unexpected argument '-a' found" ile exit eder (2026-08-10 canlı
-    # doğrulamada yakalandı). `exec` zaten non-interactive; onay istemi çıkmaz.
+    """The argv list. NO shell string concatenation — the list goes straight to Popen."""
+    # `-a/--ask-for-approval` is DELIBERATELY MISSING: that flag exists on the
+    # `codex` top-level command but NOT on the `codex exec` subcommand — if added,
+    # the CLI exits immediately with "error: unexpected argument '-a' found"
+    # (caught in the 2026-08-10 live verification). `exec` is already
+    # non-interactive; no approval prompt appears.
     cmd = [CODEX_BIN, 'exec', '--json',
            '--sandbox', 'workspace-write',
            '-c', 'shell_environment_policy.inherit=none']
     for r in refs:
         cmd += ['-i', r]
-    cmd.append('-')                           # prompt stdin'den — EN SONDA olmalı
+    cmd.append('-')                           # prompt via stdin — MUST be LAST
     return cmd
 
 
 def _sanitize(s):
-    """Dahili log metninden ev dizini yolunu sadeleştir. `internal` alanı panelde
-    gösterilmez ama DB'ye de gereksiz sistem detayı yazmayız."""
+    """Simplify the home directory path out of internal log text. The `internal`
+    field isn't shown in the panel, but we still avoid writing unnecessary system
+    detail to the DB."""
     return (s or '').replace(os.path.expanduser('~'), '~')
 
 
 def run(prompt, workdir, refs, timeout=DEFAULT_TIMEOUT):
-    """`codex exec` koş → `{thread_id, usage, text}`. Hata → `CodexError`.
+    """Run `codex exec` → `{thread_id, usage, text}`. Error → `CodexError`.
 
-    `start_new_session=True`: süreç kendi grup lideri olur; timeout'ta `kill()` onu
-    çocuklarıyla birlikte götürür (orphan `bash`/`cp` kalmaz).
+    `start_new_session=True`: the process becomes its own group leader; on timeout
+    `kill()` takes it down along with its children (no orphan `bash`/`cp` left
+    behind).
 
-    `env` BİLEREK asgari: Codex'in kendisi HOME'a (oturum dosyası) ve PATH'e ihtiyaç
-    duyar; worker'ın geri kalan ortamı (DB URL'i, API anahtarları) sürece hiç girmez.
-    Bu, `shell_environment_policy.inherit=none` ile birlikte iki katman yapar."""
+    `env` is DELIBERATELY minimal: Codex itself needs HOME (session file) and
+    PATH; the rest of the worker's environment (DB URL, API keys) never enters the
+    process. Together with `shell_environment_policy.inherit=none`, this makes two
+    layers."""
     cmd = build_cmd(refs)
     proc = subprocess.Popen(
         cmd, cwd=workdir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -103,7 +108,7 @@ def run(prompt, workdir, refs, timeout=DEFAULT_TIMEOUT):
         proc.kill()
         try:
             proc.communicate(timeout=15)
-        except Exception:                     # noqa: BLE001 — temizlik en-iyi-çaba
+        except Exception:                     # noqa: BLE001 — cleanup is best-effort
             pass
         raise CodexError('timeout', f'{timeout} sn içinde bitmedi')
 
@@ -115,7 +120,7 @@ def run(prompt, workdir, refs, timeout=DEFAULT_TIMEOUT):
         try:
             olay = json.loads(satir)
         except ValueError:
-            continue                          # bozuk satır tüm işi düşürmemeli
+            continue                          # a broken line shouldn't tank the whole job
         if not isinstance(olay, dict):
             continue
         tur = olay.get('type')
@@ -136,10 +141,11 @@ def run(prompt, workdir, refs, timeout=DEFAULT_TIMEOUT):
 
 
 def cleanup_generated(thread_id):
-    """`~/.codex/generated_images/<thread_id>` dizinini sil (en-iyi-çaba).
+    """Delete the `~/.codex/generated_images/<thread_id>` directory (best-effort).
 
-    `thread_id` sağlayıcıdan gelir → yol bileşeni olmadan önce doğrulanır; aksi
-    halde '../..' gibi bir değer komşu dizinleri silerdi."""
+    `thread_id` comes from the provider → it's validated before becoming a path
+    component; otherwise a value like '../..' would delete neighboring
+    directories."""
     if not thread_id or not all(c.isalnum() or c == '-' for c in thread_id):
         return
     d = os.path.join(generated_root(), thread_id)

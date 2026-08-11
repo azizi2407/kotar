@@ -1,4 +1,4 @@
-"""ai_usage — claude -p token kaydı + toplama."""
+"""ai_usage — claude -p token recording + aggregation."""
 import ai_usage
 from extensions import db
 from models import AiUsage, utcnow
@@ -21,14 +21,14 @@ def test_record_satir_yazar():
 
 
 def test_record_usage_dict_degilse_yoksayar():
-    ai_usage.record('m', None, 0.0)  # usage=None → satır yok
+    ai_usage.record('m', None, 0.0)  # usage=None → no row
     assert AiUsage.query.count() == 0
 
 
 def test_aggregate_bugun_hafta_toplam():
     from datetime import timedelta
     now = utcnow()
-    # Bugün 2 çağrı, 10 gün önce 1 çağrı
+    # 2 calls today, 1 call 10 days ago
     db.session.add(AiUsage(at=now, model='m1', source='caption',
                            input_tokens=100, output_tokens=50, cost_usd=0.01))
     db.session.add(AiUsage(at=now, model='m2', source='brief',
@@ -42,9 +42,9 @@ def test_aggregate_bugun_hafta_toplam():
     assert agg['today']['input_tokens'] == 350  # 100 + (200+50 cache)
     assert agg['today']['output_tokens'] == 110
     assert round(agg['today']['cost_usd'], 2) == 0.03
-    assert agg['week']['calls'] == 2          # 10 gün önceki hariç
+    assert agg['week']['calls'] == 2          # excludes the one from 10 days ago
     assert agg['total']['calls'] == 3
-    # kaynak/model kırılımı (son 30 gün → 3 kayıt da girer)
+    # source/model breakdown (last 30 days → all 3 records included)
     sources = {r['key']: r for r in agg['by_source']}
     assert sources['caption']['calls'] == 2
     assert sources['brief']['calls'] == 1

@@ -1,4 +1,4 @@
-// Basit yükleme/ilerleme çubuğu (0-100).
+// Simple loading/progress bar (0-100).
 export function Progress({ value }: { value: number }) {
   return (
     <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">

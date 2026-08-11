@@ -1,8 +1,8 @@
-"""Agency JSON API — panel SPA tüketir. Oturum SSO'dan gelir (Flask session).
+"""Agency JSON API — consumed by the panel SPA. Session comes from SSO (Flask session).
 
-Yetki modeli: okuma = ekip rolleri (management/designer/videographer/content_creator),
-yazma = yalnız management. Mutasyonlar (POST/PUT/PATCH/DELETE) CSRF token ister:
-token /api/session'dan alınır, X-CSRFToken header'ıyla gönderilir.
+Authorization model: reading = team roles (management/designer/videographer/content_creator),
+writing = management only. Mutations (POST/PUT/PATCH/DELETE) require a CSRF token:
+the token is fetched from /api/session and sent via the X-CSRFToken header.
 """
 import functools
 import hmac
@@ -31,8 +31,8 @@ bp = Blueprint('api', __name__)
 
 READ_ROLES = {'management', 'designer', 'videographer', 'content_creator'}
 
-# Telefonun abone olacağı PUBLIC adres — `NTFY_BASE_URL` sunucu içi (localhost)
-# olduğu için ayrı: panel kullanıcıya bu linki/QR'ı gösterir.
+# PUBLIC address the phone subscribes to — separate from `NTFY_BASE_URL`, which is
+# internal (localhost); the panel shows this link/QR code to the user.
 NTFY_PUBLIC_URL = os.getenv('NTFY_PUBLIC_URL', 'https://ntfy.example.com')
 
 
@@ -42,7 +42,7 @@ def csrf_protect():
         token = session.get('csrf')
         header = request.headers.get('X-CSRFToken', '')
         if not token or not hmac.compare_digest(token, header):
-            return jsonify(error='CSRF doğrulaması başarısız'), 403
+            return jsonify(error='CSRF validation failed'), 403
 
 
 def auth_required(write=False):
@@ -51,22 +51,22 @@ def auth_required(write=False):
         def wrapper(*args, **kwargs):
             u = current_user()
             if not u:
-                return jsonify(error='oturum yok'), 401
+                return jsonify(error='no active session'), 401
             allowed = {'management'} if write else READ_ROLES
             if u.get('role') not in allowed:
-                return jsonify(error='bu işlem için yetkiniz yok'), 403
+                return jsonify(error='you are not authorized for this action'), 403
             return fn(*args, **kwargs)
         return wrapper
     return decorator
 
 
 def _require_superadmin():
-    """Sunucu yönetim aksiyonları yalnız superadmin (gerçek kimlik). (user, err) döner."""
+    """Server admin actions are superadmin-only (real identity). Returns (user, err)."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='no active session'), 401)
     if not is_superadmin(real_user()):
-        return None, (jsonify(error='bu işlem için yetkiniz yok'), 403)
+        return None, (jsonify(error='you are not authorized for this action'), 403)
     return u, None
 
 
@@ -74,7 +74,7 @@ def _require_superadmin():
 def session_info():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     if 'csrf' not in session:
         session['csrf'] = secrets.token_urlsafe(32)
     imp = session.get('impersonator')
@@ -82,11 +82,11 @@ def session_info():
     from sso_client import AUTH_MODE
     return jsonify(user=u, csrf=session['csrf'],
                    impersonating=bool(imp),
-                   real_user=imp or u,             # gerçek (giriş yapan) kimlik
-                   can_impersonate=is_superadmin(),  # gerçek kimlik superadmin mi
-                   auth_mode=AUTH_MODE,             # 'local' iken panelde "parola değiştir" gösterilir
-                   # "Müşterilerim" işaretleme yetkisi (bkz. sharing.OWNER_EMAIL /
-                   # AGENCY_OWNER_EMAIL env) — boşsa hiç kimse eşleşmez.
+                   real_user=imp or u,             # real (logged-in) identity
+                   can_impersonate=is_superadmin(),  # whether the real identity is superadmin
+                   auth_mode=AUTH_MODE,             # panel shows "change password" when 'local'
+                   # "My Clients" flagging permission (see sharing.OWNER_EMAIL /
+                   # AGENCY_OWNER_EMAIL env) — if empty, no one matches.
                    is_agency_owner=bool(_sharing.OWNER_EMAIL) and
                    u.get('email') == _sharing.OWNER_EMAIL)
 
@@ -95,26 +95,26 @@ def session_info():
 def me():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     return jsonify(user=u)
 
 
-# --- impersonation ("kullanıcı gözünden bak") — yalnız superadmin ---
+# --- impersonation ("view as user") — superadmin only ---
 
 @bp.post('/impersonate')
 def impersonate_start():
-    """Gerçek kimliği (superadmin) sakla, session['user']'ı hedefe çevir. Yetki HER
-    ZAMAN gerçek kimlik üzerinden — impersonate edilen kullanıcı bunu çağıramaz."""
+    """Store the real identity (superadmin), switch session['user'] to the target.
+    Authorization is ALWAYS via the real identity — the impersonated user can't call this."""
     real = real_user()
     if not real:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     if not is_superadmin(real):
-        return jsonify(error='yetki yok'), 403
+        return jsonify(error='not authorized'), 403
     data = request.get_json(silent=True) or {}
     target = UserRef.query.filter_by(sub=str(data.get('sub') or '')).first()
     if target is None or target.sub == real.get('sub'):
-        return jsonify(error='kullanıcı bulunamadı'), 404
-    session['impersonator'] = real  # ilk kez sakla; kullanıcı değiştirmede gerçek kalır
+        return jsonify(error='user not found'), 404
+    session['impersonator'] = real  # stored on first use; stays real across target switches
     session['user'] = {'sub': target.sub, 'email': target.email,
                        'name': target.name, 'role': target.role}
     return jsonify(user=session['user'], impersonating=True, real_user=real)
@@ -124,7 +124,7 @@ def impersonate_start():
 def impersonate_stop():
     real = session.get('impersonator')
     if not real:
-        return jsonify(error='zaten kendi kimliğinsin'), 400
+        return jsonify(error='you are already using your own identity'), 400
     session['user'] = real
     session.pop('impersonator', None)
     return jsonify(user=real, impersonating=False)
@@ -133,26 +133,26 @@ def impersonate_stop():
 @bp.get('/users')
 def users():
     if not current_user():
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     refs = UserRef.query.order_by(UserRef.name).all()
     return jsonify(users=[r.to_dict() for r in refs])
 
 
-# --- kişisel tercihler (kullanıcı-kesitli; sayfaya değil KULLANICIYA ait) ---
+# --- personal preferences (user-scoped; belongs to the USER, not the page) ---
 
-# Beyaz liste: anahtar enflasyonunu engeller. Yeni bir sayfa gizleme isterse buraya
-# bir değer eklenir (tablo `scope` kolonu zaten hazır).
+# Whitelist: prevents key inflation. If a new page needs hiding, a value is added
+# here (the table's `scope` column is already ready for it).
 PREF_SCOPES = ('videographer_upload',)
 
 
 def _pref_user():
-    """(user, err) — oturum + panel rolü. Tercih her zaman ETKİN kimliğe yazılır
-    (impersonation altında hedef kullanıcının tercihi düzenlenir)."""
+    """(user, err) — session + panel role. Preferences are always written to the
+    EFFECTIVE identity (under impersonation, the target user's preference is edited)."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='no active session'), 401)
     if u.get('role') not in READ_ROLES:
-        return None, (jsonify(error='bu işlem için yetkiniz yok'), 403)
+        return None, (jsonify(error='you are not authorized for this action'), 403)
     return u, None
 
 
@@ -163,36 +163,37 @@ def _hidden_set(sub, scope):
 
 @bp.get('/prefs/hidden-clients')
 def prefs_hidden_clients_get():
-    """Kullanıcının bu kapsamda gizlediği müşteriler.
+    """Clients the user has hidden in this scope.
 
-    İZOLASYON YAPISAL: `owner_sub` her zaman `current_user()['sub']`; uç başka
-    kullanıcının tercihini adresleyecek bir parametre KABUL ETMEZ."""
+    ISOLATION IS STRUCTURAL: `owner_sub` is always `current_user()['sub']`; the
+    endpoint does NOT accept a parameter that could address another user's preference."""
     u, err = _pref_user()
     if err:
         return err
     scope = request.args.get('scope') or PREF_SCOPES[0]
     if scope not in PREF_SCOPES:
-        return jsonify(error=f'geçersiz kapsam: {scope}'), 400
+        return jsonify(error=f'invalid scope: {scope}'), 400
     return jsonify(scope=scope, client_ids=_hidden_set(u['sub'], scope))
 
 
 @bp.put('/prefs/hidden-clients')
 def prefs_hidden_clients_put():
-    """Tek müşterinin gizlilik durumunu yaz: {scope, client_id, hidden}.
+    """Write one client's hidden state: {scope, client_id, hidden}.
 
-    Yanıt TAM yeni kümedir — panel yerel türetme yapıp hata etmesin. `hidden=true`
-    idempotent upsert (satır varsa dokunmaz), `false` satırı SİLER (soft-delete yok:
-    UNIQUE slotu işgal ederdi)."""
+    The response is the FULL new set — so the panel doesn't have to derive it
+    locally and risk drift. `hidden=true` is an idempotent upsert (no-op if the
+    row exists), `false` DELETES the row (no soft-delete: it would occupy the
+    UNIQUE slot)."""
     u, err = _pref_user()
     if err:
         return err
     data = request.get_json(silent=True) or {}
     scope = data.get('scope') or PREF_SCOPES[0]
     if scope not in PREF_SCOPES:
-        return jsonify(error=f'geçersiz kapsam: {scope}'), 400
+        return jsonify(error=f'invalid scope: {scope}'), 400
     client_id = data.get('client_id')
     if not isinstance(client_id, int) or db.session.get(Client, client_id) is None:
-        return jsonify(error='müşteri bulunamadı'), 404
+        return jsonify(error='client not found'), 404
 
     row = UserHiddenClient.query.filter_by(owner_sub=str(u['sub']), scope=scope,
                                            client_id=client_id).first()
@@ -202,7 +203,7 @@ def prefs_hidden_clients_put():
                                             client_id=client_id))
             try:
                 db.session.commit()
-            except IntegrityError:      # eşzamanlı aynı toggle — zaten gizli
+            except IntegrityError:      # concurrent identical toggle — already hidden
                 db.session.rollback()
     elif row is not None:
         db.session.delete(row)
@@ -217,7 +218,7 @@ SCALAR_FIELDS = ('name', 'sector', 'notes', 'client_email', 'instagram_url',
 
 
 def _apply_payload(c, data):
-    """Payload'daki alanları uygula; gönderilmeyen alanlara dokunma (partial)."""
+    """Apply fields from the payload; leave unsent fields untouched (partial)."""
     for f in SCALAR_FIELDS:
         if f in data:
             setattr(c, f, data[f])
@@ -234,7 +235,7 @@ def _apply_payload(c, data):
         c.locations = [ClientLocation(name=p.get('name'), address=p.get('address'))
                        for p in (data['locations'] or [])]
     if 'team_assignments' in data:
-        # UNIQUE(client_id, role_slot): yeni satırlar insert edilmeden eskiler silinsin
+        # UNIQUE(client_id, role_slot): old rows must be deleted before new ones are inserted
         c.team_assignments = []
         if c.id is not None:
             db.session.flush()
@@ -243,13 +244,14 @@ def _apply_payload(c, data):
 
 
 def _client_json(c, full=False):
-    """Rol-farkındalıklı müşteri JSON'u — TEK KAPI.
+    """Role-aware client JSON — THE SINGLE GATE.
 
-    management dışındaki roller (designer/content_creator/videographer) müşteriyi
-    Marka Rehberi bağlamında okur; ticari (`contract`) ve iletişim (`client_email`,
-    `contacts`, `locations`) alanları ile iç notlar ve `special_days_token`
-    yanıta HİÇ konmaz. Yalnız `write=True` uçları zaten management-gated olduğu
-    için orada ayrım gerekmez, ama okuma uçlarının ikisi de buradan geçer."""
+    Roles other than management (designer/content_creator/videographer) read the
+    client in the Brand Guide context; commercial (`contract`) and contact
+    (`client_email`, `contacts`, `locations`) fields, plus internal notes and
+    `special_days_token`, are NEVER included in the response. `write=True`
+    endpoints are already management-gated so no distinction is needed there,
+    but both read endpoints go through here."""
     return c.to_dict(full=full, sensitive=current_user().get('role') == 'management')
 
 
@@ -269,13 +271,13 @@ def clients_list():
 def clients_create():
     data = request.get_json(silent=True) or {}
     if not (data.get('name') or '').strip():
-        return jsonify(error='name alanı zorunlu'), 400
+        return jsonify(error='name field is required'), 400
     c = Client(created_by=current_user()['sub'])
     _apply_payload(c, data)
     db.session.add(c)
     db.session.commit()
-    # Yeni müşteri Drive klasör ağacı provizyonu (Cutover C2). Best-effort:
-    # Drive erişilemez/hata verirse müşteri oluşturma etkilenmez (içeride yutulur).
+    # Provision the new client's Drive folder tree (Cutover C2). Best-effort:
+    # if Drive is unreachable/errors, client creation is unaffected (swallowed internally).
     client_provision.provision_client_folders(c)
     return jsonify(client=c.to_dict(full=True)), 201
 
@@ -283,7 +285,7 @@ def clients_create():
 def _get_or_404(client_id):
     c = db.session.get(Client, client_id)
     if c is None:
-        return None, (jsonify(error='müşteri bulunamadı'), 404)
+        return None, (jsonify(error='client not found'), 404)
     return c, None
 
 
@@ -304,7 +306,7 @@ def clients_update(client_id):
         return err
     data = request.get_json(silent=True) or {}
     if 'name' in data and not (data['name'] or '').strip():
-        return jsonify(error='name boş olamaz'), 400
+        return jsonify(error='name cannot be empty'), 400
     _apply_payload(c, data)
     c.updated_at = utcnow()
     c.updated_by = current_user()['sub']
@@ -315,13 +317,13 @@ def clients_update(client_id):
 @bp.post('/clients/assign-designer')
 @auth_required(write=True)
 def clients_assign_designer():
-    """Toplu tasarımcı ataması — YALNIZ 'designer' slot'una dokunur (videographer/
-    content_creator slotları korunur). Gövde: {assignments:[{client_id, user_id|null}]}.
-    user_id boş/null → o müşterinin designer ataması kaldırılır. Bilinmeyen client_id atlanır."""
+    """Bulk designer assignment — touches ONLY the 'designer' slot (videographer/
+    content_creator slots are preserved). Body: {assignments:[{client_id, user_id|null}]}.
+    user_id empty/null → that client's designer assignment is removed. Unknown client_id is skipped."""
     data = request.get_json(silent=True) or {}
     items = data.get('assignments')
     if not isinstance(items, list):
-        return jsonify(error='assignments listesi zorunlu'), 400
+        return jsonify(error='assignments list is required'), 400
     updated = 0
     for it in items:
         cid = (it or {}).get('client_id')
@@ -373,22 +375,22 @@ def clients_restore(client_id):
 @bp.post('/clients/<int:client_id>/provision-drive')
 @auth_required(write=True)
 def clients_provision_drive(client_id):
-    """Mevcut müşteri için Drive klasör ağacını (yeniden) kur / eksikleri tamamla.
-    İdempotent; göçen müşteride mevcut kökü kullanır, içerik kökü altında yeni kök açmaz."""
+    """(Re-)set up the Drive folder tree for an existing client / fill in what's missing.
+    Idempotent; for a migrated client it uses the existing root, doesn't open a new root under the content root."""
     c, err = _get_or_404(client_id)
     if err:
         return err
     result = client_provision.provision_client_folders(c)
     if result is None:
-        return jsonify(error='Drive klasörü kurulamadı (Drive kimliği/kökü yok veya hata)'), 502
+        return jsonify(error='could not set up Drive folder (missing Drive credentials/root, or an error occurred)'), 502
     return jsonify(client=c.to_dict(full=True), provision=result)
 
 
-# --- Faz 3: vault Ayar entegrasyonu (brief aç/kapa · Ayar oku · catch-up · onboarding) ---
+# --- Phase 3: vault Ayar integration (brief on/off · read Ayar · catch-up · onboarding) ---
 
 def _upcoming_weeks(n=3):
-    """İçinde bulunulan ISO haftadan başlayarak n hafta ('bu hafta → +(n-1)').
-    Varsayılan 3 → bu hafta, +1, +2 (K7 catch-up aralığı)."""
+    """n weeks starting from the current ISO week ('this week → +(n-1)').
+    Default 3 → this week, +1, +2 (K7 catch-up range)."""
     base = date.today()
     out = []
     for i in range(n):
@@ -441,13 +443,13 @@ brief üretir. "Üretim Geçmişi" gibi bir alan EKLEME — sistem otomatik yön
 @bp.patch('/clients/<int:client_id>/brief-enabled')
 @auth_required(write=True)
 def clients_brief_enabled(client_id):
-    """Brief aç/kapa (brief-pasif toggle). `{enabled: bool}` → `Client.brief_enabled`."""
+    """Brief on/off (brief-inactive toggle). `{enabled: bool}` → `Client.brief_enabled`."""
     c, err = _get_or_404(client_id)
     if err:
         return err
     data = request.get_json(silent=True) or {}
     if 'enabled' not in data:
-        return jsonify(error='enabled alanı zorunlu'), 400
+        return jsonify(error='enabled field is required'), 400
     c.brief_enabled = bool(data['enabled'])
     c.updated_at = utcnow()
     c.updated_by = current_user()['sub']
@@ -455,16 +457,16 @@ def clients_brief_enabled(client_id):
     return jsonify(client=c.to_dict())
 
 
-# Ayar alanları — brand_profile JSON'una yazılan tip grupları (vault-sema-taslak.md §2.1).
-# Vault DOSYASI değil, panel DB'si tek otorite (Option A — düzenlenebilir Ayar).
+# Ayar fields — type groups written into the brand_profile JSON (vault-sema-taslak.md §2.1).
+# NOT a vault FILE — the panel DB is the sole authority (Option A — editable Ayar).
 _AYAR_STR_FIELDS = ('brand_voice', 'target_audience', 'cta', 'content_pillars', 'guide_md')
 _AYAR_LIST_FIELDS = ('forbidden', 'color_palette', 'posting_days')
 _AYAR_DICT_FIELDS = ('content_mix', 'hashtags')
 
 
 def _ayar_from_client(c):
-    """`Client.brand_profile` + `caption_settings`'ten temiz Ayar şeması kurar.
-    Boş/eksik alanlar makul default ('' / [] / {}) ile döner — çağıran patlamaz."""
+    """Builds a clean Ayar schema from `Client.brand_profile` + `caption_settings`.
+    Empty/missing fields come back with a sensible default ('' / [] / {}) — callers won't blow up."""
     bp = c.brand_profile if isinstance(c.brand_profile, dict) else {}
     cs = c.caption_settings if isinstance(c.caption_settings, dict) else {}
     return {
@@ -486,14 +488,15 @@ def _ayar_from_client(c):
 @bp.get('/clients/<int:client_id>/vault-ayar')
 @auth_required()
 def clients_vault_ayar(client_id):
-    """Müşteri Ayar'ını panel DB'sinden (`brand_profile` + `caption_settings`) SALT-OKU
-    kurar (vault DOSYASI DEĞİL — Option A). brand_profile boş/None ise onboarding:
-    `{onboarding: true}` + boş şablon döner.
+    """Builds the client's Ayar READ-ONLY from the panel DB (`brand_profile` +
+    `caption_settings`) — NOT a vault FILE (Option A). If brand_profile is empty/None,
+    returns onboarding: `{onboarding: true}` + an empty template.
 
-    **Okuma TÜM üretim rollerine açık** (2026-07-27): Ayar bir marka üretim
-    rehberi — tasarımcı/içerik üreticisi/videograf `/marka-rehberi` sayfasından
-    okur. Ticari veya iletişim bilgisi İÇERMEZ (o alanlar `_client_json`'dan da
-    düşer), o yüzden READ_ROLES güvenli. Yazma (PUT) management'ta kalır."""
+    **Reading is open to ALL production roles** (2026-07-27): Ayar is a brand
+    production guide — designer/content creator/videographer read it from the
+    `/marka-rehberi` page. It contains NO commercial or contact info (those fields
+    also drop out of `_client_json`), so READ_ROLES is safe. Writing (PUT) stays
+    management-only."""
     c, err = _get_or_404(client_id)
     if err:
         return err
@@ -506,44 +509,45 @@ def clients_vault_ayar(client_id):
 @bp.put('/clients/<int:client_id>/vault-ayar')
 @auth_required(write=True)
 def clients_vault_ayar_kaydet(client_id):
-    """Müşteri Ayar'ını panel DB'sine YAZAR (Option A — düzenlenebilir, git/vault YOK).
-    Body kısmi merge: gelen alanlar doğrulanıp `brand_profile`'a (string/list/dict/int
-    tipleri) + `caption_settings`'e (ayrı kolon) yazılır; gelmeyen alan korunur. Anında
-    etkili — caption + brief üretimi bunları okur. management-gated. Güncel Ayar döner."""
+    """WRITES the client's Ayar to the panel DB (Option A — editable, NO git/vault).
+    Body is a partial merge: incoming fields are validated and written into
+    `brand_profile` (string/list/dict/int types) + `caption_settings` (separate
+    column); unsent fields are preserved. Takes effect immediately — caption and
+    brief generation read these. management-gated. Returns the current Ayar."""
     c, err = _get_or_404(client_id)
     if err:
         return err
     data = request.get_json(silent=True) or {}
 
-    # brand_profile mevcut değerle merge — yeni dict'e kopyala ki SQLAlchemy mutasyonu algılasın.
+    # merge brand_profile with the existing value — copy into a new dict so SQLAlchemy detects the mutation.
     bp = dict(c.brand_profile) if isinstance(c.brand_profile, dict) else {}
     for f in _AYAR_STR_FIELDS:
         if f in data:
             if not isinstance(data[f], str):
-                return jsonify(error=f'{f} string olmalı'), 400
+                return jsonify(error=f'{f} must be a string'), 400
             bp[f] = data[f]
     for f in _AYAR_LIST_FIELDS:
         if f in data:
             if not isinstance(data[f], list):
-                return jsonify(error=f'{f} liste olmalı'), 400
+                return jsonify(error=f'{f} must be a list'), 400
             bp[f] = data[f]
     for f in _AYAR_DICT_FIELDS:
         if f in data:
             if not isinstance(data[f], dict):
-                return jsonify(error=f'{f} sözlük olmalı'), 400
+                return jsonify(error=f'{f} must be an object'), 400
             bp[f] = data[f]
     if 'ideas_per_week' in data:
         v = data['ideas_per_week']
-        # bool int'in alt-sınıfı — açıkça dışla (True/False ideas_per_week olamaz).
+        # bool is a subclass of int — exclude it explicitly (True/False can't be ideas_per_week).
         if isinstance(v, bool) or not isinstance(v, int):
-            return jsonify(error='ideas_per_week tam sayı olmalı'), 400
+            return jsonify(error='ideas_per_week must be an integer'), 400
         bp['ideas_per_week'] = v
 
-    # caption_settings ayrı kolon — kısmi merge (gelmeyen anahtar korunur).
+    # caption_settings is a separate column — partial merge (unsent keys are preserved).
     cs = dict(c.caption_settings) if isinstance(c.caption_settings, dict) else {}
     if 'caption_settings' in data:
         if not isinstance(data['caption_settings'], dict):
-            return jsonify(error='caption_settings sözlük olmalı'), 400
+            return jsonify(error='caption_settings must be an object'), 400
         cs.update(data['caption_settings'])
 
     c.brand_profile = bp
@@ -557,9 +561,9 @@ def clients_vault_ayar_kaydet(client_id):
 @bp.post('/clients/<int:client_id>/catch-up')
 @auth_required(write=True)
 def clients_catch_up(client_id):
-    """Bu müşteri için 'bu hafta → +2' aralığındaki EKSİK haftaların brief job'larını
-    enqueue eder (K7). Zaten `WeeklyBrief`'i olan hafta atlanır; dedup_key mevcutla
-    tutarlı (`brief:{cid}:{hafta}`). Kaç hafta enqueue edildiğini döner."""
+    """Enqueues brief jobs for this client for the MISSING weeks in the 'this week → +2'
+    range (K7). A week that already has a `WeeklyBrief` is skipped; the dedup_key is
+    consistent with the existing one (`brief:{cid}:{week}`). Returns how many weeks were enqueued."""
     c, err = _get_or_404(client_id)
     if err:
         return err
@@ -579,8 +583,8 @@ def clients_catch_up(client_id):
 @bp.get('/clients/<int:client_id>/onboarding-prompt')
 @auth_required(write=True)
 def clients_onboarding_prompt(client_id):
-    """Yeni müşteri için taze bir claude session'a yapıştırılacak 'başlangıç prompt'u'
-    METNİ döner — markanın Ayar dosyasını yeni şemada üretmesini ister."""
+    """Returns the TEXT of a 'starter prompt' to paste into a fresh claude session for
+    a new client — asks it to produce the brand's Ayar file in the new schema."""
     c, err = _get_or_404(client_id)
     if err:
         return err
@@ -589,7 +593,7 @@ def clients_onboarding_prompt(client_id):
     return jsonify(prompt=prompt)
 
 
-# --- bildirimler (panel-içi bell) ---
+# --- notifications (in-panel bell) ---
 
 NOTIFICATION_LIST_LIMIT = 30
 
@@ -598,14 +602,14 @@ NOTIFICATION_LIST_LIMIT = 30
 def notifications_list():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     sub = u['sub']
     base = Notification.query.filter_by(recipient_sub=sub)
-    # Rozet sayısı SQL COUNT ile hesaplanır — okunmamış satırları sınırsız belleğe
-    # çekmeden (bkz Faz 0 review M4).
+    # Badge count is computed with a SQL COUNT — without pulling unread rows into
+    # memory unbounded (see Phase 0 review M4).
     unread_count = base.filter_by(read_at=None).count()
-    # Sayfalama (bildirim geçmişi sayfası için): offset + limit. Bell varsayılanla
-    # (offset=0, limit=30) çağırır. has_more: limit+1 çekip fazlalık var mı bakılır.
+    # Pagination (for the notification history page): offset + limit. The bell calls
+    # with the defaults (offset=0, limit=30). has_more: fetch limit+1 and check for the extra.
     offset = max(request.args.get('offset', 0, type=int) or 0, 0)
     limit = request.args.get('limit', NOTIFICATION_LIST_LIMIT, type=int) or NOTIFICATION_LIST_LIMIT
     limit = max(1, min(limit, 100))
@@ -621,10 +625,10 @@ def notifications_list():
 def notification_read(notif_id):
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     n = Notification.query.filter_by(id=notif_id, recipient_sub=u['sub']).first()
     if n is None:
-        return jsonify(error='bildirim bulunamadı'), 404
+        return jsonify(error='notification not found'), 404
     if n.read_at is None:
         n.read_at = utcnow()
         db.session.commit()
@@ -635,7 +639,7 @@ def notification_read(notif_id):
 def notifications_read_all():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     unread = Notification.query.filter_by(recipient_sub=u['sub'], read_at=None).all()
     now = utcnow()
     for n in unread:
@@ -644,13 +648,13 @@ def notifications_read_all():
     return jsonify(ok=True, count=len(unread))
 
 
-# --- bildirim tercihleri (ntfy, 2026-08-05) ---------------------------------
-# Uçlar HER ZAMAN oturum sahibinin kendi kaydına bakar; gövdede user_sub alınmaz
-# (başkasının topic'ini okumak/telefonuna bildirim göndermek mümkün olmasın).
+# --- notification preferences (ntfy, 2026-08-05) ---------------------------------
+# Endpoints ALWAYS look at the session owner's own record; user_sub is never taken
+# from the body (so no one can read another user's topic / push notifications to their phone).
 
 def _own_pref(sub, create=False):
-    """Kullanıcının tercih kaydı. `create=True` ilk açılışta rastgele topic üretir —
-    topic 32-hex çünkü ntfy'de okuma yetkisi adın gizliliğine dayanıyor."""
+    """The user's preference record. `create=True` generates a random topic on first
+    open — the topic is 32-hex because ntfy's read authorization relies on the name being secret."""
     pref = db.session.get(NotificationPref, sub)
     if pref is None and create:
         pref = NotificationPref(user_sub=sub, ntfy_topic=secrets.token_hex(16))
@@ -663,14 +667,14 @@ def _own_pref(sub, create=False):
 def notification_prefs_get():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
-    # GET kayıt OLUŞTURUR: panelin ayar kartını açan kullanıcıya gösterilecek bir
-    # topic gerekiyor. Kayıt tek başına push açmaz (`ntfy_enabled` false) —
-    # opt-in kuralı `ntfy_enabled` bayrağında, kaydın varlığında değil.
+        return jsonify(error='no active session'), 401
+    # GET CREATES the record: a topic is needed to show to the user opening the
+    # panel's settings card. The record alone doesn't turn on push (`ntfy_enabled`
+    # is false) — the opt-in rule lives in the `ntfy_enabled` flag, not the record's existence.
     pref = _own_pref(u['sub'], create=True)
-    # `server_url` + `ntfy_topic` AYRI dönüyor: ntfy uygulaması abone olurken ikisini
-    # ayrı alanlarda istiyor (sunucu / konu). Birleşik `subscribe_url` tarayıcıda
-    # açmak ve QR için duruyor.
+    # `server_url` + `ntfy_topic` are returned SEPARATELY: the ntfy app wants them in
+    # separate fields when subscribing (server / topic). The combined `subscribe_url`
+    # exists for opening in the browser and for the QR code.
     return jsonify(prefs=pref.to_dict(), severities=list(SEVERITIES),
                    channel_ready=ntfy_gateway.available(),
                    server_url=NTFY_PUBLIC_URL,
@@ -681,7 +685,7 @@ def notification_prefs_get():
 def notification_prefs_put():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     data = request.get_json(silent=True) or {}
     pref = _own_pref(u['sub'], create=True)
     if 'ntfy_enabled' in data:
@@ -689,7 +693,7 @@ def notification_prefs_put():
     if 'min_severity' in data:
         sev = str(data['min_severity'] or '').strip()
         if sev not in SEVERITIES:
-            return jsonify(error=f'min_severity {"|".join(SEVERITIES)} olmalı'), 400
+            return jsonify(error=f'min_severity must be one of {"|".join(SEVERITIES)}'), 400
         pref.min_severity = sev
     for alan in ('quiet_start', 'quiet_end'):
         if alan in data:
@@ -700,12 +704,12 @@ def notification_prefs_put():
             try:
                 saat = int(raw)
             except (TypeError, ValueError):
-                return jsonify(error=f'{alan} 0-23 arası saat olmalı'), 400
+                return jsonify(error=f'{alan} must be an hour between 0-23'), 400
             if not 0 <= saat <= 23:
-                return jsonify(error=f'{alan} 0-23 arası saat olmalı'), 400
+                return jsonify(error=f'{alan} must be an hour between 0-23'), 400
             setattr(pref, alan, saat)
-    # Yeni topic isteği (eski cihazların aboneliğini kesmek için) — topic sızarsa
-    # tek çare yenilemek, o yüzden kullanıcının elinde olsun.
+    # Request a new topic (to cut off old devices' subscriptions) — if the topic
+    # leaks, the only fix is to rotate it, so it's left in the user's hands.
     if data.get('rotate_topic'):
         pref.ntfy_topic = secrets.token_hex(16)
     db.session.commit()
@@ -715,11 +719,11 @@ def notification_prefs_put():
 
 @bp.get('/announce/recipients')
 def announce_recipients():
-    """Anons gönderilebilecek kişiler (yalnız management). Roller de dönüyor —
-    panel "tüm tasarımcılar" gibi toplu seçim yapabilsin."""
+    """People an announcement can be sent to (management only). Roles are also
+    returned — so the panel can do bulk selection like "all designers"."""
     u = current_user()
     if not u or u.get('role') != 'management':
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     rows = UserRef.query.order_by(UserRef.name).all()
     return jsonify(users=[{'sub': r.sub, 'name': r.name or r.email, 'role': r.role}
                           for r in rows],
@@ -728,27 +732,28 @@ def announce_recipients():
 
 @bp.post('/announce')
 def announce():
-    """Elle duyuru: yönetici bildirim yazar, alıcıları ve önem derecesini SEÇER
-    (2026-08-05, proje sahibi isteği). Kataloğun otomatik türlerinden farkı, severity'nin
-    veriden değil GÖNDERENDEN gelmesi — "bunu herkes şimdi görsün" kararını insan
-    veriyor. Alıcılar `subs` (kişi listesi) ve/veya `roles` (rol listesi) ile
-    verilir, birleşimi tekilleştirilir; kendine gönderim ayıklanır (gönderen zaten
-    biliyor)."""
+    """Manual announcement: a manager writes the notification, CHOOSES recipients
+    and severity (2026-08-05, project owner request). The difference from the
+    catalog's automatic types is that severity comes from the SENDER, not the
+    data — the "everyone should see this now" decision is made by a human.
+    Recipients are given via `subs` (person list) and/or `roles` (role list), the
+    union is deduplicated; sending to yourself is filtered out (the sender
+    already knows)."""
     u = current_user()
     if not u or u.get('role') != 'management':
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     data = request.get_json(silent=True) or {}
     baslik = (data.get('title') or '').strip()
     govde = (data.get('body') or '').strip()
     if not baslik:
-        return jsonify(error='başlık zorunlu'), 400
+        return jsonify(error='title is required'), 400
     if len(baslik) > 200:
-        return jsonify(error='başlık en fazla 200 karakter'), 400
+        return jsonify(error='title must be at most 200 characters'), 400
     if len(govde) > 2000:
-        return jsonify(error='mesaj en fazla 2000 karakter'), 400
+        return jsonify(error='message must be at most 2000 characters'), 400
     sev = (data.get('severity') or NORMAL).strip()
     if sev not in SEVERITIES:
-        return jsonify(error=f'severity {"|".join(SEVERITIES)} olmalı'), 400
+        return jsonify(error=f'severity must be one of {"|".join(SEVERITIES)}'), 400
 
     subs = {str(s) for s in (data.get('subs') or []) if str(s).strip()}
     roller = {str(r) for r in (data.get('roles') or []) if str(r).strip()}
@@ -756,9 +761,9 @@ def announce():
         subs |= {r.sub for r in UserRef.query.filter(UserRef.role.in_(roller)).all()}
     subs.discard(str(u.get('sub')))
     if not subs:
-        return jsonify(error='en az bir alıcı seçin'), 400
+        return jsonify(error='select at least one recipient'), 400
 
-    gonderen = u.get('name') or u.get('email') or 'Yönetim'
+    gonderen = u.get('name') or u.get('email') or 'Management'
     notifs = notifications.notify_announcement(
         subs, baslik, f'{govde}\n\n— {gonderen}'.strip(), severity=sev,
         link=(data.get('link') or None))
@@ -767,17 +772,18 @@ def announce():
 
 @bp.post('/notification-prefs/test')
 def notification_prefs_test():
-    """Test bildirimi — kullanıcı aboneliğini doğrulayabilsin. Eşiği/sessiz saati
-    BİLEREK atlar: burada soru "kanal çalışıyor mu", "bu bildirim geçer mi" değil."""
+    """Test notification — so the user can verify their subscription. DELIBERATELY
+    skips the threshold/quiet hours: the question here isn't "does this notification
+    pass the filter", it's "is the channel working"."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     pref = _own_pref(u['sub'], create=True)
     if not ntfy_gateway.available():
-        return jsonify(error='ntfy kanalı yapılandırılmamış (NTFY_BASE_URL/NTFY_TOKEN)'), 503
-    ok = ntfy_gateway.send(pref.ntfy_topic, 'Test bildirimi',
-                           'Panel bildirimleri telefonuna ulasiyor.',
+        return jsonify(error='ntfy channel is not configured (NTFY_BASE_URL/NTFY_TOKEN)'), 503
+    ok = ntfy_gateway.send(pref.ntfy_topic, 'Test notification',
+                           'Panel notifications are reaching your phone.',
                            severity=NORMAL, click_url=None)
     if not ok:
-        return jsonify(error='ntfy sunucusuna ulaşılamadı'), 502
+        return jsonify(error='could not reach ntfy server'), 502
     return jsonify(ok=True)

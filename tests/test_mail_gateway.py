@@ -1,4 +1,4 @@
-"""mail_gateway — IMAP/SMTP saf adaptör; MailBox ve smtplib mock'lu (ağa çıkmaz)."""
+"""mail_gateway — pure IMAP/SMTP adapter; MailBox and smtplib are mocked (no network)."""
 import pytest
 
 import mail_gateway as gw
@@ -60,7 +60,7 @@ class FakeFolderMgr:
 
 
 class FakeBox:
-    """imap_tools.MailBox yerine geçer. Sınıf değişkeni fetch_result ile beslenir."""
+    """Stands in for imap_tools.MailBox. Fed via the fetch_result class variable."""
     fetch_result = None
     login_error = None
     appended = []

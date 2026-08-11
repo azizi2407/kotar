@@ -1,9 +1,10 @@
-"""Aylık rapor — /api/reports + public /rapor/<token>.
+"""Monthly report — /api/reports + public /rapor/<token>.
 
-Hesaplama katmanı (`aylik_rapor.py`) proje sahibi'in masaüstü aracından TAŞINDI; bu dosya
-onun iç sezgisel kurallarını değil, **web tarafının sözleşmesini** kilitler:
-yükleme→müşteri ayrıştırma, toplu üretim, üzerine yazma, yetki, paylaşım token'ı.
-Chromium gerektiren PDF ucu ayrı işaretli (tek test, ortamda chromium yoksa atlanır).
+The calculation layer (`aylik_rapor.py`) was MOVED from the project owner's desktop
+tool; this file locks in not its internal heuristic rules, but the **web side's
+contract**: upload→client parsing, batch generation, overwriting, permissions, share
+token. The PDF endpoint requiring Chromium is marked separately (a single test,
+skipped if chromium isn't present in the environment).
 """
 import io
 import os
@@ -13,7 +14,7 @@ import pytest
 from conftest import DESIGNER, MANAGER, login_as
 from test_session_csrf import csrf_headers
 
-# Meta'nın "tek alanlı başlık + Tarih,Primary" biçimi — gerçek export'ların şekli.
+# Meta's "single-field title + Tarih,Primary" format — the shape of real exports.
 def _metrik_csv(baslik, *degerler):
     satir = "".join(f'"2026-07-0{i+1}","{v}"\n' for i, v in enumerate(degerler))
     return (f'{baslik}\n"Tarih","Primary"\n' + satir).encode("utf-8")
@@ -29,10 +30,11 @@ REKLAM = ('Reklamlar,Gün,Yaş,Cinsiyet,Harcanan Tutar (TRY),Erişim,Gösterim,'
 
 
 def _dosyalar(musteri=None, reklam=False, eksik=False):
-    """(alan_adı, (bytes, dosya_adı)) listesi + paths[] değerleri.
+    """List of (field_name, (bytes, file_name)) + paths[] values.
 
-    `musteri` verilirse yol "<musteri>/<dosya>" olur → toplu akış; verilmezse düz
-    dosya adı → tek müşteri akışı (client_name alanından ad alınır)."""
+    If `musteri` is given, the path becomes "<musteri>/<dosya>" → batch flow; if not,
+    a plain file name → single-client flow (the name comes from the client_name
+    field)."""
     kayitlar = [
         ("goruntulemeler.csv", _metrik_csv("Görüntülemeler", "1234", "2345")),
         ("erisim.csv", _metrik_csv("Erişim", "800", "1100")),
@@ -65,7 +67,7 @@ def _uret(client, musteriler=None, period="2026-07", client_name="Test Müşteri
                        headers=csrf_headers(client))
 
 
-# --- üretim -----------------------------------------------------------------
+# --- generation -----------------------------------------------------------------
 
 def test_tek_musteri_rapor_uretir(client):
     login_as(client, MANAGER)
@@ -81,7 +83,7 @@ def test_tek_musteri_rapor_uretir(client):
 
 
 def test_toplu_uretim_klasor_basina_rapor(client):
-    """`paths[]` = tarayıcının webkitRelativePath'i — her klasör bir müşteri."""
+    """`paths[]` = the browser's webkitRelativePath — each folder is a client."""
     login_as(client, MANAGER)
     r = _uret(client, musteriler=["Budak Kağıt", "KORKUTELİ OSB", "Casaba Mahir"])
     assert r.status_code == 200
@@ -90,7 +92,8 @@ def test_toplu_uretim_klasor_basina_rapor(client):
 
 
 def test_eksik_csv_atlanir_ve_sebebi_bildirilir(client):
-    """Sessiz atlama, eksik CSV'yi fark etmeden 'raporu aldım' sanmaya yol açardı."""
+    """A silent skip would lead to thinking 'I got the report' without noticing the
+    missing CSV."""
     login_as(client, MANAGER)
     r = _uret(client, musteriler=["Tam Müşteri"])
     assert len(r.get_json()["reports"]) == 1
@@ -110,14 +113,15 @@ def test_reklam_csv_opsiyonel(client):
 
 
 def test_ayni_donem_uzerine_yazar_token_korunur(client):
-    """Eksik CSV tamamlanıp yeniden yüklenince iki çelişkili rapor kalmamalı."""
+    """When the missing CSV is completed and re-uploaded, there shouldn't be two
+    conflicting reports."""
     login_as(client, MANAGER)
     rid = _uret(client, client_name="Tekrar").get_json()["reports"][0]["id"]
     token = client.post(f"/api/reports/{rid}/share", json={"shared": True},
                         headers=csrf_headers(client)).get_json()["report"]["token"]
     ikinci = _uret(client, client_name="Tekrar").get_json()["reports"][0]
-    assert ikinci["id"] == rid                    # yeni satır açılmadı
-    assert ikinci["token"] == token               # dağıtılmış link kırılmadı
+    assert ikinci["id"] == rid                    # no new row was created
+    assert ikinci["token"] == token               # the distributed link wasn't broken
     assert len(client.get("/api/reports").get_json()["reports"]) == 1
 
 
@@ -154,7 +158,8 @@ def test_csv_disi_dosya_atlanir(client):
 
 
 def test_yol_kacisi_gecici_dizinde_kalir(client, tmp_path):
-    """`paths[]` istemciden geliyor: '../../etc' denemesi dizin dışına yazmamalı."""
+    """`paths[]` comes from the client: a '../../etc' attempt shouldn't write outside
+    the directory."""
     login_as(client, MANAGER)
     files, paths = _dosyalar()
     paths = [f"../../../../tmp/kacis/{os.path.basename(p)}" for p in paths]
@@ -164,12 +169,13 @@ def test_yol_kacisi_gecici_dizinde_kalir(client, tmp_path):
                     content_type="multipart/form-data", headers=csrf_headers(client))
     assert r.status_code == 200
     assert not os.path.exists("/tmp/kacis")
-    # Müşteri adı yol parçasından türetilir ama daima tek segmenttir
+    # The client name is derived from the path segment but is always a single segment
     assert "/" not in r.get_json()["reports"][0]["client_name"]
 
 
 def test_panel_musterisiyle_eslesir(client):
-    """Ad tutuyorsa client_id bağlanır; tutmuyorsa rapor yine üretilir."""
+    """If the name matches, client_id gets linked; if not, the report is still
+    generated."""
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "Budak Kağıt"},
                       headers=csrf_headers(client)).get_json()["client"]["id"]
@@ -179,7 +185,7 @@ def test_panel_musterisiyle_eslesir(client):
     assert esleme["Panelde Olmayan"] is None
 
 
-# --- yetki ------------------------------------------------------------------
+# --- permissions ------------------------------------------------------------------
 
 def test_tasarimciya_kapali(client):
     login_as(client, DESIGNER)
@@ -191,7 +197,7 @@ def test_oturumsuz_401(client):
     assert client.get("/api/reports").status_code == 401
 
 
-# --- görüntüleme ------------------------------------------------------------
+# --- viewing ------------------------------------------------------------
 
 def test_html_ciktisi_veriyi_gomer(client):
     login_as(client, MANAGER)
@@ -200,8 +206,8 @@ def test_html_ciktisi_veriyi_gomer(client):
     assert r.status_code == 200
     html = r.get_data(as_text=True)
     assert "const reportData" in html
-    assert "Şirket Ğ - Aylık Rapor" in html
-    # Logo data URI olarak gömülü → tek dosya (public link ve PDF'te de görünür)
+    assert "Şirket Ğ - Monthly Report" in html
+    # Logo embedded as a data URI → single file (also visible in the public link and PDF)
     assert 'src="data:image/png;base64,' in html
     assert 'src="logo.png"' not in html
     assert r.headers.get("X-Robots-Tag") == "noindex, nofollow"
@@ -230,12 +236,12 @@ def test_donem_listesi(client):
     assert p == [{"period": "2026-07", "count": 2}, {"period": "2026-06", "count": 1}]
 
 
-# --- paylaşım ---------------------------------------------------------------
+# --- sharing ---------------------------------------------------------------
 
 def test_paylasim_linki_public_erisir(client):
     login_as(client, MANAGER)
     rid = _uret(client, client_name="Public Test").get_json()["reports"][0]["id"]
-    # Token üretilmeden public erişim yok
+    # No public access without a generated token
     assert client.get("/rapor/olmayan-token").status_code == 404
     token = client.post(f"/api/reports/{rid}/share", json={"shared": True},
                         headers=csrf_headers(client)).get_json()["report"]["token"]
@@ -243,7 +249,7 @@ def test_paylasim_linki_public_erisir(client):
         sess.clear()
     r = client.get(f"/rapor/{token}")
     assert r.status_code == 200
-    assert "Public Test - Aylık Rapor" in r.get_data(as_text=True)
+    assert "Public Test - Monthly Report" in r.get_data(as_text=True)
 
 
 def test_paylasim_iptali_404_verir_ve_geri_alinabilir(client):
@@ -254,7 +260,7 @@ def test_paylasim_iptali_404_verir_ve_geri_alinabilir(client):
     client.post(f"/api/reports/{rid}/share", json={"shared": False},
                 headers=csrf_headers(client))
     assert client.get(f"/rapor/{token}").status_code == 404
-    # Yeniden açınca AYNI adres canlanır — müşteriye gönderilen link değişmesin
+    # Reopening it revives the SAME address — the link sent to the client shouldn't change
     yeni = client.post(f"/api/reports/{rid}/share", json={"shared": True},
                        headers=csrf_headers(client)).get_json()["report"]["token"]
     assert yeni == token
@@ -280,7 +286,7 @@ def test_silme(client):
     assert client.get("/api/reports").get_json()["reports"] == []
 
 
-# --- PDF (gerçek Chromium ister) --------------------------------------------
+# --- PDF (requires real Chromium) --------------------------------------------
 
 @pytest.mark.skipif(not shutil.which(os.environ.get("CHROMIUM_BIN") or "chromium"),
                     reason="chromium kurulu değil")
@@ -294,11 +300,11 @@ def test_pdf_uretilir(client):
     assert "attachment" in r.headers.get("Content-Disposition", "")
 
 
-# --- müşteriye giden sayfanın biçimi (2026-08-07) ----------------------------
-# Şablon masaüstü aracından geldi ve içinde bir "Rapor Düzenleyici" formu vardı
-# (metin/sayı alanları + "Raporu Güncelle"). Sayfa artık müşteriye gönderiliyor;
-# bu testler formun geri sızmasını ve paletin özel gün sayfasından ayrışmasını
-# yakalar.
+# --- shape of the page sent to the client (2026-08-07) ----------------------------
+# The template came from the desktop tool and had a "Rapor Düzenleyici" (Report
+# Editor) form in it (text/number fields + "Raporu Güncelle"). The page is now sent
+# to the client; these tests catch the form leaking back in and the palette
+# diverging from the special-day page.
 
 def _public_html(client):
     login_as(client, MANAGER)
@@ -313,26 +319,26 @@ def _public_html(client):
 def test_musteri_sayfasinda_duzenleme_alani_yok(client):
     html = _public_html(client)
     assert "settings-panel" not in html
-    # Arayüz öğeleri: form alanı, güncelleme düğmesi, tıklama işleyicisi olmamalı.
-    # (Kaldırma gerekçesini anlatan JS YORUMU şablonda kalabilir — zararsız.)
+    # UI elements: there should be no form field, update button, or click handler.
+    # (The JS COMMENT explaining the removal rationale may remain in the template — harmless.)
     assert "<input" not in html
     assert "Raporu Güncelle" not in html
     assert "onclick=" not in html
 
 
 def test_musteri_sayfasi_ozel_gun_paletini_kullanir(client):
-    """Özel gün seçim sayfasıyla (special_days.py) aynı krem/altın dil."""
+    """Same cream/gold language as the special-day selection page (special_days.py)."""
     html = _public_html(client)
-    assert "#FAFAF8" in html          # krem zemin
-    assert "#C9A96E" in html          # altın vurgu
+    assert "#FAFAF8" in html          # cream background
+    assert "#C9A96E" in html          # gold accent
     assert "Cormorant+Garamond" in html and "DM+Sans" in html
-    # Eski koyu palet artık yok
+    # The old dark palette is gone now
     assert "#090c13" not in html and "#14181f" not in html
 
 
 def test_gren_dokusu_yazdirmada_kapali(client):
-    """Doku ekranda kâğıt hissi veriyor ama PDF'e rasterize edilince dosyayı
-    ~360 KB'dan ~3,6 MB'a çıkarıyordu (tüm sayfayı kaplayan bitmap)."""
+    """The texture gives a paper feel on screen but when rasterized to PDF it bumped
+    the file from ~360 KB to ~3.6 MB (a bitmap covering the whole page)."""
     html = _public_html(client)
-    assert "body::before" in html                      # ekranda var
-    assert "body::before { display: none !important; }" in html   # yazdırmada yok
+    assert "body::before" in html                      # present on screen
+    assert "body::before { display: none !important; }" in html   # absent when printing

@@ -1,7 +1,7 @@
-"""Hedefli bildirimler + anons + günlük hatırlatıcılar (2026-08-05).
+"""Targeted notifications + announcements + daily reminders (2026-08-05).
 
-Vurgu iki yerde: **kim alıyor** (rol slotu hedeflemesi yönetimi dışarıda bırakır)
-ve **kim ALMIYOR** (coalesce penceresi, boş slot, sessizlik kuralı).
+Focus is in two places: **who receives it** (role-slot targeting excludes management)
+and **who does NOT receive it** (the coalesce window, empty slot, the silence rule).
 """
 from datetime import date, timedelta
 
@@ -12,7 +12,7 @@ from test_session_csrf import csrf_headers
 
 @pytest.fixture
 def kisiler(client):
-    """UserRef kayıtları — `_recipients`/`_management_subs` buradan okur."""
+    """UserRef records — `_recipients`/`_management_subs` read from here."""
     from extensions import db
     from models import UserRef
     for u in (MANAGER, DESIGNER, VIDEOGRAPHER, CONTENT_CREATOR):
@@ -41,10 +41,10 @@ def _alicilar(kind):
     return {n.recipient_sub for n in Notification.query.filter_by(kind=kind).all()}
 
 
-# --- rol slotu hedeflemesi --------------------------------------------------
+# --- role-slot targeting -----------------------------------------------------
 
 def test_cekim_fotografi_yalniz_tasarimci_ve_icerikciye(client, cid):
-    """Yönetim bu bildirimi ALMAZ — fotoğrafları kullanan taraf üretim ekibi."""
+    """Management does NOT receive this notification — the party using the photos is the production team."""
     import notifications
     _ata(cid, "designer", DESIGNER["sub"])
     _ata(cid, "content_creator", CONTENT_CREATOR["sub"])
@@ -54,7 +54,7 @@ def test_cekim_fotografi_yalniz_tasarimci_ve_icerikciye(client, cid):
 
 
 def test_slot_bossa_kimseye_gitmez(client, cid):
-    """Uydurma alıcı seçilmez: atama yoksa bildirim de yok."""
+    """No made-up recipient is picked: without an assignment, there's no notification either."""
     import notifications
     assert notifications.notify_photos_uploaded(cid, 3) == []
     assert _alicilar("photos_uploaded") == set()
@@ -69,7 +69,7 @@ def test_oncelik_isareti_uretim_ekibine(client, cid):
 
 
 def test_video_ve_icerik_yonetime(client, cid):
-    """Yükleme bildirimleri yönetime; üretim ekibi kendi yüklediğini zaten biliyor."""
+    """Upload notifications go to management; the production team already knows what they uploaded."""
     import notifications
     _ata(cid, "designer", DESIGNER["sub"])
     notifications.notify_video_uploaded(cid, "2026-W33", "designer")
@@ -84,10 +84,10 @@ def test_planlama_degisikligi_pano_sahibine(client, cid):
     assert _alicilar("planning_changed") == {DESIGNER["sub"]}
 
 
-# --- coalesce ---------------------------------------------------------------
+# --- coalesce -------------------------------------------------------------
 
 def test_parti_yuklemesi_tek_bildirime_toplanir(client, cid):
-    """47 fotoluk çekim 47 bildirim üretmemeli."""
+    """A 47-photo shoot shouldn't produce 47 notifications."""
     import notifications
     _ata(cid, "designer", DESIGNER["sub"])
     for _ in range(5):
@@ -97,7 +97,7 @@ def test_parti_yuklemesi_tek_bildirime_toplanir(client, cid):
 
 
 def test_okunmus_bildirim_coalesce_i_bitirir(client, cid):
-    """Pencere okunmamış satıra bakar: kullanıcı okuduysa yeni olay yeniden bildirilir."""
+    """The window looks at the unread row: if the user has read it, a new event notifies again."""
     import notifications
     from extensions import db
     from models import Notification, utcnow
@@ -111,7 +111,7 @@ def test_okunmus_bildirim_coalesce_i_bitirir(client, cid):
 
 
 def test_farkli_musteri_ayri_bildirim(client, cid, kisiler):
-    """Coalesce anahtarı LİNK — farklı müşteri farklı link, ikisi de gitmeli."""
+    """The coalesce key is the LINK — different client, different link, both should be sent."""
     import notifications
     login_as(client, MANAGER)
     cid2 = client.post("/api/clients", json={"name": "İkinci"},
@@ -124,7 +124,7 @@ def test_farkli_musteri_ayri_bildirim(client, cid, kisiler):
     assert Notification.query.filter_by(kind="photos_uploaded").count() == 2
 
 
-# --- anons ------------------------------------------------------------------
+# --- announcements --------------------------------------------------------
 
 def test_anons_role_gore_gonderilir(client, cid):
     login_as(client, MANAGER)
@@ -188,7 +188,7 @@ def test_anons_yalniz_yonetim(client, cid):
     assert client.get("/api/announce/recipients").status_code == 403
 
 
-# --- günlük hatırlatıcılar --------------------------------------------------
+# --- daily reminders --------------------------------------------------------
 
 def _ozel_gun(day_name, month, day, year=None, status="approved"):
     from extensions import db
@@ -207,7 +207,7 @@ def test_yarinin_ozel_gunleri(client, cid):
 
 
 def test_taslak_ozel_gun_hatirlatilmaz(client, cid):
-    """Onay kapısı tam bunun için var: AI'ın ürettiği taslak gün duyurulmaz."""
+    """This is exactly what the approval gate exists for: an AI-generated draft day is not announced."""
     from scripts.daily_reminders import yarinin_ozel_gunleri
     _ozel_gun("Taslak Gün", 9, 10, status="draft")
     assert yarinin_ozel_gunleri(date(2026, 9, 10)) == []
@@ -250,7 +250,7 @@ def test_silinmis_reklam_hatirlatilmaz(client, cid):
 
 
 def test_sessizlik_kurali(client, cid):
-    """Yarın özel gün ve biten reklam yoksa HİÇBİR bildirim üretilmez."""
+    """If there's no special day tomorrow and no ending campaign, NO notification is produced."""
     from models import Notification
     from scripts.daily_reminders import biten_reklamlar, yarinin_ozel_gunleri
     hedef = date(2031, 4, 17)
@@ -278,12 +278,12 @@ def test_depo_kotasi_esige_gore_severity(client, cid):
     assert Notification.query.filter_by(kind="depot_quota").first().severity == "kritik"
 
 
-# --- derin bağlantı (2026-08-07) --------------------------------------------
+# --- deep link (2026-08-07) --------------------------------------------------
 
 def test_icerik_bildirimi_onay_modalina_gotururur(client, cid):
-    """Link `?onay=<client_id>` taşır → panel o müşterinin Müşteri Onay Linki
-    modalını kendiliğinden açar. Eskiden link yalnız `?week=` idi; bildirime
-    dokunan kişi doğru haftaya düşüyor ama müşteriyi elle bulmak zorunda kalıyordu."""
+    """The link carries `?onay=<client_id>` → the panel auto-opens that client's Client
+    Approval Link modal. The link used to be just `?week=`; whoever clicked the
+    notification landed on the right week but had to find the client by hand."""
     import notifications
     from models import Notification
     notifications.notify_content_uploaded(cid, "2026-W33", "post")
@@ -292,9 +292,9 @@ def test_icerik_bildirimi_onay_modalina_gotururur(client, cid):
 
 
 def test_farkli_musteriler_ayri_bildirim_alir(client, cid, kisiler):
-    """Coalesce anahtarı LİNK; link müşteri içerdiği için aynı haftanın iki
-    müşterisi tek bildirimde birleşemez — birleşseydi tıklayınca hangisine
-    gidileceği belirsiz olurdu."""
+    """The coalesce key is the LINK; since the link contains the client, two clients
+    in the same week can't merge into one notification — if they did, clicking it
+    would leave which client it goes to ambiguous."""
     import notifications
     from models import Notification
     ikinci = client.post("/api/clients", json={"name": "İkinci Müşteri"},
@@ -307,8 +307,8 @@ def test_farkli_musteriler_ayri_bildirim_alir(client, cid, kisiler):
 
 
 def test_ayni_musteri_partisi_hala_tek_bildirim(client, cid):
-    """Müşteri bazına inmek parti-koalesansını BOZMAMALI: 10 dosyalık tasarım
-    partisi yine tek bildirim."""
+    """Going down to a per-client basis must NOT break batch coalescing: a 10-file design
+    batch is still a single notification."""
     import notifications
     from models import Notification
     for _ in range(4):

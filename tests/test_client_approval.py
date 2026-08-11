@@ -1,9 +1,9 @@
-"""Müşteri onay linki (elle seçim) — /api/sharing/approval-* + public /onay/<token>.
+"""Client approval link (manual selection) — /api/sharing/approval-* + public /onay/<token>.
 
-Mevcut `/review/<token>` akışından AYRI bir yol (2026-08-06). Bu dosya iki şeyi
-kilitler: (1) modalın aday listesi doğru süzülüyor mu (hafta penceresi, kategori,
-"yayınlanmış olan çıkar"), (2) public sayfa yalnız kendi linkinin dosyalarına
-izin veriyor mu.
+A path SEPARATE from the existing `/review/<token>` flow (2026-08-06). This file locks
+in two things: (1) whether the modal's candidate list is filtered correctly (week
+window, category, "exclude what's already published"), (2) whether the public page
+only allows files belonging to its own link.
 """
 import pytest
 from conftest import DESIGNER, MANAGER, VIDEOGRAPHER, login_as
@@ -29,7 +29,8 @@ def _upload(client_id, week_iso="2026-W21", category="post", name="a.jpg", file_
 
 
 def _yonetici_ekle():
-    """Bildirim alıcısı — `_recipients` management rolündeki UserRef'lerden okur."""
+    """Notification recipient — `_recipients` reads from UserRef records with the
+    management role."""
     from extensions import db
     from models import UserRef
     db.session.add(UserRef(sub=MANAGER["sub"], email=MANAGER["email"],
@@ -55,10 +56,10 @@ def _link(client, client_id, upload_ids):
     return r.get_json()["token"]
 
 
-# --- aday listesi ---
+# --- candidate list ---
 
 def test_adaylar_uc_haftayi_kapsar(client, client_id):
-    """Pencere: bulunulan hafta ± 1. W19 ve W23 dışarıda kalır."""
+    """Window: current week ± 1. W19 and W23 fall outside."""
     login_as(client, DESIGNER)
     for wk in ("2026-W19", "2026-W20", "2026-W21", "2026-W22", "2026-W23"):
         _upload(client_id, week_iso=wk)
@@ -70,7 +71,8 @@ def test_adaylar_uc_haftayi_kapsar(client, client_id):
 
 
 def test_adaylar_yayinlanmisi_eler(client, client_id):
-    """Ölçüt YAYIN (proje sahibi): taslak kartı olan dosya listede KALIR, yayınlanan düşer."""
+    """The criterion is PUBLISHED (per project owner): a file with a draft card STAYS
+    in the list, a published one drops out."""
     login_as(client, DESIGNER)
     yayinda = _upload(client_id, name="yayin.jpg")
     taslak = _upload(client_id, name="taslak.jpg")
@@ -103,7 +105,7 @@ def test_adaylar_silinmisi_gizler(client, client_id):
 
 
 def test_adaylar_gonderilmisi_isaretler_ama_elemez(client, client_id):
-    """`sent_before` yalnız rozet: revize sonrası aynı dosya tekrar gönderilebilir."""
+    """`sent_before` is just a badge: the same file can be sent again after a revision."""
     login_as(client, DESIGNER)
     up = _upload(client_id)
     _link(client, client_id, [up.id])
@@ -118,10 +120,10 @@ def test_adaylar_videografa_kapali(client, client_id):
     assert r.status_code == 403
 
 
-# --- link üretimi ---
+# --- link generation ---
 
 def test_link_secimi_dondurur(client, client_id):
-    """Link üretildikten sonra yüklenen dosya linke SIZMAZ."""
+    """A file uploaded after the link is generated does NOT leak into the link."""
     login_as(client, DESIGNER)
     a = _upload(client_id, name="a.jpg")
     token = _link(client, client_id, [a.id])
@@ -166,7 +168,7 @@ def test_link_bos_secim_400(client, client_id):
 
 
 def test_link_baska_musterinin_dosyasi_400(client, client_id):
-    """Kapsam kaçağı: başka müşterinin yüklemesi seçime konamaz."""
+    """Scope leak: another client's upload cannot be added to the selection."""
     login_as(client, MANAGER)
     r = client.post("/api/clients", json={"name": "Diğer"}, headers=csrf_headers(client))
     other = r.get_json()["client"]["id"]
@@ -186,7 +188,7 @@ def test_link_videografa_kapali(client, client_id):
     assert r.status_code == 403
 
 
-# --- public sayfa ---
+# --- public page ---
 
 def test_sayfa_ve_items_auth_istemez(client, client_id):
     login_as(client, DESIGNER)
@@ -201,14 +203,15 @@ def test_sayfa_ve_items_auth_istemez(client, client_id):
 
 
 def test_not_alani_yonu_iki_ekran_icin_de_yazili(client, client_id):
-    """Açıklamadaki yön ifadesi CSS breakpoint'ine bağlı (900px): geniş ekranda
-    "sağdaki", dar ekranda "sayfanın altındaki". Biri silinirse metin yalan söyler."""
+    """The direction phrase in the description depends on a CSS breakpoint (900px): on
+    wide screens "on the right", on narrow screens "at the bottom of the page". If
+    either is removed, the text lies."""
     login_as(client, DESIGNER)
     up = _upload(client_id)
     token = _link(client, client_id, [up.id])
     html = client.get(f"/onay/{token}").get_data(as_text=True)
-    assert 'class="yon-genis">sağdaki<' in html
-    assert 'class="yon-dar">sayfanın altındaki<' in html
+    assert 'class="yon-genis">on the right<' in html
+    assert 'class="yon-dar">at the bottom of the page<' in html
     assert ".yon-dar{display:inline;}" in html.replace("\n", "")
 
 
@@ -228,7 +231,8 @@ def test_iptal_edilen_link_404(client, client_id):
 
 
 def test_silinen_dosya_sayfadan_dusar_sayfa_olmez(client, client_id):
-    """Link üretildikten sonra dosya silinebiliyor (videograf kalıcı silme ucu)."""
+    """A file can be deleted after the link is generated (videographer's permanent-delete
+    endpoint)."""
     from extensions import db
     from models import utcnow
     login_as(client, DESIGNER)
@@ -242,7 +246,7 @@ def test_silinen_dosya_sayfadan_dusar_sayfa_olmez(client, client_id):
 
 
 def test_medya_yalniz_kendi_dosyalarina(client, client_id):
-    """Keyfi file_id proxy'lenemez — linkin kapsamı dışındaki dosya 404."""
+    """An arbitrary file_id cannot be proxied — a file outside the link's scope is 404."""
     login_as(client, DESIGNER)
     a = _upload(client_id, name="a.jpg")
     disarida = _upload(client_id, name="b.jpg")
@@ -251,11 +255,11 @@ def test_medya_yalniz_kendi_dosyalarina(client, client_id):
     assert client.get(f"/onay/{token}/stream/{disarida.file_id}").status_code == 404
 
 
-# --- kararlar ---
+# --- decisions ---
 
 def test_onay_ortak_tabloya_yazilir(client, client_id):
-    """Karar `card_upload_reviews`'a gider → board rozetleri ve mevcut bildirimler
-    bu akışta da çalışır (proje sahibi kararı: ortak tablo)."""
+    """The decision goes into `card_upload_reviews` → board badges and existing
+    notifications also work in this flow (project owner's decision: shared table)."""
     from models_sharing import UploadReview
     login_as(client, DESIGNER)
     up = _upload(client_id)
@@ -307,7 +311,7 @@ def test_gecersiz_islem_400(client, client_id):
     assert r.status_code == 400
 
 
-# --- not defteri ---
+# --- notes ---
 
 def test_not_kaydedilir_ve_okunur(client, client_id):
     login_as(client, DESIGNER)
@@ -321,8 +325,8 @@ def test_not_kaydedilir_ve_okunur(client, client_id):
 
 
 def test_yazma_oturumu_tek_bildirime_toplanir(client, client_id):
-    """Alan her duraklamada POST ediyor → art arda değişiklikler 30 dk'lık
-    coalesce penceresinde tek bildirime toplanır."""
+    """The field POSTs on every pause → consecutive changes within the 30-minute
+    coalesce window get merged into a single notification."""
     from models import Notification
     login_as(client, DESIGNER)
     up = _upload(client_id)
@@ -335,9 +339,9 @@ def test_yazma_oturumu_tek_bildirime_toplanir(client, client_id):
 
 
 def test_sonraki_not_okunduktan_sonra_yeniden_bildirilir(client, client_id):
-    """2026-08-07 canlı bulgusu: müşteri saatler sonra YENİ not yazdığında kimse
-    haber alamıyordu (bildirim link başına yalnız ilk yazımdaydı). Coalesce
-    penceresi okunmuş bildirimi kapatır → sonraki not yeniden duyurulur."""
+    """2026-08-07 live finding: when the client wrote a NEW note hours later, nobody
+    got notified (the notification was tied to only the first write per link). The
+    coalesce window closes a read notification → the next note gets re-announced."""
     from extensions import db
     from models import Notification, utcnow
     login_as(client, DESIGNER)
@@ -346,14 +350,14 @@ def test_sonraki_not_okunduktan_sonra_yeniden_bildirilir(client, client_id):
     _yonetici_ekle()
     client.post(f"/onay/{token}/note", json={"note": "ilk not"})
     for n in Notification.query.filter_by(kind="approval_note").all():
-        n.read_at = utcnow()          # yönetici bildirimi okudu
+        n.read_at = utcnow()          # manager read the notification
     db.session.commit()
     client.post(f"/onay/{token}/note", json={"note": "günler sonra yazılan yeni not"})
     assert Notification.query.filter_by(kind="approval_note").count() == 2
 
 
 def test_ayni_metin_tekrar_gonderilirse_bildirim_yok(client, client_id):
-    """Sayfa duraklamada aynı metni tekrar POST edebilir — bu bir DEĞİŞİKLİK değil."""
+    """The page can POST the same text again on pause — that's not a CHANGE."""
     from extensions import db
     from models import Notification, utcnow
     login_as(client, DESIGNER)
@@ -394,10 +398,10 @@ def test_not_metin_degilse_400(client, client_id):
     assert client.post(f"/onay/{token}/note", json={"note": 5}).status_code == 400
 
 
-# --- panelden okuma ---
+# --- reading from the panel ---
 
 def test_paneldeki_link_listesi_notu_gosterir(client, client_id):
-    """Müşterinin yazdığı notu panelde okumanın tek yolu bu uç."""
+    """This endpoint is the only way to read the client's note from the panel."""
     login_as(client, DESIGNER)
     up = _upload(client_id)
     token = _link(client, client_id, [up.id])

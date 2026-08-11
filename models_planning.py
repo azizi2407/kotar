@@ -1,62 +1,65 @@
-"""Planlama Panosu şeması (2026-07-25) — KİŞİ eksenli serbest pano.
+"""Planning Board schema (2026-07-25) — a PERSON-axis freeform board.
 
-Eski `weekly_canvas` (models_sharing) hafta eksenliydi: `week_iso` UNIQUE → haftada
-bir pano, tüm ajans için ortak, her pazartesi boş doğuyordu. Bu modül onun yerini
-alır; eksen artık **pano sahibi**:
+The old `weekly_canvas` (models_sharing) was week-axis: `week_iso` UNIQUE → one
+board per week, shared across the whole agency, born empty every Monday. This
+module replaces it; the axis is now **the board owner**:
 
-  * `management`   — tüm yöneticilerin paylaştığı TEK pano (çalışanlar erişemez)
-  * `user:<sub>`   — kişi başına ORTAK çalışma alanı (yönetici + o çalışan yazar)
+  * `management`   — a SINGLE board shared by all managers (employees can't access it)
+  * `user:<sub>`   — a SHARED workspace per person (the manager + that employee write to it)
 
-`weekly_canvas` **arşive alındı** — bu tablolar onun verisini göç script'iyle devraldı
-(`scripts/migrate_planning_boards.py`), kaynak tablo salt-okunur olarak duruyor
-(rollback yolu).
+`weekly_canvas` has been **archived** — these tables took over its data via a
+migration script (`scripts/migrate_planning_boards.py`); the source table remains
+as read-only (a rollback path).
 
-NEDEN JSONB DİZİ DEĞİL, SATIR-BAŞINA-ÖĞE: eski model tüm kartları tek JSONB kolonunda
-tutuyordu; tek kartı sürüklemek 588 kartlık kolonun tamamını yeniden yazıyordu (~300 KB
-WAL) ve iki kişi aynı anda yazınca biri sessizce kayboluyordu. Satır modeli delta
-PATCH'in doğal karşılığıdır; ayrıca durum/son tarih/sorumlu yapısal veri olarak
-sorgulanabilir hale gelir.
+WHY ROW-PER-ITEM INSTEAD OF A JSONB ARRAY: the old model kept all cards in a
+single JSONB column; dragging one card rewrote the entire 588-card column
+(~300 KB WAL), and when two people wrote at the same time one would silently
+disappear. The row model is the natural fit for delta PATCH; it also makes
+status/due-date/assignee queryable as structured data.
 """
-# `text` sınıf gövdesinde kolon adı olarak kullanılıyor (PlanningItem.text) →
-# sqlalchemy.text'i alias'la, yoksa sınıf scope'unda gölgelenir ve çağrılamaz.
+# `text` is used as a column name in the class body (PlanningItem.text) → alias
+# sqlalchemy.text, otherwise it's shadowed in the class scope and can't be called.
 from sqlalchemy import text as sa_text
 
 from extensions import db
 from models import iso, utcnow
 from models_sharing import JSONB_
 
-# Pano türleri ve öğe sözlükleri (uçtaki doğrulama bunlara bakar).
+# Board kinds and item vocabularies (endpoint-side validation looks at these).
 BOARD_KINDS = ('management', 'user')
-# `image` (2026-07-28): panoya yapıştırılan/sürüklenen görsel. Dosya sunucuda
-# (`planning_images`, pano başına dizin), öğe ona `extra.image = {name,w,h}` ile
-# işaret eder — `link` kolonu değil, çünkü orada http(s) doğrulaması var ve bu
-# bir dosya adı. `type` kolonu varchar(16), Postgres enum DEĞİL → yeni tür için
-# ALTER gerekmedi.
+# `image` (2026-07-28): an image pasted/dragged onto the board. The file lives on
+# the server (`planning_images`, one directory per board), the item points to it
+# via `extra.image = {name,w,h}` — not the `link` column, because that has
+# http(s) validation and this is a file name. The `type` column is varchar(16),
+# NOT a Postgres enum → no ALTER was needed for the new type.
 ITEM_TYPES = ('card', 'note', 'region', 'edge', 'image')
 ITEM_STATUSES = ('open', 'done')
 ITEM_SOURCES = ('panel', 'legacy')
 
 
 class PlanningBoard(db.Model):
-    """Bir planlama panosu. Kimliği tek başına `board_key`'dir.
+    """A planning board. Its identity is `board_key` alone.
 
-    NEDEN `UNIQUE(kind, owner_sub)` DEĞİL: Postgres'te NULL'lar birbirine eşit
-    sayılmaz → `owner_sub IS NULL` olan yönetim panosundan sessizce BİRDEN FAZLA
-    satır oluşabilir ve hangisinin okunduğu `first()` sırasına kalırdı. Tek gerçek
-    kaynak `board_key` ('management' | 'user:<sub>'); `kind`/`owner_sub` yalnızca
-    okuma/sorgulama kolaylığı için tutulan türev kolonlardır, kısıt taşımazlar.
+    WHY NOT `UNIQUE(kind, owner_sub)`: in Postgres, NULLs aren't considered equal
+    to each other → MULTIPLE rows could silently be created for the management
+    board where `owner_sub IS NULL`, and which one gets read would depend on
+    `first()`'s ordering. The single source of truth is `board_key` ('management'
+    | 'user:<sub>'); `kind`/`owner_sub` are derived columns kept only for
+    read/query convenience, they carry no constraint.
 
-    `version` her yazmada +1 artar. Bu bir KAPI DEĞİL, "biri yazdı" sinyalidir:
-    panel ucuz `/version` ucunu yoklar ve gerekirse panoyu tazeler.
+    `version` increments by +1 on every write. This is NOT a gate, it's a "someone
+    wrote" signal: the panel polls the cheap `/version` endpoint and refreshes the
+    board if needed.
 
-    Pano başlığı DB'de tutulmaz — uçta türetilir ('Yönetim Panosu' / UserRef.name),
-    böylece kullanıcı adı değişince pano adı da kendiliğinden güncellenir."""
+    The board title isn't kept in the DB — it's derived at the endpoint
+    ('Yönetim Panosu' / UserRef.name), so the board name updates automatically
+    when the user's name changes."""
     __tablename__ = 'planning_boards'
 
     id = db.Column(db.Integer, primary_key=True)
     board_key = db.Column(db.String(64), nullable=False, unique=True)
     kind = db.Column(db.String(16), nullable=False, default='user')
-    owner_sub = db.Column(db.String(64))          # kind='user' ise SSO sub; management'ta NULL
+    owner_sub = db.Column(db.String(64))          # SSO sub if kind='user'; NULL for management
     version = db.Column(db.Integer, nullable=False, server_default=sa_text('1'), default=1)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     created_by = db.Column(db.String(64))
@@ -76,32 +79,35 @@ class PlanningBoard(db.Model):
 
 
 class PlanningItem(db.Model):
-    """Panodaki tek öğe: kart / not / bölge / bağlantı çizgisi.
+    """A single item on the board: card / note / region / connector line.
 
-    `item_key` istemci tarafından üretilir (eski `task_id`'nin karşılığı) ve pano
-    içinde benzersizdir — delta PATCH'in adresleme birimi budur.
+    `item_key` is generated client-side (the counterpart of the old `task_id`) and
+    is unique within a board — it's the addressing unit for delta PATCH.
 
-    SOFT-DELETE BİLEREK YOK: `UNIQUE(board_id, item_key)` ile `deleted_at` birlikte
-    çalışmaz — silinmiş satır anahtarı işgal eder, geri-al (Ctrl+Z) aynı item_key'i
-    yeniden yazınca IntegrityError verir. Çözümü kısmi index olurdu = Postgres/sqlite
-    ayrışması. Aynı gerekçe `client_tracking_entries` için de geçerli (bkz.
-    03-veri.md invaryantları). Silme HARD; geri alma satırı yeniden INSERT eder.
+    SOFT-DELETE IS DELIBERATELY ABSENT: `UNIQUE(board_id, item_key)` doesn't work
+    together with `deleted_at` — a deleted row would occupy the key, and undo
+    (Ctrl+Z) writing the same item_key again would raise IntegrityError. The fix
+    would be a partial index = a Postgres/sqlite divergence. The same rationale
+    applies to `client_tracking_entries` (see the 03-veri.md invariants). Delete is
+    HARD; undo re-INSERTs the row.
 
-    `x`/`y` NOT NULL: eski JSONB kartlarının bir kısmında `position` alanı hiç yoktu
-    (2025-W44 ve 2026-W13, 78 kart) ve panelde `left: undefined` ile 0,0'a yığılıyordu.
-    Şema bunu kökten kapatır.
+    `x`/`y` are NOT NULL: some old JSONB cards had no `position` field at all
+    (2025-W44 and 2026-W13, 78 cards) and piled up at 0,0 with `left: undefined`
+    in the panel. The schema shuts this off at the root.
 
-    `rev` öğe düzeyinde çakışma tespiti içindir: istemci bildiği rev'i gönderir,
-    sunucudaki daha büyükse öğe `conflicts[]`'a girer (son yazan kazanır, panel uyarır).
+    `rev` is for item-level conflict detection: the client sends the rev it knows,
+    and if the server's is higher the item goes into `conflicts[]` (last write
+    wins, the panel warns).
 
-    `legacy_ref` göç idempotans anahtarıdır ('weekly_canvas:<week_iso>:<task_id>');
-    yalnız göç edilen satırlarda doludur, panelden eklenende NULL kalır."""
+    `legacy_ref` is the migration idempotency key ('weekly_canvas:<week_iso>:<task_id>');
+    it's filled only for migrated rows, stays NULL for ones added from the panel."""
     __tablename__ = 'planning_items'
     __table_args__ = (
         db.UniqueConstraint('board_id', 'item_key', name='uq_planning_item_key'),
         db.Index('ix_planning_items_board', 'board_id'),
-        # assignee indeksi cross-board `GET /assigned` sorgusu için: o uç board_id
-        # süzgeci OLMADAN assignee_sub'a bakar, indekssiz seq scan olurdu.
+        # The assignee index is for the cross-board `GET /assigned` query: that
+        # endpoint looks at assignee_sub WITHOUT a board_id filter — without an
+        # index it would be a seq scan.
         db.Index('ix_planning_items_assignee', 'assignee_sub'),
         db.Index('ix_planning_items_shoot', 'shoot_task_id'),
         db.Index('ix_planning_items_campaign', 'ad_campaign_id'),
@@ -113,32 +119,33 @@ class PlanningItem(db.Model):
 
     type = db.Column(db.String(16), nullable=False, default='card')
     title = db.Column(db.String(300))
-    text = db.Column(db.Text)                      # not gövdesi / kart açıklaması
+    text = db.Column(db.Text)                      # note body / card description
     color = db.Column(db.String(16))               # #rrggbb
     label = db.Column(db.String(80))
-    link = db.Column(db.String(1024))              # yalnız http(s) — doğrulama uçta
+    link = db.Column(db.String(1024))              # http(s) only — validated at the endpoint
 
     x = db.Column(db.Integer, nullable=False, server_default=sa_text('0'), default=0)
     y = db.Column(db.Integer, nullable=False, server_default=sa_text('0'), default=0)
-    width = db.Column(db.Integer)                  # NULL = tür varsayılanı (panel karar verir)
+    width = db.Column(db.Integer)                  # NULL = type default (the panel decides)
     height = db.Column(db.Integer)
     z = db.Column(db.Integer, nullable=False, server_default=sa_text('0'), default=0)
 
-    from_key = db.Column(db.String(64))            # type='edge' kaynak
-    to_key = db.Column(db.String(64))              # type='edge' hedef
+    from_key = db.Column(db.String(64))            # type='edge' source
+    to_key = db.Column(db.String(64))              # type='edge' target
 
     status = db.Column(db.String(16), nullable=False, default='open')   # open | done
     due_date = db.Column(db.Date)
-    assignee_sub = db.Column(db.String(64))        # users_ref.sub (FK değil — kimlik SSO'da)
+    assignee_sub = db.Column(db.String(64))        # users_ref.sub (not an FK — identity lives in SSO)
 
-    # Domain bağları — kartı panelin geri kalanına bağlar. `extra` jsonb DEĞİL, gerçek
-    # FK: doğrulanmış (silinmiş kampanyaya bakan ölü referans oluşmaz), indeksli ve
-    # sorgulanabilir. `ondelete='SET NULL'` bilinçli — çekim/kampanya silinince kart
-    # yaşamaya devam eder, yalnız bağ kopar (kart planlama verisi, onun kaydı değil).
+    # Domain links — tie the card to the rest of the panel. `extra` is NOT jsonb,
+    # a real FK: validated (no dead reference pointing at a deleted campaign),
+    # indexed and queryable. `ondelete='SET NULL'` is deliberate — when a
+    # shoot/campaign is deleted the card lives on, only the link breaks (the card
+    # is planning data, not that record's own).
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'))
     shoot_task_id = db.Column(db.Integer, db.ForeignKey('shoot_tasks.id', ondelete='SET NULL'))
     ad_campaign_id = db.Column(db.Integer, db.ForeignKey('ad_campaigns.id', ondelete='SET NULL'))
-    extra = db.Column(JSONB_)                      # göç artıkları (legacy_status/metadata/week_iso)
+    extra = db.Column(JSONB_)                      # migration leftovers (legacy_status/metadata/week_iso)
 
     source = db.Column(db.String(16), nullable=False, default='panel')  # panel | legacy
     legacy_ref = db.Column(db.String(96), unique=True)
@@ -151,11 +158,13 @@ class PlanningItem(db.Model):
 
     def to_dict(self, assignee_name=None, updated_by_name=None,
                 client_name=None, shoot_title=None, campaign_title=None):
-        """Türetilmiş adlar (…_name/…_title) DIŞARIDAN geçilir, ilişkiden okunmaz.
+        """Derived names (…_name/…_title) are passed in FROM OUTSIDE, not read from
+        the relationship.
 
-        Gerekçe: `self.client.name` yazmak öğe başına bir lazy sorgu doğurur ve
-        `test_board_get_sorgu_sayisi_oge_sayisindan_bagimsiz` muhafızını kırar.
-        Çağıran taraf (`planning._items_payload`) adları tek toplu sorguda çözer."""
+        Rationale: writing `self.client.name` would spawn a lazy query per item and
+        break the `test_board_get_sorgu_sayisi_oge_sayisindan_bagimsiz` guard. The
+        caller (`planning._items_payload`) resolves the names in a single batched
+        query."""
         return {
             'item_key': self.item_key, 'type': self.type,
             'title': self.title, 'text': self.text, 'color': self.color,

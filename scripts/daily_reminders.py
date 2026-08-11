@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Günlük hatırlatıcılar — yarının özel günleri + bugün biten reklamlar (2026-08-05).
+"""Daily reminders — tomorrow's special days + ads ending today (2026-08-05).
 
-`agency-reminders.timer` sabah bir kez çağırır. Enqueue script'lerinden farkı: iş
-kuyruğuna job atmaz, bildirimi DOĞRUDAN üretir — AI/Drive gerektirmeyen saf DB
-sorguları, worker turunu beklemenin anlamı yok.
+`agency-reminders.timer` calls this once every morning. Unlike the enqueue
+scripts, it doesn't push a job onto the queue, it produces the notification
+DIRECTLY — plain DB queries that need no AI/Drive, so there's no point
+waiting for a worker cycle.
 
-**Sessizlik kuralı:** yarın özel gün yoksa veya bugün biten reklam yoksa **hiçbir
-bildirim üretilmez** (proje sahibi isteği). Her sabah "bugün bir şey yok" diyen bir çan,
-bir süre sonra hiç okunmayan bir çandır.
+**Silence rule:** if there's no special day tomorrow and no ad ending today,
+**no notification is produced at all** (project owner's request). A bell that
+rings "nothing today" every morning eventually becomes a bell nobody reads.
 
-İdempotans: aynı gün ikinci kez koşulursa `notifications`'taki okunmamış aynı
-başlıklı kayıt yeniden üretilmez (başlık tarihi taşır → per-gün dedup).
+Idempotency: if run a second time on the same day, the existing unread record
+with the same title in `notifications` is not regenerated (the title carries
+the date → per-day dedup).
 
-Kullanım:
-    python scripts/daily_reminders.py            # kuru koşu (ne gönderileceğini yazar)
-    python scripts/daily_reminders.py --apply    # bildirimleri üret
+Usage:
+    python scripts/daily_reminders.py            # dry run (prints what would be sent)
+    python scripts/daily_reminders.py --apply    # produce the notifications
 """
 import argparse
 import os
@@ -29,8 +31,8 @@ from extensions import db  # noqa: E402
 from models import AdCampaign, Client, Notification  # noqa: E402
 from models_sharing import SpecialDayEvent  # noqa: E402
 
-AYLAR = ['', 'Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz',
-         'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık']
+AYLAR = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July',
+         'August', 'September', 'October', 'November', 'December']
 
 
 def _tarih_metni(d):
@@ -38,11 +40,12 @@ def _tarih_metni(d):
 
 
 def yarinin_ozel_gunleri(hedef):
-    """Hedef tarihe düşen özel günlerin adları.
+    """Names of special days falling on the target date.
 
-    Kapsam onaylı + aktif kayıtlar: taslak (AI'ın ürettiği, yönetimin onaylamadığı)
-    günler hatırlatılmaz — onay kapısı özellikle bunun için var. Tek-gün (`date_num`)
-    ve aralık (`date_start`–`date_end`) kayıtlarının ikisi de değerlendirilir."""
+    Scope is approved + active records: draft days (AI-generated, not yet
+    approved by management) are not reminded — the approval gate exists
+    specifically for this. Both single-day (`date_num`) and range
+    (`date_start`–`date_end`) records are evaluated."""
     rows = (SpecialDayEvent.query
             .filter(SpecialDayEvent.month == hedef.month,
                     SpecialDayEvent.active.is_(True),
@@ -57,13 +60,13 @@ def yarinin_ozel_gunleri(hedef):
         elif (e.date_start is not None and e.date_end is not None
               and e.date_start <= hedef.day <= e.date_end):
             adlar.append(e.day_name)
-    # Aynı gün adı hem global hem müşteriye özel kayıtla gelebilir → tekilleştir.
+    # The same day name can come in via both a global and a client-specific record → dedupe.
     return sorted({a for a in adlar if a})
 
 
 def biten_reklamlar(bugun):
-    """Bugün biten, silinmemiş kampanyalar. `status` süzgeci YOK: 'planned' kalmış
-    ama bitiş tarihi gelmiş bir kampanya da ilgilenilmesi gereken bir durumdur."""
+    """Non-deleted campaigns ending today. NO `status` filter: a campaign stuck
+    on 'planned' whose end date has arrived is also a situation worth attention."""
     return (AdCampaign.query
             .filter(AdCampaign.end_date == bugun,
                     AdCampaign.deleted_at.is_(None))
@@ -73,7 +76,7 @@ def biten_reklamlar(bugun):
 
 
 def _zaten_var(baslik):
-    """Aynı başlıkla okunmamış bildirim var mı (per-gün dedup — başlık tarihi taşır)."""
+    """Is there an unread notification with the same title (per-day dedup — the title carries the date)."""
     return (Notification.query
             .filter_by(title=baslik, read_at=None)
             .first()) is not None

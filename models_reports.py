@@ -1,10 +1,10 @@
-"""Aylık rapor modelleri (2026-08-07) — Meta/Instagram performans raporları.
+"""Monthly report models (2026-08-07) — Meta/Instagram performance reports.
 
-Saklanan şey **hesaplanmış veri**, yüklenen CSV'ler DEĞİL: ham dosyalar müşteri
-verisi taşıyor ve raporu yeniden üretmek için gerekmiyorlar; tutmak, değeri
-olmayan bir sızıntı yüzeyi olurdu. Aynı nedenle HTML de saklanmaz — her
-görüntülemede `data`'dan yeniden üretilir, böylece şablon güncellenince ESKİ
-raporlar da yeni görünümü alır.
+What's stored is **computed data**, NOT the uploaded CSVs: the raw files
+carry client data and aren't needed to regenerate the report; keeping them
+would be a leak surface with no value. For the same reason HTML isn't stored
+either — it's regenerated from `data` on every view, so when the template is
+updated, OLD reports also get the new look.
 """
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -15,12 +15,13 @@ JSONB_ = JSONB(none_as_null=True).with_variant(db.JSON(none_as_null=True), 'sqli
 
 
 class MonthlyReport(db.Model):
-    """Bir müşterinin bir aya ait performans raporu.
+    """A client's performance report for one month.
 
-    `client_id` NULL OLABİLİR: raporlar Meta'dan inen CSV klasör adlarıyla toplu
-    üretiliyor ve o adlar panel müşteri kayıtlarıyla her zaman eşleşmiyor (henüz
-    açılmamış müşteri, farklı yazım). Eşleşme kurulabildiyse bağlanır, kurulamadıysa
-    rapor yine de üretilir — `client_name` her hâlükârda doludur ve gösterilen addır.
+    `client_id` CAN BE NULL: reports are generated in bulk from CSV folder
+    names coming out of Meta, and those names don't always match panel client
+    records (a client not yet onboarded, a different spelling). If a match
+    can be made it's linked, if not the report is still generated —
+    `client_name` is always populated and is the name shown.
     """
     __tablename__ = 'monthly_reports'
     __table_args__ = (db.Index('ix_reports_client_period', 'client_id', 'period'),)
@@ -29,10 +30,10 @@ class MonthlyReport(db.Model):
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'))
     client_name = db.Column(db.String(200), nullable=False)
     period = db.Column(db.String(7), nullable=False)      # "YYYY-MM"
-    data = db.Column(JSONB_, nullable=False)              # generate_report_data çıktısı
-    warnings = db.Column(JSONB_)                          # üretim sırasındaki uyarılar
-    # Public paylaşım: token üretilene kadar NULL — her rapor otomatik paylaşıma
-    # açılmaz, kullanıcı istediğinde link alır.
+    data = db.Column(JSONB_, nullable=False)              # generate_report_data output
+    warnings = db.Column(JSONB_)                          # warnings raised during generation
+    # Public sharing: NULL until a token is generated — not every report is
+    # opened up for sharing automatically, the user gets a link when they want one.
     token = db.Column(db.String(64), unique=True, index=True)
     revoked = db.Column(db.Boolean, nullable=False, default=False)
     created_by = db.Column(db.String(64))
@@ -47,8 +48,8 @@ class MonthlyReport(db.Model):
         if not ozet:
             d['data'] = self.data
         else:
-            # Liste görünümü için birkaç başlık metriği — tüm `data`yı taşımak
-            # 30 raporluk listede gereksiz yük olurdu.
+            # A few headline metrics for the list view — carrying the whole
+            # `data` would be unnecessary weight in a list of 30 reports.
             totals = (self.data or {}).get('totals') or {}
             d['ozet'] = {k: totals.get(k) for k in
                          ('Toplam Görüntüleme', 'Toplam Erişim', 'Toplam Etkileşim')}

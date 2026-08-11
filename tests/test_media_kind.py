@@ -1,14 +1,14 @@
-"""Medya türü İÇERİKTEN belirlenir — `Share.kind`'a güvenilmez.
+"""Media type is determined FROM CONTENT — `Share.kind` is not trusted.
 
-`Share.kind` yayın türüdür (post/story/reel/linkedin); dosya türü DEĞİL. Bir
-video "post" olarak paylaşılabilir ve bu olağandır. media_worker eskiden
-`kind != 'video'` görünce dosyayı PIL'e veriyordu → `kind='post'` olan bir .mp4
-"cannot identify image file" ile 3 denemede de çöktü (job 233 / share 671,
-2026-07-27) ve o paylaşımda caption zinciri hiç ilerlemedi.
+`Share.kind` is the publication type (post/story/reel/linkedin); NOT the file type.
+A video can be shared as a "post" and that's normal. media_worker used to hand the
+file to PIL whenever it saw `kind != 'video'` → a .mp4 with `kind='post'` crashed
+with "cannot identify image file" on all 3 attempts (job 233 / share 671,
+2026-07-27), and the caption chain for that share never progressed.
 """
 import media
 
-# Gerçek dosya başlangıçları (yalnız imza kısmı — tam dosya gerekmiyor).
+# Real file headers (signature portion only — the full file isn't needed).
 MP4 = b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2'
 MOV = b'\x00\x00\x00\x14ftypqt  \x00\x00\x02\x00qt  '
 HEIC = b'\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic'
@@ -35,8 +35,8 @@ def test_sniff_gorsel_imzalari():
 
 
 def test_sniff_heic_avif_gorsel_sayilir():
-    """ISO-BMFF (`ftyp`) hem MP4 hem HEIC/AVIF tarafından kullanılır — brand'a
-    bakılmazsa iPhone fotoğrafı video sanılır ve ffmpeg'e giderdi."""
+    """ISO-BMFF (`ftyp`) is used by both MP4 and HEIC/AVIF — without checking the
+    brand, an iPhone photo would be mistaken for video and sent to ffmpeg."""
     assert media.sniff_kind(HEIC) == 'image'
     assert media.sniff_kind(AVIF) == 'image'
 
@@ -55,7 +55,7 @@ def test_uzanti_yedegi():
 
 
 def test_resolve_oncelik_icerik_uzantinin_onunde():
-    """Ad yanlışsa içerik kazanır — .jpg'ye çevrilmiş bir mp4 hâlâ videodur."""
+    """If the name is wrong, content wins — an mp4 renamed to .jpg is still a video."""
     assert media.resolve_kind(MP4, 'yanlis-ad.jpg', fallback='image') == 'video'
     assert media.resolve_kind(PNG, 'yanlis-ad.mp4', fallback='video') == 'image'
 
@@ -67,12 +67,12 @@ def test_resolve_icerik_taninmazsa_uzantiya_duser():
 def test_resolve_ikisi_de_taninmazsa_fallback():
     assert media.resolve_kind(b'bilinmeyen', 'dosya.bin', fallback='video') == 'video'
     assert media.resolve_kind(b'bilinmeyen', 'dosya.bin', fallback='image') == 'image'
-    # fallback verilmezse görsel yolu (eski davranış korunur)
+    # if no fallback is given, defaults to image (preserves old behavior)
     assert media.resolve_kind(b'bilinmeyen', None) == 'image'
 
 
 def test_share_671_senaryosu_post_olarak_paylasilan_video():
-    """REGRESYON: `kind='post'` + `.mp4` → video kolu. Eski kod burada PIL'e
-    gidip 'cannot identify image file' ile üç denemede de çöküyordu."""
-    hint = 'image'  # media_worker `kind != 'video'` için bunu üretir
+    """REGRESSION: `kind='post'` + `.mp4` → the video path. Old code went to PIL
+    here and crashed with 'cannot identify image file' on all three attempts."""
+    hint = 'image'  # this is what media_worker produces for `kind != 'video'`
     assert media.resolve_kind(MP4, 'rizonr0727.mp4', fallback=hint) == 'video'

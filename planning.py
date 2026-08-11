@@ -1,40 +1,44 @@
-"""Planlama Panosu — `/api/planning/*` [Blueprint: /api/planning].
+"""Planning Board — `/api/planning/*` [Blueprint: /api/planning].
 
-KİŞİ eksenli serbest pano. Eski hafta eksenli canvas'ın (`sharing.canvas_get/save`,
-`weekly_canvas`) yerini alır — orada haftada bir ortak pano vardı ve her pazartesi
-boş doğuyordu. Artık iki tür pano var:
+PERSON-centric free-form board. Replaces the old week-centric canvas
+(`sharing.canvas_get/save`, `weekly_canvas`) — there used to be one shared board per
+week, and it was born empty every Monday. Now there are two kinds of boards:
 
-  * `management`   — tüm yöneticilerin paylaştığı TEK pano; çalışanlar erişemez
-  * `user:<sub>`   — kişi başına ORTAK çalışma alanı; yönetici + o çalışan yazar
+  * `management`   — ONE board shared by all managers; employees can't access it
+  * `user:<sub>`   — SHARED workspace per person; the manager + that employee write
 
-YETKİ (tek kapı `_board_access`, okuma ve yazma AYNI kural):
+AUTHORIZATION (single gate `_board_access`, SAME rule for read and write):
 
-  aktör                                 | yönetim | kendi | başkası
+  actor                                  | management | own | other
   --------------------------------------|---------|-------|--------
   management                            |    ✓    |   ✓   |   ✓
   designer/content_creator/videographer |   403   |   ✓   |  403
-  anonim                                |   401   |  401  |  401
-  rol 'pending' vb.                     |   403   |  403  |  403
+  anonymous                             |   401   |  401  |  401
+  role 'pending' etc.                   |   403   |  403  |  403
 
-`_require_management()` bu iş için yetmez çünkü kural asimetrik: yönetici her panoya,
-çalışan yalnız kendisininkine. Yetki `current_user()` üzerinden çalışır → impersonation
-altında yönetici tasarımcı gözünden bakarken yönetim panosunu göremez (doğru davranış).
+`_require_management()` isn't enough for this because the rule is asymmetric: a
+manager can reach any board, an employee only their own. Authorization runs through
+`current_user()` → under impersonation, a manager looking through a designer's eyes
+can't see the management board (correct behavior).
 
-ÇAKIŞMA MODELİ — delta PATCH, kaba 409 DEĞİL:
-Eski uç tüm kart dizisini ham atıyordu (`c.tasks = data['tasks']`) → iki kişi aynı anda
-yazınca biri sessizce kayboluyordu. Kaba `If-Match → 409` da reddedildi: kullanıcı 40
-kartı taşıdıktan sonra 409 alıp işini kaybederdi. Bunun yerine:
-  * istek {base_version, upsert:[...], delete:[...]} — öğe granülaritesinde
-  * pano satırı `with_for_update()` ile kilitlenir → aynı panoya eşzamanlı iki PATCH
-    sıraya girer (Postgres; sqlite bu ipucunu YOK SAYAR, testte kanıtlanamaz)
-  * yazma HER ZAMAN uygulanır; `base_version` eskiyse yanıt `stale:true` + tam öğe
-    listesi döner (tek turda uzlaşma)
-  * öğe düzeyinde `rev`: istemcinin bildiği rev sunucudan küçükse öğe `conflicts[]`'a
-    girer, SON YAZAN KAZANIR, panel uyarı gösterir
-  * FARKLI kartlara dokunan iki kişi hiç çakışmaz — istenen davranış bu
-  * `version` bir kapı değil, "biri yazdı" sinyali (ucuz /version ucu bunu yoklar)
+CONFLICT MODEL — delta PATCH, not a blunt 409:
+The old endpoint overwrote the whole card array raw (`c.tasks = data['tasks']`) → when
+two people wrote at the same time, one would silently disappear. A blunt
+`If-Match → 409` was also rejected: a user would move 40 cards, get a 409, and lose
+their work. Instead:
+  * request {base_version, upsert:[...], delete:[...]} — item granularity
+  * the board row is locked with `with_for_update()` → two concurrent PATCHes on the
+    same board queue up (Postgres; sqlite IGNORES this hint, can't be proven in tests)
+  * the write is ALWAYS applied; if `base_version` is stale, the response returns
+    `stale:true` + the full item list (reconciliation in a single round trip)
+  * item-level `rev`: if the client's known rev is lower than the server's, the item
+    goes into `conflicts[]`, LAST WRITER WINS, the panel shows a warning
+  * two people touching DIFFERENT cards never conflict at all — this is the intended
+    behavior
+  * `version` isn't a gate, it's a "someone wrote" signal (the cheap /version endpoint
+    polls it)
 
-CSRF `api.csrf_protect` ile paylaşılır (ads.py/client_tracking.py deseni).
+CSRF is shared via `api.csrf_protect` (same pattern as ads.py/client_tracking.py).
 """
 import datetime as dt
 import json
@@ -57,73 +61,74 @@ from sso_client import current_user
 
 bp = Blueprint('planning', __name__)
 log = logging.getLogger('agency.planning')
-bp.before_request(csrf_protect)  # api ile aynı CSRF (session token)
+bp.before_request(csrf_protect)  # same CSRF as api (session token)
 
-# Panosu olan roller. 'pending' / müşteri rolleri dışarıda — panoları da yok.
+# Roles that have boards. 'pending' / customer roles are excluded — they have no
+# boards either.
 PANEL_ROLES = ('management', 'designer', 'content_creator', 'videographer')
 
 BOARD_KEY_RE = re.compile(r'^(management|user:[A-Za-z0-9_\-.|@]{1,56})$')
 
-# Seçici listeleri kırpılır: bunlar arama kutusunu besler, tam döküm değil.
+# Picker lists are truncated: these feed the search box, not a full dump.
 LINKABLE_LIMIT = 100
 ASSIGNED_LIMIT = 200
 ITEM_KEY_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 COLOR_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
 
 MANAGEMENT_KEY = 'management'
-MAX_ITEMS_PER_BOARD = 2000      # 588 göç kartı + 19 bölge + bol pay
-MAX_BATCH = 200                 # istek başına upsert/delete üst sınırı
+MAX_ITEMS_PER_BOARD = 2000      # 588 migrated cards + 19 regions + generous headroom
+MAX_BATCH = 200                 # upsert/delete upper limit per request
 MAX_EXTRA_BYTES = 4096
 COORD_LIMIT = 100_000
 SIZE_MIN, SIZE_MAX = 20, 4000
 TITLE_MAX, LABEL_MAX, TEXT_MAX, LINK_MAX = 300, 80, 5000, 1024
 
 
-# --- yetki ---------------------------------------------------------------
+# --- authorization ---------------------------------------------------------------
 
 def _board_access(board_key):
-    """(user, err) — TEK yetki kapısı; okuma ve yazma aynı kuralı kullanır."""
+    """(user, err) — SINGLE authorization gate; read and write use the same rule."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='not authenticated'), 401)
     if not BOARD_KEY_RE.match(board_key or ''):
-        return None, (jsonify(error='geçersiz pano anahtarı'), 400)
+        return None, (jsonify(error='invalid board key'), 400)
     role = u.get('role')
     if role not in PANEL_ROLES:
-        return None, (jsonify(error='bu sayfaya erişiminiz yok'), 403)
+        return None, (jsonify(error='you do not have access to this page'), 403)
 
     if board_key == MANAGEMENT_KEY:
         if role != 'management':
-            return None, (jsonify(error='yönetim panosu yalnız yönetime açıktır'), 403)
+            return None, (jsonify(error='the management board is only open to management'), 403)
         return u, None
 
     owner_sub = board_key.split(':', 1)[1]
     if owner_sub == str(u.get('sub')):
-        return u, None                      # kendi panosu — her panel rolü
+        return u, None                      # own board — any panel role
     if role != 'management':
-        return None, (jsonify(error='yalnız kendi panonuzu görebilirsiniz'), 403)
+        return None, (jsonify(error='you can only view your own board'), 403)
     if db.session.get(UserRef, owner_sub) is None:
-        return None, (jsonify(error='kullanıcı bulunamadı'), 404)
+        return None, (jsonify(error='user not found'), 404)
     return u, None
 
 
-# --- yardımcılar ---------------------------------------------------------
+# --- helpers ---------------------------------------------------------
 
 def _user_names():
-    """{sub: görünen ad} — TEK sorgu. Öğe başına lazy erişim YASAK (N+1)."""
+    """{sub: display name} — SINGLE query. Per-item lazy access is FORBIDDEN (N+1)."""
     return {u.sub: (u.name or u.email)
             for u in db.session.query(UserRef.sub, UserRef.name, UserRef.email).all()}
 
 
 def _board_title(board, names):
     if board.kind == 'management':
-        return 'Yönetim Panosu'
+        return 'Management Board'
     return names.get(board.owner_sub) or f'#{board.owner_sub}'
 
 
 def _get_or_create_board(board_key, user):
-    """Panoyu getir, yoksa yarat. Çoklu worker yarışında UNIQUE(board_key) ikinci
-    INSERT'i reddeder → rollback + tekrar sorgu (client_tracking seed deseni)."""
+    """Get the board, create it if missing. In a multi-worker race, UNIQUE(board_key)
+    rejects the second INSERT → rollback + re-query (client_tracking seed pattern)."""
     board = PlanningBoard.query.filter_by(board_key=board_key).first()
     if board is not None:
         return board
@@ -141,11 +146,12 @@ def _get_or_create_board(board_key, user):
 
 
 def _link_titles(rows):
-    """Domain bağlarının görünen adları — bağ TÜRÜ başına TEK toplu sorgu.
+    """Display names for domain links — ONE batched query per link TYPE.
 
-    `r.client.name` yazmak öğe başına lazy sorgu doğurur ve
-    `test_board_get_sorgu_sayisi_oge_sayisindan_bagimsiz` muhafızını kırar.
-    Hiç bağ yoksa o tür için sorgu bile atılmaz (boş `IN ()` üretmeyelim)."""
+    Writing `r.client.name` would trigger a per-item lazy query and break the
+    `test_board_get_sorgu_sayisi_oge_sayisindan_bagimsiz` guard test.
+    If there are no links at all, we don't even issue a query for that type (avoid
+    producing an empty `IN ()`)."""
     cids = {r.client_id for r in rows if r.client_id}
     sids = {r.shoot_task_id for r in rows if r.shoot_task_id}
     aids = {r.ad_campaign_id for r in rows if r.ad_campaign_id}
@@ -170,7 +176,7 @@ def _items_payload(board, names):
                       campaign_title=camps.get(r.ad_campaign_id)) for r in rows]
 
 
-# --- doğrulama (hepsi ValueError → 400) ----------------------------------
+# --- validation (all ValueError → 400) ----------------------------------
 
 def _parse_date(value, field):
     if value in (None, ''):
@@ -178,19 +184,19 @@ def _parse_date(value, field):
     try:
         return dt.date.fromisoformat(str(value)[:10])
     except ValueError:
-        raise ValueError(f'{field} geçersiz tarih (YYYY-MM-DD bekleniyor)')
+        raise ValueError(f'{field} has an invalid date (expected YYYY-MM-DD)')
 
 
 def _clean_text(value, field, limit):
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError(f'{field} metin olmalı')
+        raise ValueError(f'{field} must be text')
     value = value.strip()
     if not value:
         return None
     if len(value) > limit:
-        raise ValueError(f'{field} en fazla {limit} karakter olabilir')
+        raise ValueError(f'{field} can be at most {limit} characters')
     return value
 
 
@@ -198,10 +204,10 @@ def _coord(value, field):
     if value in (None, ''):
         return 0
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f'{field} sayı olmalı')
+        raise ValueError(f'{field} must be a number')
     n = int(round(value))
     if abs(n) > COORD_LIMIT:
-        raise ValueError(f'{field} sınır dışı')
+        raise ValueError(f'{field} is out of range')
     return n
 
 
@@ -209,50 +215,51 @@ def _dimension(value, field):
     if value in (None, ''):
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f'{field} sayı olmalı')
+        raise ValueError(f'{field} must be a number')
     n = int(round(value))
     if not (SIZE_MIN <= n <= SIZE_MAX):
-        raise ValueError(f'{field} {SIZE_MIN}-{SIZE_MAX} arasında olmalı')
+        raise ValueError(f'{field} must be between {SIZE_MIN} and {SIZE_MAX}')
     return n
 
 
 def _clean_link(value):
-    """Yalnız http(s). Eski canvas link alanını hiç süzmüyordu → `javascript:` kabul
-    ediyordu; burada kapanıyor."""
+    """http(s) only. The old canvas never filtered the link field → it accepted
+    `javascript:`; that hole is closed here."""
     link = _clean_text(value, 'link', LINK_MAX)
     if link and not link.lower().startswith(('http://', 'https://')):
-        raise ValueError('geçersiz link (http/https bekleniyor)')
+        raise ValueError('invalid link (http/https expected)')
     return link
 
 
 def _apply_item(item, data, user, names, creating=False):
-    """Gövdeyi öğeye uygula + doğrula. Gönderilmeyen alana DOKUNULMAZ (kısmi upsert)."""
+    """Apply + validate the body onto the item. Fields not sent are LEFT ALONE
+    (partial upsert)."""
     if creating or 'type' in data:
         kind = (data.get('type') or 'card').strip().lower()
         if kind not in ITEM_TYPES:
-            raise ValueError(f'geçersiz öğe türü: {kind}')
+            raise ValueError(f'invalid item type: {kind}')
         item.type = kind
     if creating or 'title' in data:
-        item.title = _clean_text(data.get('title'), 'başlık', TITLE_MAX)
+        item.title = _clean_text(data.get('title'), 'title', TITLE_MAX)
     if creating or 'text' in data:
-        item.text = _clean_text(data.get('text'), 'metin', TEXT_MAX)
+        item.text = _clean_text(data.get('text'), 'text', TEXT_MAX)
     if creating or 'label' in data:
-        item.label = _clean_text(data.get('label'), 'etiket', LABEL_MAX)
+        item.label = _clean_text(data.get('label'), 'label', LABEL_MAX)
     if creating or 'link' in data:
         item.link = _clean_link(data.get('link'))
     if creating or 'color' in data:
-        color = _clean_text(data.get('color'), 'renk', 16)
+        color = _clean_text(data.get('color'), 'color', 16)
         if color and not COLOR_RE.match(color):
-            raise ValueError('renk #rrggbb biçiminde olmalı')
+            raise ValueError('color must be in #rrggbb format')
         item.color = color
     if creating or 'x' in data:
         item.x = _coord(data.get('x'), 'x')
     if creating or 'y' in data:
         item.y = _coord(data.get('y'), 'y')
     if creating or 'width' in data:
-        item.width = _dimension(data.get('width'), 'genişlik')
+        item.width = _dimension(data.get('width'), 'width')
     if creating or 'height' in data:
-        item.height = _dimension(data.get('height'), 'yükseklik')
+        item.height = _dimension(data.get('height'), 'height')
     if creating or 'z' in data:
         item.z = _coord(data.get('z'), 'z')
     if creating or 'from_key' in data:
@@ -262,20 +269,21 @@ def _apply_item(item, data, user, names, creating=False):
     if creating or 'status' in data:
         status = (data.get('status') or 'open').strip().lower()
         if status not in ITEM_STATUSES:
-            raise ValueError(f'geçersiz durum: {status}')
+            raise ValueError(f'invalid status: {status}')
         item.status = status
     if creating or 'due_date' in data:
-        item.due_date = _parse_date(data.get('due_date'), 'son tarih')
+        item.due_date = _parse_date(data.get('due_date'), 'due date')
     if creating or 'assignee_sub' in data:
-        sub = _clean_text(data.get('assignee_sub'), 'sorumlu', 64)
+        sub = _clean_text(data.get('assignee_sub'), 'assignee', 64)
         if sub and sub not in names:
-            raise ValueError('sorumlu bulunamadı')
+            raise ValueError('assignee not found')
         item.assignee_sub = sub
-    # Domain bağları — üçü aynı desen: boş → NULL, doluysa kayıt VAR olmak zorunda.
-    # Doğrulamayı burada yapmak `extra` jsonb'ye kıyasla ölü referansı imkânsız kılar.
-    for field, model, label in (('client_id', Client, 'müşteri'),
-                                ('shoot_task_id', ShootTask, 'çekim görevi'),
-                                ('ad_campaign_id', AdCampaign, 'reklam kampanyası')):
+    # Domain links — all three follow the same pattern: empty → NULL, if filled the
+    # record MUST exist. Doing this validation here makes a dangling reference
+    # impossible, unlike stashing it in the `extra` jsonb.
+    for field, model, label in (('client_id', Client, 'client'),
+                                ('shoot_task_id', ShootTask, 'shoot task'),
+                                ('ad_campaign_id', AdCampaign, 'ad campaign')):
         if not (creating or field in data):
             continue
         val = data.get(field)
@@ -283,9 +291,9 @@ def _apply_item(item, data, user, names, creating=False):
             setattr(item, field, None)
             continue
         if not isinstance(val, int) or isinstance(val, bool):
-            raise ValueError(f'{label} kimliği sayı olmalı')
+            raise ValueError(f'{label} id must be a number')
         if db.session.get(model, val) is None:
-            raise ValueError(f'{label} bulunamadı')
+            raise ValueError(f'{label} not found')
         setattr(item, field, val)
     if 'extra' in data:
         extra = data.get('extra')
@@ -293,44 +301,44 @@ def _apply_item(item, data, user, names, creating=False):
             item.extra = None
         else:
             if not isinstance(extra, dict):
-                raise ValueError('extra sözlük olmalı')
-            # SHALLOW MERGE, replace DEĞİL: tek anahtar yazan istemci diğerlerini
-            # (ör. göçten gelen legacy_* anahtarlarını) silmesin. Bir anahtarı
-            # gerçekten kaldırmak için değerini null gönder.
+                raise ValueError('extra must be an object')
+            # SHALLOW MERGE, not a replace: a client writing a single key shouldn't
+            # wipe out the others (e.g. legacy_* keys coming from the migration). To
+            # actually remove a key, send its value as null.
             merged = dict(item.extra or {})
             merged.update(extra)
             merged = {k: v for k, v in merged.items() if v is not None}
             if len(json.dumps(merged)) > MAX_EXTRA_BYTES:
-                raise ValueError('extra çok büyük')
+                raise ValueError('extra is too large')
             item.extra = merged
     if item.type == 'edge' and not (item.from_key and item.to_key):
-        raise ValueError('bağlantı için from_key ve to_key zorunlu')
+        raise ValueError('from_key and to_key are required for a connection')
     item.updated_by = user.get('sub')
     if creating:
         item.created_by = user.get('sub')
     return item
 
 
-# --- uçlar ---------------------------------------------------------------
+# --- endpoints ---------------------------------------------------------------
 
 @bp.get('/linkables')
 def linkables():
-    """Karta bağlanabilecek domain kayıtları — TEK uç, TEK rol kapısı.
+    """Domain records that a card can be linked to — ONE endpoint, ONE role gate.
 
-    Neden dört ayrı uca gitmiyoruz: bağların yetki kuralları farklı
-    (`/api/clients` tüm panel rollerine, `/api/sharing/shoot-plan` yalnız
-    management+videographer, `/api/ads` yalnız management) ve dahası
-    `shoot-plan` **week_iso zorunlu** kıldığı için hafta-bağımsız arama yapılamıyor.
-    Frontend dört uca gitse rol başına 403 yönetmek zorunda kalırdı.
+    Why we don't hit four separate endpoints: their authorization rules differ
+    (`/api/clients` is open to every panel role, `/api/sharing/shoot-plan` is
+    management+videographer only, `/api/ads` is management only), and on top of that
+    `shoot-plan` **requires week_iso**, so a week-independent search isn't possible
+    there. If the frontend hit four endpoints it would have to handle a 403 per role.
 
-    Yetkisi olmayan bölüm **boş dizi** döner, 403 DEĞİL: panel yalnız dolu
-    bölümleri render eder, rol farkı kendiliğinden doğru olur."""
+    A section the user has no access to returns an **empty array**, NOT a 403: the
+    panel only renders non-empty sections, so the role difference resolves itself."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not authenticated'), 401
     role = u.get('role')
     if role not in PANEL_ROLES:
-        return jsonify(error='bu sayfaya erişiminiz yok'), 403
+        return jsonify(error='you do not have access to this page'), 403
 
     q = (request.args.get('q') or '').strip()
     like = f'%{q}%' if q else None
@@ -341,8 +349,9 @@ def linkables():
     clients = [{'id': c.id, 'name': c.name}
                for c in cq.order_by(Client.name.asc()).limit(LINKABLE_LIMIT).all()]
 
-    # users: `/api/users` panoya HİÇ erişemeyen `pending` rolünü de döndürüyor;
-    # burada PANEL_ROLES'a süzülür ki erişimsiz kişiye kart atanamasın.
+    # users: `/api/users` also returns the `pending` role, which has NO access to
+    # any board; it's filtered to PANEL_ROLES here so a card can't be assigned to
+    # someone without access.
     uq = UserRef.query.filter(UserRef.role.in_(PANEL_ROLES))
     if like:
         uq = uq.filter(UserRef.name.ilike(like))
@@ -363,7 +372,7 @@ def linkables():
                                     .limit(LINKABLE_LIMIT).all()]
 
     campaigns = []
-    if role == 'management':   # mali bilgi — ads.py da yalnız management'a açık
+    if role == 'management':   # financial info — ads.py is also management-only
         aq = AdCampaign.query.filter(AdCampaign.deleted_at.is_(None))
         if like:
             aq = aq.filter(AdCampaign.title.ilike(like))
@@ -378,29 +387,30 @@ def linkables():
 
 @bp.get('/assigned')
 def assigned_items():
-    """Bir kişiye atanmış kartlar — PANO SINIRINI AŞAR, salt-okunur.
+    """Cards assigned to a person — CROSSES BOARD BOUNDARIES, read-only.
 
-    BİLİNÇLİ YETKİ GEDİĞİ (2026-07-26 kararı, proje sahibi onayladı): `_board_access`
-    'designer yönetim panosunu göremez' der, ama bu uç yönetim panosundaki
-    kartı da atanan kişiye döndürür — başlık/durum/son tarih/müşteri sızar.
-    Gerekçe: aksi halde yöneticinin çalışana kart ataması çalışan açısından
-    tamamen görünmez kalır, yani atama işlevi ölü olur. Sızan alan kümesi
-    bilerek dar: kart gövdesi (`text`), renk, konum ve `extra` DÖNMEZ.
-    Yazma yolu YOK — düzenleme yalnız kartın kendi panosundan yapılır.
+    DELIBERATE AUTHORIZATION GAP (2026-07-26 decision, approved by the project
+    owner): `_board_access` says 'a designer can't see the management board', but
+    this endpoint also returns a card from the management board to the person it's
+    assigned to — title/status/due date/client leak. Rationale: otherwise a manager
+    assigning a card to an employee would be completely invisible to that employee,
+    i.e. the assignment feature would be dead. The leaked field set is deliberately
+    narrow: card body (`text`), color, position and `extra` are NOT returned.
+    There's NO write path — editing only happens from the card's own board.
 
-    `?assignee_sub=` verilmezse çağıranın kendisi varsayılır. Çalışan
-    başkasının atamalarını isteyemez (403); management herkesi sorgular."""
+    If `?assignee_sub=` isn't given, the caller themselves is assumed. An employee
+    can't request someone else's assignments (403); management can query anyone."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not authenticated'), 401
     role = u.get('role')
     if role not in PANEL_ROLES:
-        return jsonify(error='bu sayfaya erişiminiz yok'), 403
+        return jsonify(error='you do not have access to this page'), 403
 
     me = str(u.get('sub'))
     target = (request.args.get('assignee_sub') or me).strip()
     if target != me and role != 'management':
-        return jsonify(error='yalnız kendi atamalarınızı görebilirsiniz'), 403
+        return jsonify(error='you can only view your own assignments'), 403
 
     rows = (db.session.query(PlanningItem, PlanningBoard)
             .join(PlanningBoard, PlanningBoard.id == PlanningItem.board_id)
@@ -427,15 +437,16 @@ def assigned_items():
 
 @bp.get('/boards')
 def boards_list():
-    """Erişilebilir panolar. management → yönetim + tüm panel-rollü kullanıcılar;
-    çalışan → YALNIZ kendisi (tek eleman) → panel seçiciyi hiç render etmez.
-    Yani dropdown'ın gizlenmesi API'den türer, sadece frontend kararı değildir."""
+    """Accessible boards. management → management + all panel-role users;
+    employee → ONLY themselves (single element) → the panel never renders a
+    selector. So hiding the dropdown is derived from the API, not just a frontend
+    decision."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not authenticated'), 401
     role = u.get('role')
     if role not in PANEL_ROLES:
-        return jsonify(error='bu sayfaya erişiminiz yok'), 403
+        return jsonify(error='you do not have access to this page'), 403
 
     names = _user_names()
     if role == 'management':
@@ -455,13 +466,13 @@ def boards_list():
     out = []
     for key in wanted:
         board = by_key.get(key)
-        if board is None:           # henüz hiç açılmamış pano — sanal, sayfada boş görünür
+        if board is None:           # never-opened board — virtual, shows empty on the page
             owner = None if key == MANAGEMENT_KEY else key.split(':', 1)[1]
             out.append({'key': key, 'kind': 'management' if owner is None else 'user',
                         'owner_sub': owner, 'version': 0, 'updated_at': None,
                         'last_modified_by': None, 'last_modified_name': None,
                         'item_count': 0,
-                        'title': 'Yönetim Panosu' if owner is None
+                        'title': 'Management Board' if owner is None
                                  else (names.get(owner) or f'#{owner}')})
             continue
         out.append(board.to_dict(title=_board_title(board, names),
@@ -472,8 +483,9 @@ def boards_list():
 
 @bp.get('/boards/<string:board_key>/version')
 def board_version(board_key):
-    """Ucuz yoklama (~150 bayt). Panel bunu periyodik çağırır; sürüm değiştiyse
-    tam panoyu tazeler. Tam panoyu yoklamak 600 öğelik gövde demek olurdu."""
+    """Cheap poll (~150 bytes). The panel calls this periodically; if the version
+    changed, it refetches the whole board. Polling the full board would mean a
+    600-item body."""
     _, err = _board_access(board_key)
     if err:
         return err
@@ -493,7 +505,8 @@ def board_version(board_key):
 
 @bp.get('/boards/<string:board_key>')
 def board_get(board_key):
-    """Pano + tüm öğeleri. Pano yoksa lazy yaratılır (eski canvas_get davranışı)."""
+    """Board + all its items. If the board doesn't exist it's created lazily (old
+    canvas_get behavior)."""
     u, err = _board_access(board_key)
     if err:
         return err
@@ -508,10 +521,10 @@ def board_get(board_key):
 
 @bp.patch('/boards/<string:board_key>/items')
 def board_items_patch(board_key):
-    """Delta yazma: {base_version, upsert:[...], delete:[...]}.
+    """Delta write: {base_version, upsert:[...], delete:[...]}.
 
-    Yanıt: {board, applied:[...], conflicts:[item_key], stale:bool, items:[...]|None}
-    `stale` true ise `items` tam listedir (istemci tek turda uzlaşır)."""
+    Response: {board, applied:[...], conflicts:[item_key], stale:bool, items:[...]|None}
+    If `stale` is true, `items` is the full list (client reconciles in one round trip)."""
     u, err = _board_access(board_key)
     if err:
         return err
@@ -519,12 +532,12 @@ def board_items_patch(board_key):
     upsert = data.get('upsert') or []
     delete = data.get('delete') or []
     if not isinstance(upsert, list) or not isinstance(delete, list):
-        return jsonify(error='upsert ve delete liste olmalı'), 400
+        return jsonify(error='upsert and delete must be lists'), 400
     if len(upsert) > MAX_BATCH or len(delete) > MAX_BATCH:
-        return jsonify(error=f'tek istekte en fazla {MAX_BATCH} öğe işlenebilir'), 400
+        return jsonify(error=f'at most {MAX_BATCH} items can be processed per request'), 400
 
     board = _get_or_create_board(board_key, u)
-    # Aynı panoya eşzamanlı iki PATCH'i sıraya sokar (Postgres; sqlite yok sayar).
+    # Queues up two concurrent PATCHes on the same board (Postgres; sqlite ignores it).
     locked = (PlanningBoard.query.filter_by(id=board.id)
               .with_for_update().first()) or board
 
@@ -543,22 +556,22 @@ def board_items_patch(board_key):
 
         for payload in upsert:
             if not isinstance(payload, dict):
-                raise ValueError('öğe sözlük olmalı')
+                raise ValueError('item must be an object')
             key = payload.get('item_key')
             if not isinstance(key, str) or not ITEM_KEY_RE.match(key):
-                raise ValueError('geçersiz item_key')
+                raise ValueError('invalid item_key')
             item = existing.get(key)
             creating = item is None
             if creating:
                 if len(existing) >= MAX_ITEMS_PER_BOARD:
-                    raise ValueError(f'pano en fazla {MAX_ITEMS_PER_BOARD} öğe alabilir')
+                    raise ValueError(f'board can hold at most {MAX_ITEMS_PER_BOARD} items')
                 item = PlanningItem(board_id=board.id, item_key=key)
                 db.session.add(item)
                 existing[key] = item
             else:
                 client_rev = payload.get('rev')
                 if isinstance(client_rev, int) and client_rev < (item.rev or 1):
-                    conflicts.append(key)      # son yazan kazanır, panel uyarır
+                    conflicts.append(key)      # last writer wins, panel warns
                 item.rev = (item.rev or 1) + 1
             _apply_item(item, payload, u, names, creating=creating)
             applied.append(item)
@@ -573,17 +586,18 @@ def board_items_patch(board_key):
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        return jsonify(error='öğe anahtarı çakıştı, panoyu yenileyin'), 409
+        return jsonify(error='item key conflict, refresh the board'), 409
 
-    # Pano sahibi, panosunda BAŞKASININ (yönetim) yaptığı değişikliği bilmeli
-    # (2026-08-05). Kendi panosunda çalışana bildirim YOK; yönetim panosunun
-    # sahibi yok → atlanır. Sürükleme sırasında saniyede birkaç PATCH gelebilir →
-    # 15 dk coalesce (notifications.COALESCE_MINUTES).
+    # The board owner needs to know about a change SOMEONE ELSE (management) made
+    # on their board (2026-08-05). No notification for an employee on their own
+    # board; the management board has no owner → skipped. Several PATCHes per
+    # second can arrive during dragging → 15 min coalesce
+    # (notifications.COALESCE_MINUTES).
     if locked.owner_sub and locked.owner_sub != str(u.get('sub')) and (applied or delete):
         try:
             notifications.notify_planning_changed(
-                locked.owner_sub, names.get(str(u.get('sub'))) or 'Bir yönetici')
-        except Exception:  # noqa: BLE001 — bildirim en-iyi-çaba, yazma kritik
+                locked.owner_sub, names.get(str(u.get('sub'))) or 'A manager')
+        except Exception:  # noqa: BLE001 — notification is best-effort, the write is critical
             log.exception('planlama bildirimi başarısız (board=%s)', locked.id)
 
     return jsonify(
@@ -597,28 +611,32 @@ def board_items_patch(board_key):
     )
 
 
-# --- pano görselleri (2026-07-28) ----------------------------------------
-# Panoya yapıştırılan/sürüklenen görsel SUNUCUDA saklanır (`planning_images`),
-# öğe ona `type='image'` + `extra.image={name,w,h}` ile işaret eder.
+# --- board images (2026-07-28) ----------------------------------------
+# An image pasted/dragged onto the board is stored ON THE SERVER
+# (`planning_images`), the item points to it via `type='image'` +
+# `extra.image={name,w,h}`.
 #
-# Yetkilendirme bedavaya gelir: dosyalar pano başına dizinde durduğu için her
-# iki uç da `_board_access`'ten geçer — başka panonun görselini adı bilinse
-# bile okumak mümkün değil (yol pano dizininden kurulur, isteğe göre değil).
+# Authorization comes for free: since files live in a directory per board, both
+# endpoints go through `_board_access` — even knowing the name, it's not possible
+# to read another board's image (the path is built from the board directory, not
+# from the request).
 
 @bp.post('/boards/<board_key>/images')
 def image_upload(board_key):
-    """Görsel yükle → `{name, width, height, size}`. Öğeyi panel PATCH ile yazar.
+    """Upload an image → `{name, width, height, size}`. The panel writes the item
+    via PATCH.
 
-    Yükleme ile öğe yazımı BİLEREK ayrı: yapıştırma anında dosya gider, öğe
-    normal delta akışıyla (offline kuyruk, undo, çakışma çözümü) oluşur —
-    tek uçta birleştirmek o makineyi baypas ederdi."""
+    Upload and item write are DELIBERATELY separate: the file goes out at the
+    moment of pasting, the item is created through the normal delta flow (offline
+    queue, undo, conflict resolution) — merging them into one endpoint would
+    bypass that machinery."""
     u, err = _board_access(board_key)
     if err:
         return err
     board = _get_or_create_board(board_key, u)
     f = request.files.get('file')
     if f is None or not f.filename:
-        return jsonify(error='dosya yok'), 400
+        return jsonify(error='no file provided'), 400
     try:
         meta = planning_images.store(board.id, f.read())
     except planning_images.ImageError as e:
@@ -628,15 +646,17 @@ def image_upload(board_key):
 
 @bp.get('/boards/<board_key>/images/<name>')
 def image_serve(board_key, name):
-    """Görseli servis et (oturumlu). `send_file` conditional → 304 ile ucuz."""
+    """Serve the image (session-authenticated). `send_file` conditional → cheap
+    via 304."""
     _, err = _board_access(board_key)
     if err:
         return err
     board = PlanningBoard.query.filter_by(board_key=board_key).first()
     if board is None:
-        return jsonify(error='pano bulunamadı'), 404
+        return jsonify(error='board not found'), 404
     path = planning_images.path_of(board.id, name)
     if not path:
-        return jsonify(error='görsel bulunamadı'), 404
-    # max_age uzun: ad içerik-adresli değil ama uuid → aynı ad hep aynı dosya.
+        return jsonify(error='image not found'), 404
+    # max_age is long: the name isn't content-addressed but it is a uuid → same
+    # name always means the same file.
     return send_file(path, conditional=True, max_age=31536000)

@@ -1,4 +1,4 @@
-"""Videographer businesses (video işareti) + photos uçları."""
+"""Videographer businesses (video flag) + photos endpoints."""
 import io
 
 import pytest
@@ -11,7 +11,7 @@ VG = {"sub": "3", "email": "vg@t.com", "name": "V", "role": "videographer"}
 
 @pytest.fixture
 def fake_photo_drive(monkeypatch):
-    """Fotoğraf yükleme için Drive katmanını (subfolder + upload + izin) taklit et."""
+    """Mock the Drive layer for photo upload (subfolder + upload + permission)."""
     calls = {"ensure": [], "upload": [], "grant": []}
 
     def fake_ensure(parent_id, name):
@@ -19,7 +19,7 @@ def fake_photo_drive(monkeypatch):
         return "PHOTOS_FOLDER"
 
     def fake_upload(folder_id, filename, data, mime):
-        # Gerçek uç artık akış (dosya-nesnesi) geçirir; bytes'ı da kabul et.
+        # The real endpoint now passes a stream (file object); also accept bytes.
         payload = data.read() if hasattr(data, "read") else data
         calls["upload"].append({"folder_id": folder_id, "filename": filename, "size": len(payload)})
         return {"id": f"file_{len(calls['upload'])}", "name": filename, "mimeType": mime, "size": str(len(payload))}
@@ -61,22 +61,22 @@ def test_photo_upload_designer_403(client, fake_photo_drive):
 
 
 def test_photo_upload_boyut_asimi_atlanir(client, fake_photo_drive, monkeypatch):
-    # 500 MB üstü foto: hata listesine düşer, Drive'a yüklenmez (diğerleri sürer).
+    # Photo over 500 MB: goes into the error list, not uploaded to Drive (others continue).
     import sharing
     monkeypatch.setattr(sharing, "MAX_UPLOAD_BYTES", 3)
     login_as(client, MANAGER)
     cid = _mk_client(client, drive_root="ROOT1")
-    r = _post_photo(client, cid).get_json()  # 'jpgbytes' = 8 bayt > 3
+    r = _post_photo(client, cid).get_json()  # 'jpgbytes' = 8 bytes > 3
     assert r["saved"] == [] and any("500 MB" in e for e in r["errors"])
     assert fake_photo_drive["upload"] == []
 
 
 def test_photo_upload_drive_koku_yok_400(client, fake_photo_drive):
     login_as(client, MANAGER)
-    cid = _mk_client(client)  # drive_meta yok
+    cid = _mk_client(client)  # no drive_meta
     r = _post_photo(client, cid)
     assert r.status_code == 400
-    assert fake_photo_drive["upload"] == []  # Drive'a gidilmedi
+    assert fake_photo_drive["upload"] == []  # didn't go to Drive
 
 
 def test_photo_upload_olusturur_ve_public(client, fake_photo_drive):
@@ -86,11 +86,11 @@ def test_photo_upload_olusturur_ve_public(client, fake_photo_drive):
     assert r.status_code == 201, r.get_json()
     saved = r.get_json()["saved"]
     assert len(saved) == 1 and saved[0]["file_name"] == "fotoğraf.jpg"
-    # "Çekim Fotoğrafları" alt klasörü kök altında oluşturuldu
+    # "Çekim Fotoğrafları" subfolder was created under the root
     assert fake_photo_drive["ensure"][0]["parent"] == "ROOT1"
     assert fake_photo_drive["upload"][0]["folder_id"] == "PHOTOS_FOLDER"
-    assert fake_photo_drive["grant"]  # public reader izni verildi
-    # listede görünür
+    assert fake_photo_drive["grant"]  # public reader permission was granted
+    # shows up in the list
     p = client.get(f"/api/sharing/videographer/photos?client_id={cid}").get_json()["photos"]
     assert any(x["file_name"] == "fotoğraf.jpg" for x in p)
 
@@ -122,11 +122,11 @@ def test_businesses_designer_403(client):
 def test_businesses_liste_ve_mark(client):
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "İşletme"}, headers=csrf_headers(client)).get_json()["client"]["id"]
-    # başta işaretsiz
+    # initially unmarked
     b = client.get(f"/api/sharing/videographer/businesses?week_iso={WK}").get_json()["businesses"]
     row = next(x for x in b if x["client_id"] == cid)
     assert row["has_video"] is False
-    # videografçı işaretler
+    # videographer marks it
     login_as(client, VG)
     r = client.post("/api/sharing/videographer/businesses/mark",
                     json={"client_id": cid, "week_iso": WK, "has_video": True},
@@ -148,7 +148,7 @@ def test_photos_liste(client):
     assert len(p) == 1 and p[0]["file_id"] == "PH1" and p[0]["client_name"] == "Foto Müşteri"
 
 
-# --- fotoğraf sayfası: kullanım işareti + toplu sil + zip (2026-07-19) ---
+# --- photo page: usage flag + bulk delete + zip (2026-07-19) ---
 
 def _seed_photos(cid, n=2):
     from extensions import db
@@ -176,16 +176,16 @@ def test_mark_used_designer_ve_geri_al(client):
     login_as(client, MANAGER)
     cid = _mk_client(client)
     pid = _seed_photos(cid, 1)[0]
-    # designer kullanıldı işaretler
+    # designer marks as used
     login_as(client, DESIGNER)
     r = client.post(f"/api/sharing/videographer/photos/{pid}/used",
                     json={"used": True}, headers=csrf_headers(client))
     assert r.status_code == 200 and r.get_json()["used"] is True
-    # GET ucu management/videographer; doğrulama için MANAGER'a dön
+    # GET endpoint is management/videographer; switch back to MANAGER for verification
     login_as(client, MANAGER)
     p = client.get(f"/api/sharing/videographer/photos?client_id={cid}").get_json()["photos"][0]
     assert p["used"] is True and p["used_at"]
-    # geri al (designer)
+    # undo (designer)
     login_as(client, DESIGNER)
     r2 = client.post(f"/api/sharing/videographer/photos/{pid}/used",
                      json={"used": False}, headers=csrf_headers(client))
@@ -228,7 +228,7 @@ def test_bulk_delete_videographer_yetkisiz_atlar(client):
     login_as(client, MANAGER)
     cid = _mk_client(client)
     ids = _seed_photos(cid, 2)
-    # atanmamış videografçı → _can_shoot False → hiçbiri silinmez
+    # unassigned videographer → _can_shoot False → nothing gets deleted
     login_as(client, VG)
     r = client.post("/api/sharing/videographer/photos/bulk-delete",
                     json={"ids": ids}, headers=csrf_headers(client)).get_json()
@@ -269,7 +269,7 @@ def test_photo_rename(client, monkeypatch):
     r = client.post(f"/api/sharing/videographer/photos/{pid}/rename",
                     json={"name": "düğün çekimi.jpg"}, headers=csrf_headers(client))
     assert r.status_code == 200 and r.get_json()["file_name"] == "düğün çekimi.jpg"
-    assert calls and calls[0][1] == "düğün çekimi.jpg"  # Drive'da da adlandırıldı
+    assert calls and calls[0][1] == "düğün çekimi.jpg"  # also renamed in Drive
     p = client.get(f"/api/sharing/videographer/photos?client_id={cid}").get_json()["photos"][0]
     assert p["file_name"] == "düğün çekimi.jpg"
 
@@ -279,10 +279,10 @@ def test_photo_rename_uzanti_korunur(client, monkeypatch):
     cid = _mk_client(client)
     pid = _seed_photos(cid, 1)[0]  # cekim0.jpg
     import drive_gateway
-    monkeypatch.setattr(drive_gateway, "available", lambda: False)  # Drive atla, DB-only
+    monkeypatch.setattr(drive_gateway, "available", lambda: False)  # skip Drive, DB-only
     r = client.post(f"/api/sharing/videographer/photos/{pid}/rename",
                     json={"name": "yeni ad"}, headers=csrf_headers(client))
-    assert r.get_json()["file_name"] == "yeni ad.jpg"  # orijinal uzantı eklendi
+    assert r.get_json()["file_name"] == "yeni ad.jpg"  # original extension appended
 
 
 def test_photo_rename_bos_ad_400(client):
@@ -298,7 +298,7 @@ def test_photo_rename_videographer_yetkisiz_403(client):
     login_as(client, MANAGER)
     cid = _mk_client(client)
     pid = _seed_photos(cid, 1)[0]
-    login_as(client, VG)  # atanmamış videografçı
+    login_as(client, VG)  # unassigned videographer
     r = client.post(f"/api/sharing/videographer/photos/{pid}/rename",
                     json={"name": "x.jpg"}, headers=csrf_headers(client))
     assert r.status_code == 403
@@ -316,13 +316,13 @@ def test_photo_download_tekil(client, monkeypatch):
     assert "attachment" in r.headers["Content-Disposition"]
 
 
-# --- Designer erişimi (tasarımcı board çekim fotoğrafları modalı, tam aksiyon) ---
+# --- Designer access (designer board shoot-photos modal, full action) ---
 
 def test_photos_liste_designer_gorur(client):
     login_as(client, MANAGER)
     cid = _mk_client(client)
     _seed_photos(cid, 2)
-    login_as(client, DESIGNER)  # atanmamış designer bile görür
+    login_as(client, DESIGNER)  # even an unassigned designer can see it
     p = client.get(f"/api/sharing/videographer/photos?client_id={cid}").get_json()["photos"]
     assert len(p) == 2
 
@@ -346,7 +346,7 @@ def test_download_zip_designer(client, monkeypatch):
     import drive_gateway
     monkeypatch.setattr(drive_gateway, "available", lambda: True)
     monkeypatch.setattr(drive_gateway, "download_file", lambda fid: b"IMG-" + fid.encode())
-    login_as(client, DESIGNER)  # atanmamış designer da zip indirebilir
+    login_as(client, DESIGNER)  # an unassigned designer can also download the zip
     r = client.post("/api/sharing/videographer/photos/download-zip",
                     json={"ids": ids}, headers=csrf_headers(client))
     assert r.status_code == 200 and r.mimetype == "application/zip"
@@ -358,7 +358,7 @@ def test_photos_liste_pending_403(client):
     assert client.get("/api/sharing/videographer/photos").status_code == 403
 
 
-# --- Faz 5: videographer öneri botu (step 17) ---
+# --- Phase 5: videographer suggestion bot (step 17) ---
 
 def _mk_idea(cid, reason="ilham veren öneri", shoot_idea="mutfak çekimi",
              link="https://youtube.com/watch?v=x", status="new"):
@@ -372,8 +372,8 @@ def _mk_idea(cid, reason="ilham veren öneri", shoot_idea="mutfak çekimi",
 
 
 def test_ideas_generate_enqueue_dedup(client):
-    """Öneri üretimini elle tetikle → videographer_ideas job'u (müşteri-tetikli). Dedup:
-    aynı müşteri için üst üste basmak tek aktif job (dedup_key), düşük priority (batch)."""
+    """Manually trigger idea generation → a videographer_ideas job (client-triggered). Dedup:
+    pressing repeatedly for the same client results in a single active job (dedup_key), low priority (batch)."""
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "Öneri Kafe"},
                       headers=csrf_headers(client)).get_json()["client"]["id"]
@@ -382,7 +382,7 @@ def test_ideas_generate_enqueue_dedup(client):
     assert r1.status_code == 202
     j1 = r1.get_json()["job"]
     assert j1["type"] == "videographer_ideas"
-    # ikinci tetik → aynı job (dedup)
+    # second trigger → same job (dedup)
     r2 = client.post("/api/sharing/videographer/ideas/generate",
                      json={"client_id": cid}, headers=csrf_headers(client))
     assert r2.get_json()["job"]["id"] == j1["id"]
@@ -392,7 +392,7 @@ def test_ideas_generate_enqueue_dedup(client):
 
 
 def test_ideas_generate_designer_403(client):
-    """Designer öneri üretemez (yalnız management + videographer)."""
+    """Designer cannot generate ideas (management + videographer only)."""
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "K"},
                       headers=csrf_headers(client)).get_json()["client"]["id"]
@@ -403,7 +403,7 @@ def test_ideas_generate_designer_403(client):
 
 
 def test_ideas_list(client):
-    """Öneri listesi: müşteriye ait 'new' kartlar döner (en yeni önce)."""
+    """Idea list: returns the client's 'new' cards (newest first)."""
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "Liste Kafe"},
                       headers=csrf_headers(client)).get_json()["client"]["id"]
@@ -415,8 +415,8 @@ def test_ideas_list(client):
 
 
 def test_ideas_like_cekim_listesine_ekler(client):
-    """Un-gameable: "beğen" → ilgili ÇEKİM LİSTESİ kaydı (ShootTask) oluşur ve öneri
-    status='accepted' olur (çekim planı domain'i — useShootMutations yolu)."""
+    """Un-gameable: "like" → creates the corresponding SHOOT LIST record (ShootTask) and the idea's
+    status becomes 'accepted' (shoot plan domain — useShootMutations path)."""
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "Beğen Kafe"},
                       headers=csrf_headers(client)).get_json()["client"]["id"]
@@ -427,16 +427,16 @@ def test_ideas_like_cekim_listesine_ekler(client):
     r = client.post(f"/api/sharing/videographer/ideas/{idea.id}/like",
                     json={"scheduled_date": "2026-05-20"}, headers=csrf_headers(client))
     assert r.status_code == 201, r.get_json()
-    # çekim listesi kaydı oluştu (öneri çekim fikri task'a taşındı)
+    # shoot list record was created (the idea's shoot concept was moved into a task)
     tasks = ShootTask.query.filter_by(client_id=cid).all()
     assert len(tasks) == 1
     assert tasks[0].title == "bahar menüsü reel"
-    # öneri kabul edildi olarak işaretlendi
+    # idea was marked as accepted
     assert db.session.get(VideographerIdea, idea.id).status == "accepted"
 
 
 def test_ideas_skip(client):
-    """"atla" → öneri status='skipped' (listeden düşer)."""
+    """"skip" → idea status='skipped' (drops out of the list)."""
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "Atla Kafe"},
                       headers=csrf_headers(client)).get_json()["client"]["id"]
@@ -447,16 +447,16 @@ def test_ideas_skip(client):
     from extensions import db
     from models_sharing import VideographerIdea
     assert db.session.get(VideographerIdea, idea.id).status == "skipped"
-    # 'new' filtreli listede artık görünmez
+    # no longer shows up in the 'new'-filtered list
     ideas = client.get(f"/api/sharing/videographer/ideas?client_id={cid}").get_json()["ideas"]
     assert ideas == []
 
 
-# --- lokal kopya (2026-07-30): /m/<file_id> kalıcı linki için şart ---
+# --- local copy (2026-07-30): required for the /m/<file_id> permanent link ---
 
 def test_photo_upload_LOKAL_KOPYA_birakir(client, fake_photo_drive):
-    """Foto yüklemesi artık media_store'a da yazar (öncesinde doğrudan Drive'a
-    akıtılıyordu → kalıcı link ilk günden Drive'a düşerdi)."""
+    """Photo upload now also writes to media_store (previously it streamed straight to
+    Drive → the permanent link would hit Drive from day one)."""
     import media_store
     login_as(client, MANAGER)
     cid = _mk_client(client, drive_root="ROOT1")
@@ -467,8 +467,8 @@ def test_photo_upload_LOKAL_KOPYA_birakir(client, fake_photo_drive):
 
 
 def test_photo_upload_lokal_kopya_ICERIGI_dogru(client, fake_photo_drive):
-    """Un-gameable: dosya yalnız var olmakla kalmayıp doğru baytları taşımalı —
-    `stage` akışı Drive yüklemesiyle paylaştığı için içerik bozulabilirdi."""
+    """Un-gameable: the file must not just exist but carry the correct bytes —
+    content could get corrupted since the `stage` flow is shared with the Drive upload."""
     import media_store
     login_as(client, MANAGER)
     cid = _mk_client(client, drive_root="ROOT1")
@@ -478,8 +478,8 @@ def test_photo_upload_lokal_kopya_ICERIGI_dogru(client, fake_photo_drive):
 
 
 def test_photo_upload_DRIVE_yuklemesi_bozulmadi(client, fake_photo_drive):
-    """Karşıt kontrol: lokal kopya eklenirken Drive'a giden baytlar eksilmemeli
-    (stage akışı tükettiği için dosya Drive'a 0 bayt gidebilirdi)."""
+    """Counter-check: adding the local copy must not shrink the bytes going to Drive
+    (the file could end up going to Drive as 0 bytes since the stage flow consumes it)."""
     login_as(client, MANAGER)
     cid = _mk_client(client, drive_root="ROOT1")
     _post_photo(client, cid)
@@ -488,7 +488,7 @@ def test_photo_upload_DRIVE_yuklemesi_bozulmadi(client, fake_photo_drive):
 
 def test_photo_upload_drive_hatasinda_gecici_kopya_birakmaz(client, fake_photo_drive,
                                                             monkeypatch):
-    """Drive patlarsa `stage` geçici dosyası temizlenmeli (disk sızıntısı yok)."""
+    """If Drive blows up, the `stage` temp file must be cleaned up (no disk leak)."""
     import drive_gateway
     import media_store
 
@@ -500,7 +500,7 @@ def test_photo_upload_drive_hatasinda_gecici_kopya_birakmaz(client, fake_photo_d
     import os
     login_as(client, MANAGER)
     cid = _mk_client(client, drive_root="ROOT1")
-    # originals/ dizinini öğren ve sondayı hemen temizle (artık bırakma).
+    # find out the originals/ directory and immediately clean up the probe (leave nothing behind).
     probe = media_store.stage(io.BytesIO(b"x"))
     orig_dir = os.path.dirname(probe)
     media_store.discard(probe)
@@ -508,8 +508,8 @@ def test_photo_upload_drive_hatasinda_gecici_kopya_birakmaz(client, fake_photo_d
 
     r = _post_photo(client, cid)
     assert r.status_code == 400 and r.get_json()["saved"] == []
-    # Yükleme patladı → `discard` çağrıldı, geriye .tmp- artığı KALMADI. (has_original
-    # ile bakılamaz: media_store oturum boyu paylaşımlı, sahte Drive her testte
-    # 'file_1' döndürdüğü için önceki testlerin kopyası orada duruyor.)
+    # Upload blew up → `discard` was called, no .tmp- leftover remained. (Can't check
+    # with has_original: media_store is shared across the session, and since the fake Drive
+    # returns 'file_1' in every test, previous tests' copies are still sitting there.)
     sonra = len(glob.glob(os.path.join(orig_dir, ".tmp-*")))
     assert sonra == once, "geçici dosya temizlenmedi (disk sızıntısı)"

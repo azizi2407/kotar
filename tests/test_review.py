@@ -1,8 +1,8 @@
-"""Public onay sayfası (/review/<token>) — auth'suz, token korumalı.
+"""Public approval page (/review/<token>) — no auth, token-protected.
 
-SÖZLEŞME (proje sahibi 2026-07-24): sayfa sharing board paylaşımlarını DEĞİL, tasarımcının
-o hafta yüklediği **post + video** dosyalarını (`card_uploads`) gösterir; caption/
-hashtag gönderilmez; personel (yönetim/tasarımcı) içerikleri sayfadan kaldırabilir.
+CONTRACT (project owner 2026-07-24): the page does NOT show sharing board shares —
+it shows the **post + video** files (`card_uploads`) the designer uploaded that week;
+caption/hashtag are not sent; staff (management/designer) can remove content from the page.
 """
 import pytest
 from conftest import DESIGNER, MANAGER, login_as
@@ -23,8 +23,8 @@ def _mk_upload(cid, file_id, category="post", name=None, week=WK):
 
 @pytest.fixture
 def setup(client):
-    """management ile müşteri + 1 post + 1 video yüklemesi + review-link kur.
-    Döner: (token, client_id, post_upload_id, video_upload_id)."""
+    """Set up a client + 1 post + 1 video upload + review-link as management.
+    Returns: (token, client_id, post_upload_id, video_upload_id)."""
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "Review Müşteri"},
                       headers=csrf_headers(client)).get_json()["client"]["id"]
@@ -34,11 +34,11 @@ def setup(client):
                         json={"client_id": cid, "week_iso": WK},
                         headers=csrf_headers(client)).get_json()["token"]
     with client.session_transaction() as s:
-        s.clear()  # public uçlar oturumsuz test edilir
+        s.clear()  # public endpoints are tested without a session
     return token, cid, post_id, video_id
 
 
-# --- token güvenliği ---------------------------------------------------------
+# --- token security -----------------------------------------------------------
 def test_gecersiz_token_404(client):
     assert client.get("/review/yok/shares").status_code == 404
 
@@ -59,9 +59,9 @@ def test_review_sayfasi_html(client, setup):
     assert "noindex" in r.headers.get("X-Robots-Tag", "")
 
 
-# --- içerik kaynağı: YÜKLEMELER ---------------------------------------------
+# --- content source: UPLOADS ------------------------------------------------
 def test_yuklemeler_gosterilir(client, setup):
-    """Sayfa tasarımcının o hafta yüklediklerini gösterir."""
+    """The page shows what the designer uploaded that week."""
     token, _, post_id, video_id = setup
     d = client.get(f"/review/{token}/shares").get_json()
     ids = [s["id"] for s in d["shares"]]
@@ -70,8 +70,8 @@ def test_yuklemeler_gosterilir(client, setup):
 
 
 def test_paylasim_degil_yukleme_gosterilir(client, setup):
-    """KRİTİK: sharing board'da 'paylaşıldı' işaretlenen Share'ler sayfayı ETKİLEMEZ —
-    kaynak yalnız card_uploads (proje sahibi 2026-07-24)."""
+    """CRITICAL: Shares marked 'published' on the sharing board do NOT affect the page —
+    the only source is card_uploads (project owner 2026-07-24)."""
     token, cid, post_id, video_id = setup
     login_as(client, MANAGER)
     sh = client.post("/api/sharing/shares",
@@ -81,11 +81,11 @@ def test_paylasim_degil_yukleme_gosterilir(client, setup):
     with client.session_transaction() as s:
         s.clear()
     ids = [s["id"] for s in client.get(f"/review/{token}/shares").get_json()["shares"]]
-    assert sorted(ids) == sorted([post_id, video_id])  # share eklenmedi/çıkarmadı
+    assert sorted(ids) == sorted([post_id, video_id])  # share was not added/removed
 
 
 def test_story_ve_linkedin_gizli(client, setup):
-    """Yalnız post + video görünür."""
+    """Only post + video are visible."""
     token, cid, post_id, video_id = setup
     _mk_upload(cid, "st1", "story")
     _mk_upload(cid, "li1", "linkedin")
@@ -112,7 +112,7 @@ def test_baska_hafta_gorunmez(client, setup):
 
 
 def test_caption_hashtag_musteriye_gonderilmez(client, setup):
-    """Sayfa yalnız görsel/video gösterir — caption/hashtag ne JSON'da ne şablonda."""
+    """The page only shows image/video — caption/hashtag are neither in JSON nor in the template."""
     token, _, _, _ = setup
     r = client.get(f"/review/{token}/shares")
     assert all("caption_text" not in s and "hashtag_text" not in s
@@ -133,9 +133,9 @@ def test_video_drive_linki_verilir_gorsele_verilmez(client, setup):
     assert items[post_id]["drive_url"] is None
 
 
-# --- personel: sayfadan kaldırma --------------------------------------------
+# --- staff: removing from the page ------------------------------------------
 def test_musteri_kaldirma_bilgisi_gormez(client, setup):
-    """Oturumsuz (müşteri) görünümde can_manage=false ve excluded alanı yok."""
+    """In the sessionless (client) view, can_manage=false and there's no excluded field."""
     d = client.get(f"/review/{setup[0]}/shares").get_json()
     assert d["can_manage"] is False
     assert all("excluded" not in s for s in d["shares"])
@@ -160,7 +160,7 @@ def test_yonetim_ve_tasarimci_kaldirabilir(client, setup, role):
     with client.session_transaction() as s:
         s.clear()
     ids = [s["id"] for s in client.get(f"/review/{token}/shares").get_json()["shares"]]
-    assert ids == [video_id]  # müşteri artık görmüyor
+    assert ids == [video_id]  # client no longer sees it
 
 
 def test_kaldirma_geri_alinabilir(client, setup):
@@ -168,7 +168,7 @@ def test_kaldirma_geri_alinabilir(client, setup):
     login_as(client, MANAGER)
     client.post(f"/review/{token}/exclude", json={"upload_id": post_id, "excluded": True},
                 headers=csrf_headers(client))
-    # personel görünümünde kaldırılmış olarak durur
+    # stays marked as removed in the staff view
     items = {s["id"]: s for s in client.get(f"/review/{token}/shares").get_json()["shares"]}
     assert items[post_id]["excluded"] is True
     client.post(f"/review/{token}/exclude", json={"upload_id": post_id, "excluded": False},
@@ -180,7 +180,7 @@ def test_kaldirma_geri_alinabilir(client, setup):
 
 
 def test_kaldirma_yuklemeyi_silmez(client, setup):
-    """Yıkıcı değil: card_uploads satırı durur (board'da görünmeye devam eder)."""
+    """Not destructive: the card_uploads row remains (still visible on the board)."""
     from extensions import db
     from models_sharing import CardUpload
     token, _, post_id, _ = setup
@@ -200,7 +200,7 @@ def test_kaldirma_oturumsuz_401(client, setup):
 def test_kaldirma_csrfsiz_403(client, setup):
     token, _, post_id, _ = setup
     login_as(client, MANAGER)
-    client.get("/api/session")  # token üretilsin ama header'a KOYMA
+    client.get("/api/session")  # let the token be generated but do NOT put it in the header
     r = client.post(f"/review/{token}/exclude", json={"upload_id": post_id})
     assert r.status_code == 403
 
@@ -216,7 +216,7 @@ def test_kaldirilan_icerige_onay_verilemez(client, setup):
     assert r.status_code == 404
 
 
-# --- onay / revize (yükleme bazında) ----------------------------------------
+# --- approve / revise (per upload) --------------------------------------------
 def test_action_approve(client, setup):
     from extensions import db
     from models_sharing import UploadReview
@@ -240,7 +240,7 @@ def test_action_revise_not_zorunlu(client, setup):
 
 
 def test_action_karar_guncellenir(client, setup):
-    """Müşteri fikrini değiştirirse tek satır güncellenir (yükleme başına tek karar)."""
+    """If the client changes their mind, a single row is updated (one decision per upload)."""
     from models_sharing import UploadReview
     token, _, post_id, _ = setup
     client.post(f"/review/{token}/action", json={"upload_id": post_id, "action": "approve"})
@@ -258,7 +258,7 @@ def test_action_sonrasi_sayfada_durum_gorunur(client, setup):
 
 
 def test_action_bildirim_yazar(client, setup):
-    """notify_client_review çağrılır (yönetime panel-içi bildirim)."""
+    """notify_client_review is called (in-panel notification to management)."""
     from extensions import db
     from models import Notification, UserRef
     token, _, post_id, _ = setup
@@ -279,14 +279,14 @@ def test_action_baska_haftadaki_yukleme_reddedilir(client, setup):
 
 
 def test_action_story_yuklemesi_reddedilir(client, setup):
-    """Sayfada görünmeyen kategori üzerinden karar verilemez."""
+    """No decision can be made via a category not shown on the page."""
     token, cid, _, _ = setup
     st = _mk_upload(cid, "st9", "story")
     r = client.post(f"/review/{token}/action", json={"upload_id": st, "action": "approve"})
     assert r.status_code == 404
 
 
-# --- medya proxy (kapsam + cache) -------------------------------------------
+# --- media proxy (scope + cache) ----------------------------------------------
 def test_media_kapsam_disi_file_id_404(client, setup):
     assert client.get(f"/review/{setup[0]}/media/BASKA").status_code == 404
 
@@ -309,11 +309,11 @@ def test_media_full_s2048_ayri_cachelenir(client, setup, monkeypatch):
     assert db.session.get(DriveThumbnail, ("f1", 600)) is not None
     assert db.session.get(DriveThumbnail, ("f1", 2048)) is not None
     client.get(f"/review/{token}/media/f1?size=full")
-    assert calls == [600, 2048]  # cache'ten
+    assert calls == [600, 2048]  # from cache
 
 
 def test_media_gecersiz_size_thumba_duser(client, setup, monkeypatch):
-    """Keyfi ?size= genişlik enjeksiyonuna dönüşmemeli."""
+    """Arbitrary ?size= must not turn into width injection."""
     import drive_gateway
     calls = []
     monkeypatch.setattr(drive_gateway, "available", lambda: True)
@@ -324,7 +324,7 @@ def test_media_gecersiz_size_thumba_duser(client, setup, monkeypatch):
 
 
 def test_kaldirilan_icerigin_medyasi_personele_acik_kalir(client, setup, monkeypatch):
-    """Personel geri alma önizlemesi görebilsin diye kaldırılanın medyası 404 olmaz."""
+    """The media of a removed item does not 404, so staff can preview undoing the removal."""
     import drive_gateway
     token, _, post_id, _ = setup
     monkeypatch.setattr(drive_gateway, "available", lambda: True)
@@ -335,7 +335,7 @@ def test_kaldirilan_icerigin_medyasi_personele_acik_kalir(client, setup, monkeyp
     assert client.get(f"/review/{token}/media/f1").status_code == 200
 
 
-# --- video akışı (lokal 21 gün penceresi) -----------------------------------
+# --- video flow (local 21-day window) -----------------------------------------
 def test_shares_video_url_lokalde_var(client, setup, monkeypatch):
     import media_store
     token, _, _, video_id = setup
@@ -362,7 +362,7 @@ def test_stream_lokal_yoksa_404(client, setup, monkeypatch):
     assert client.get(f"/review/{setup[0]}/stream/vid9").status_code == 404
 
 
-# --- onay linki içerik sayısı (tasarımcı mesajının tekil/çoğul kaynağı) ------
+# --- approval link content count (source of singular/plural in designer's message) ---
 def test_share_count_tekil(client):
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "Sayım 1"},
@@ -379,14 +379,14 @@ def test_share_count_cogul(client):
                       headers=csrf_headers(client)).get_json()["client"]["id"]
     _mk_upload(cid, "a1", "post")
     _mk_upload(cid, "a2", "video")
-    _mk_upload(cid, "a3", "story")  # sayılmaz
+    _mk_upload(cid, "a3", "story")  # not counted
     r = client.post("/api/sharing/review-link", json={"client_id": cid, "week_iso": WK},
                     headers=csrf_headers(client))
     assert r.get_json()["share_count"] == 2
 
 
 def test_share_count_kaldirilan_haric(client, setup):
-    """Sayfadan kaldırılan içerik tekil/çoğul sayımına girmez."""
+    """Content removed from the page is not included in the singular/plural count."""
     token, cid, post_id, _ = setup
     login_as(client, MANAGER)
     client.post(f"/review/{token}/exclude", json={"upload_id": post_id, "excluded": True},
@@ -397,7 +397,7 @@ def test_share_count_kaldirilan_haric(client, setup):
 
 
 def test_share_count_sayfayla_ayni(client, setup):
-    """KRİTİK: mesajdaki sayı = müşterinin sayfada gördüğü içerik sayısı."""
+    """CRITICAL: the number in the message = the number of items the client sees on the page."""
     token, cid, _, _ = setup
     page_count = len(client.get(f"/review/{token}/shares").get_json()["shares"])
     login_as(client, MANAGER)
@@ -407,10 +407,10 @@ def test_share_count_sayfayla_ayni(client, setup):
     assert link_count == page_count
 
 
-# --- ÖN-ONAY akışı (iç kapı, 2026-07-24) -------------------------------------
+# --- PRE-APPROVAL flow (internal gate, 2026-07-24) -----------------------------
 @pytest.fixture
 def pre_setup(client, setup):
-    """setup'a ek olarak ön-onay linki üret. Döner: (pre_token, token, cid, post, video)."""
+    """In addition to setup, generate a pre-approval link. Returns: (pre_token, token, cid, post, video)."""
     token, cid, post_id, video_id = setup
     login_as(client, MANAGER)
     pre = client.post("/api/sharing/pre-approval-link",
@@ -435,7 +435,7 @@ def test_on_onay_linki_musteri_linkinden_farkli(client, pre_setup):
 
 
 def test_on_onay_sayfasi_oturumsuz_403(client, pre_setup):
-    """Ön-onay linki iç akış — müşteri/yabancı göremez."""
+    """Pre-approval link is an internal flow — client/outsiders cannot see it."""
     r = client.get(f"/review/{pre_setup[0]}/shares")
     assert r.status_code == 403
 
@@ -454,7 +454,7 @@ def test_on_onay_tasarimci_gorur_karar_veremez(client, pre_setup):
     login_as(client, DESIGNER)
     d = client.get(f"/review/{pre}/shares").get_json()
     assert d["mode"] == "pre" and d["can_decide"] is False
-    assert len(d["shares"]) == 2  # durumu görebiliyor
+    assert len(d["shares"]) == 2  # can see the status
     r = client.post(f"/review/{pre}/action", json={"upload_id": post_id, "action": "approve"})
     assert r.status_code == 403
 
@@ -470,7 +470,7 @@ def test_on_onay_revize_not_zorunlu(client, pre_setup):
 
 
 def test_on_onay_revize_bildirim_yazar(client, pre_setup):
-    """Revizyonda tasarımcı/ekip bilgilendirilir."""
+    """On revision, the designer/team is notified."""
     from extensions import db
     from models import Notification, UserRef
     pre, _, _, post_id, _ = pre_setup
@@ -483,23 +483,23 @@ def test_on_onay_revize_bildirim_yazar(client, pre_setup):
     assert Notification.query.filter_by(kind="pre_approval").count() >= 1
 
 
-# --- KADEMELİ KAPI ------------------------------------------------------------
+# --- GRADUAL GATE ---------------------------------------------------------------
 def test_kapi_karar_yoksa_hepsi_gorunur(client, pre_setup):
-    """Hiç ön-onay kararı yoksa müşteri eskisi gibi hepsini görür (geriye uyum)."""
+    """If there's no pre-approval decision at all, the client sees everything as before (backward compatibility)."""
     _, token, _, post_id, video_id = pre_setup
     ids = [s["id"] for s in client.get(f"/review/{token}/shares").get_json()["shares"]]
     assert sorted(ids) == sorted([post_id, video_id])
 
 
 def test_kapi_karar_varsa_yalniz_onayli_gorunur(client, pre_setup):
-    """Bir karar verildiği anda kapı devreye girer: müşteri yalnız ön-onaylıyı görür."""
+    """As soon as one decision is made, the gate kicks in: the client sees only the pre-approved item."""
     pre, token, _, post_id, video_id = pre_setup
     login_as(client, MANAGER)
     client.post(f"/review/{pre}/action", json={"upload_id": post_id, "action": "approve"})
     with client.session_transaction() as s:
         s.clear()
     ids = [s["id"] for s in client.get(f"/review/{token}/shares").get_json()["shares"]]
-    assert ids == [post_id]  # video henüz ön-onaylanmadı → müşteriye gitmez
+    assert ids == [post_id]  # video not yet pre-approved → doesn't go to the client
 
 
 def test_kapi_revize_istenen_musteriye_gitmez(client, pre_setup):
@@ -515,7 +515,7 @@ def test_kapi_revize_istenen_musteriye_gitmez(client, pre_setup):
 
 
 def test_kapi_share_count_da_uygular(client, pre_setup):
-    """Tekil/çoğul sayımı da kapıya uyar (mesaj sayfayla tutarlı kalır)."""
+    """The singular/plural count also respects the gate (message stays consistent with the page)."""
     pre, _, cid, post_id, _ = pre_setup
     login_as(client, MANAGER)
     client.post(f"/review/{pre}/action", json={"upload_id": post_id, "action": "approve"})
@@ -525,7 +525,7 @@ def test_kapi_share_count_da_uygular(client, pre_setup):
 
 
 def test_on_onay_sayfasi_kapidan_etkilenmez(client, pre_setup):
-    """Yönetici ön-onay sayfasında HER ŞEYİ görmeye devam eder (kapı uygulanmaz)."""
+    """The manager keeps seeing EVERYTHING on the pre-approval page (gate not applied)."""
     pre, _, _, post_id, _ = pre_setup
     login_as(client, MANAGER)
     client.post(f"/review/{pre}/action",

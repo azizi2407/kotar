@@ -42,13 +42,13 @@ export interface WeekFolder {
   link: string | null
 }
 
-// Rol slotu -> SSO sub (user_id)
+// Role slot -> SSO sub (user_id)
 export type TeamAssignments = Record<string, string>
 
-// `?:` işaretli alanlar YALNIZ management'a döner — backend `_client_json()`
-// üretim rolleri için bu anahtarları yanıta hiç koymaz (ticari + iletişim +
-// iç not + public token). Tip bu yüzden optional; `undefined` "yetkin yok"
-// demek, `null` "boş" demek.
+// Fields marked `?:` are ONLY returned to management — the backend's `_client_json()`
+// never puts these keys in the response for production roles (commercial + contact
+// info + internal notes + public token). That's why the type is optional; `undefined`
+// means "you don't have access", `null` means "empty".
 export interface ClientListItem {
   id: number
   name: string

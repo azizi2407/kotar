@@ -1,18 +1,21 @@
-"""K9 müşteriler-arası benzerlik kontrolü enqueue script'i — hedef hafta için TEK
-`similarity` job'u kuyruğa atar. systemd `--user` (proje sahibi) `agency-similarity.timer` bunu
-çağırır (her Salı 04:30 — brief run'ından 1 saat sonra); kuyruktan `ai_worker.similarity_handler` çeker.
+"""Enqueue script for the K9 cross-client similarity check — pushes a SINGLE
+`similarity` job to the queue for the target week. systemd `--user` (project
+owner) `agency-similarity.timer` calls this (every Tuesday 04:30 — 1 hour
+after the brief run); `ai_worker.similarity_handler` picks it up from the queue.
 
-Hedef hafta = gerçek hafta + 2 — brief fan-out ile AYNI mantık (`enqueue_briefs._target_week_iso`
-yeniden kullanılır → tek kaynak). O haftanın üretilmiş brief'leri müşteriler arası
-karşılaştırılır (brief run bu hafta için brief'leri zaten üretmiş olur).
+Target week = actual week + 2 — the SAME logic as the brief fan-out
+(`enqueue_briefs._target_week_iso` is reused → single source of truth). That
+week's generated briefs are compared across clients (the brief run will
+already have generated briefs for that week).
 
-Dedup: aynı hafta için aktif (queued|running) bir job zaten varsa YENİ INSERT yapılmaz
-(`dedup_key=similarity:{week}`) — timer + elle-tetik üst üste basarsa tek job. Düşük
-priority (0 = batch) → interaktif caption'ı (priority=10) bloklamaz.
+Dedup: if an active (queued|running) job already exists for the same week, NO
+NEW INSERT happens (`dedup_key=similarity:{week}`) — if the timer + a manual
+trigger both fire, one job. Low priority (0 = batch) → doesn't block
+interactive caption generation (priority=10).
 
-`run()` DB'ye yazan test edilebilir çekirdek; testler doğrudan çağırır.
+`run()` is the testable core that writes to the DB; tests call it directly.
 
-Kullanım:
+Usage:
     venv/bin/python scripts/enqueue_similarity.py --created-by systemd-timer
     venv/bin/python scripts/enqueue_similarity.py --week-iso 2026-W25
 """
@@ -22,18 +25,18 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import app  # noqa: E402  (env yüklü olmalı)
+from app import app  # noqa: E402  (env must be loaded)
 import jobqueue  # noqa: E402
-from scripts.enqueue_briefs import _target_week_iso  # noqa: E402  (+2 mantığı yeniden kullan)
+from scripts.enqueue_briefs import _target_week_iso  # noqa: E402  (reuse the +2 logic)
 
 
 def run(week_iso=None, created_by=None):
-    """Hedef hafta (yoksa gerçek hafta + 2, brief run'la aynı) için bir `similarity`
-    Job'u oluşturur/döner. dedup_key ile aynı hafta iki kez atılırsa tek job kalır
-    (aktif job döner). Düşük priority (0 = batch).
+    """Creates/returns a `similarity` Job for the target week (defaults to
+    actual week + 2, same as the brief run). If the same week is submitted
+    twice, dedup_key keeps it to one job (returns the active job). Low priority (0 = batch).
 
-    NOT: app context AÇMAZ — çağıranın sorumluluğu (bkz. `main()`); testler conftest'in
-    autouse context'i içinde doğrudan çağırır (bkz. enqueue_ops_digest.py)."""
+    NOTE: does NOT open an app context — that's the caller's responsibility
+    (see `main()`); tests call it directly within conftest's autouse context (see enqueue_ops_digest.py)."""
     target = week_iso or _target_week_iso()
     return jobqueue.enqueue('similarity', {'week_iso': target}, priority=0,
                             dedup_key=f'similarity:{target}', created_by=created_by)

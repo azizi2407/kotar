@@ -1,12 +1,12 @@
-"""Pytest altyapısı — agency paneli.
+"""Pytest infrastructure — agency panel.
 
-KRİTİK: app.py import edilir edilmez create_app() çalışır ve env okur; bu yüzden
-env değişkenleri app import EDİLMEDEN ÖNCE, modül seviyesinde set edilir.
-Testler gerçek Postgres'e/ağa dokunmaz (tempfile sqlite). AUTH_MODE=local (OIDC
-discovery ağa çıkardığı için testlerde kullanılmaz — bkz. sso_client.OIDCClient):
-oturum, session'a doğrudan user yazılarak taklit edilir (login_as helper'ı).
-`AUTH_MODE=oidc` yolunu (admin_api sso_admin proxy'si) egzersiz eden testler
-kendi içinde `monkeypatch.setenv('AUTH_MODE', 'oidc')` yapar — bkz. test_admin_api.py.
+CRITICAL: create_app() runs as soon as app.py is imported, and it reads env; so
+env variables are set at module level, BEFORE the app is imported.
+Tests never touch the real Postgres/network (tempfile sqlite). AUTH_MODE=local (OIDC
+discovery is not used in tests because it reaches the network — see sso_client.OIDCClient):
+the session is faked by writing the user directly into the session (the login_as helper).
+Tests that exercise the `AUTH_MODE=oidc` path (admin_api's sso_admin proxy)
+do their own `monkeypatch.setenv('AUTH_MODE', 'oidc')` — see test_admin_api.py.
 """
 import atexit
 import os
@@ -15,7 +15,7 @@ import tempfile
 
 import pytest
 
-# --- App import'undan ÖNCE izole ortam (modül seviyesi) ---
+# --- Isolated environment BEFORE app import (module level) ---
 _TEST_DIR = tempfile.mkdtemp(prefix="agency-test-")
 atexit.register(shutil.rmtree, _TEST_DIR, ignore_errors=True)
 os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(_TEST_DIR, "test.db")
@@ -24,11 +24,11 @@ os.environ["SECRET_KEY"] = "test-secret-key"
 os.environ["AUTH_MODE"] = "local"
 os.environ["IMG_BUCKET_DIR"] = os.path.join(_TEST_DIR, "img-bucket")
 os.environ["MEDIA_STORE_DIR"] = os.path.join(_TEST_DIR, "media")
-# Mail modülü testleri için sabit Fernet anahtarı (crypto/service/api). test_mail_crypto
-# anahtar-yok senaryosunu kendi monkeypatch/reload'ıyla ayrıca kurar.
+# Fixed Fernet key for mail module tests (crypto/service/api). test_mail_crypto
+# sets up the no-key scenario separately with its own monkeypatch/reload.
 os.environ["MAIL_ENC_KEY"] = "aTFslVpR-SPzeI1ekN9dl4g3EEBoInuRuVxw5TIVCuo="
-# Impersonation/kullanıcı yönetimi testleri bu adresi superadmin sayar (bkz. sharing.py
-# OWNER_EMAIL ve app.py SUPERADMIN_EMAILS varsayılanı — prod'da boş, burada testler için sabit).
+# Impersonation/user-management tests treat this address as superadmin (see sharing.py's
+# OWNER_EMAIL and app.py's SUPERADMIN_EMAILS default — empty in prod, fixed here for tests).
 os.environ["SUPERADMIN_EMAILS"] = "superadmin@example.com"
 
 from app import app as flask_app  # noqa: E402
@@ -44,7 +44,7 @@ def app():
 
 @pytest.fixture(autouse=True)
 def _ctx_and_clean(app):
-    """Her test için app context + temiz DB (tüm tablolar sıfırdan)."""
+    """App context + a clean DB for every test (all tables from scratch)."""
     ctx = app.app_context()
     ctx.push()
     db.drop_all()
@@ -70,7 +70,7 @@ PENDING = {"sub": "9", "email": "yeni@test.com", "name": "Yeni", "role": "pendin
 
 
 def login_as(client, user=MANAGER):
-    """SSO akışını taklit et: session'a doğrudan user claim'lerini yaz."""
+    """Fake the SSO flow: write the user claims directly into the session."""
     with client.session_transaction() as sess:
         sess["user"] = dict(user)
     return user

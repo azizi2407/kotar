@@ -1,11 +1,12 @@
-// AI görsel üretimi — tek referans slotu (yapı VEYA stil). Kaynak: videograf fotoğrafı
-// (Drive file_id), elle URL, veya anında yükleme (base64). Seçim ImageRef olarak dışarı
-// verilir; Mystic tarafında base64'e backend çözer (structure_reference/style_reference).
+// AI image generation — single reference slot (structure OR style). Source: a
+// videographer photo (Drive file_id), a manual URL, or an instant upload (base64). The
+// selection is exposed as an ImageRef; the backend resolves it to base64 on the Mystic side (structure_reference/style_reference).
 import { useRef, useState } from "react"
 import { X } from "lucide-react"
 import { toast } from "sonner"
 
 import { thumbnailUrl, useClientAssets, useVgPhotos, type ImageRef } from "@/lib/sharing"
+import { useI18n } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -23,13 +24,14 @@ export function ReferencePicker({
   value: ImageRef | null
   onChange: (ref: ImageRef | null) => void
 }) {
+  const { t } = useI18n()
   const { data: photos } = useVgPhotos(clientId)
   const { data: assets } = useClientAssets(clientId)
-  // Yalnız gerçek görseller: marka görselleri arasında PDF/SVG/EPS logolar da var
-  // (2026-08-04 toplu aktarımı). Backend referansı ham bytes indirip görsel bekler
-  // (ai_worker._resolve_reference_bytes) — bunlar üretimi kırar. İndirilebilir
-  // kalırlar, yalnız bu listede çıkmazlar.
-  // (SVG de image/* ama raster değil — o da elenir.)
+  // Only actual images: brand assets also include PDF/SVG/EPS logos
+  // (from the 2026-08-04 bulk import). The backend downloads the reference as raw
+  // bytes and expects an image (ai_worker._resolve_reference_bytes) — these break
+  // generation. They remain downloadable, just don't show up in this list.
+  // (SVG is also image/* but not raster — it's excluded too.)
   const imageAssets = (assets ?? []).filter(
     (a) => (a.mime_type ?? "").startsWith("image/") && a.mime_type !== "image/svg+xml",
   )
@@ -38,7 +40,7 @@ export function ReferencePicker({
 
   function pickFile(file: File) {
     if (file.size > MAX_REF_MB * 1024 * 1024) {
-      toast.error(`Referans ${MAX_REF_MB} MB sınırını aşıyor`)
+      toast.error(t("components.sharing.referencePicker.tooLarge", { maxMb: MAX_REF_MB }))
       return
     }
     const reader = new FileReader()
@@ -57,7 +59,7 @@ export function ReferencePicker({
             onClick={() => onChange(null)}
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-destructive"
           >
-            <X className="size-3" /> Kaldır
+            <X className="size-3" /> {t("components.sharing.referencePicker.remove")}
           </button>
         )}
       </div>
@@ -78,7 +80,9 @@ export function ReferencePicker({
         <>
           {imageAssets.length > 0 && (
             <div>
-              <div className="mb-1 text-[11px] font-medium text-muted-foreground">Marka görselleri</div>
+              <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+                {t("components.sharing.referencePicker.brandAssets")}
+              </div>
               <div className="grid max-h-32 grid-cols-4 gap-1 overflow-auto">
                 {imageAssets.map((a) => (
                   <button
@@ -86,9 +90,9 @@ export function ReferencePicker({
                     type="button"
                     onClick={() =>
                       onChange({ kind: "drive", value: a.file_id,
-                        label: a.label ?? a.file_name ?? (a.kind === "logo" ? "Logo" : undefined) })}
+                        label: a.label ?? a.file_name ?? (a.kind === "logo" ? t("components.sharing.referencePicker.logo") : undefined) })}
                     className="overflow-hidden rounded border hover:border-primary"
-                    title={a.label ?? a.file_name ?? (a.kind === "logo" ? "Logo" : "")}
+                    title={a.label ?? a.file_name ?? (a.kind === "logo" ? t("components.sharing.referencePicker.logo") : "")}
                   >
                     <img
                       src={thumbnailUrl(a.file_id, 100)}
@@ -126,7 +130,7 @@ export function ReferencePicker({
           )}
           <div className="flex gap-2">
             <Input
-              placeholder="Görsel URL'si"
+              placeholder={t("components.sharing.referencePicker.imageUrlPlaceholder")}
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               onKeyDown={(e) => {
@@ -139,10 +143,10 @@ export function ReferencePicker({
               size="sm"
               onClick={() => url.trim() && onChange({ kind: "url", value: url.trim() })}
             >
-              Ekle
+              {t("components.sharing.referencePicker.add")}
             </Button>
             <Button type="button" variant="outline" size="sm" onClick={() => fileInput.current?.click()}>
-              Yükle
+              {t("components.sharing.referencePicker.upload")}
             </Button>
             <input
               ref={fileInput}

@@ -1,12 +1,14 @@
-"""Görsel araçları — image_splitter (eski monolitten). Pure PIL, DB/sır yok.
+"""Image tools — image_splitter (ported from the old monolith). Pure PIL, no DB/secrets.
 
-Ajans Instagram akışı: 3120×1350 geniş görsel → yan yana 3 dikey post (1080×1350).
-Parça x konumları 0/1020/2040 (60px örtüşme, eski araçla birebir).
+Agency Instagram flow: a 3120x1350 wide image -> 3 side-by-side vertical
+posts (1080x1350). Tile x positions are 0/1020/2040 (60px overlap, exact
+match with the old tool).
 
-reels-cover alt modu: orta kareyi 1080×1920 Instagram Reels kapağına çevirir
-(play overlay'li). Reels grid preview'da orta karenin komşularıyla hizalı
-görünmesi için orta içerik 1440'a warp + yatay kompanzasyon (0.965) uygulanır,
-sonra 1920 tuvale ortalanır (eski araçla birebir).
+reels-cover submode: converts the center tile into a 1080x1920 Instagram
+Reels cover (with a play overlay). For the center tile to appear aligned
+with its neighbors in the Reels grid preview, the center content is warped
+to 1440 + a horizontal compensation (0.965) is applied, then centered onto
+a 1920 canvas (exact match with the old tool).
 """
 import io
 import os
@@ -17,7 +19,7 @@ WIDE_SIZE = (3120, 1350)
 TILE_W, TILE_H = 1080, 1350
 X_POSITIONS = (0, 1020, 2040)
 
-# reels-cover sabitleri (eski monolitle birebir)
+# reels-cover constants (exact match with the old monolith)
 REELS_H = 1920
 CENTER_WARP_H = 1440
 GRID_SCALE_X = 0.965
@@ -26,11 +28,11 @@ _play_cache = None
 
 
 class ImageToolError(Exception):
-    """Geçersiz girdi (boyut vb.)."""
+    """Invalid input (size etc.)."""
 
 
 def split_wide(img):
-    """3120×1350 görseli üç 1080×1350 parçaya böl. Parça listesi döndürür."""
+    """Split a 3120x1350 image into three 1080x1350 tiles. Returns the tile list."""
     if img.size != WIDE_SIZE:
         raise ImageToolError(
             f"Görsel {img.size[0]}×{img.size[1]}, {WIDE_SIZE[0]}×{WIDE_SIZE[1]} olmalı.")
@@ -38,7 +40,7 @@ def split_wide(img):
 
 
 def _load_play_overlay():
-    """Play overlay PNG'ini (1080×1350 RGBA, ortada üçgen) yükle — cache'li."""
+    """Load the play overlay PNG (1080x1350 RGBA, triangle in the center) — cached."""
     global _play_cache
     if _play_cache is None:
         _play_cache = Image.open(_PLAY_OVERLAY_PATH).convert('RGBA')
@@ -47,8 +49,9 @@ def _load_play_overlay():
 
 
 def _compensate_reels_grid(tile, scale_x=GRID_SCALE_X):
-    """Reels grid preview'un yatay crop/zoom farkını telafi et: içeriği yatayda
-    biraz daraltıp ortala, boşlukları kenar pikselini uzatarak doldur (seamless)."""
+    """Compensate for the Reels grid preview's horizontal crop/zoom
+    difference: narrow the content horizontally a bit and center it, fill
+    the gaps by stretching the edge pixel (seamless)."""
     tile = tile.convert('RGBA')
     w, h = tile.size
     new_w = int(w * scale_x)
@@ -67,7 +70,7 @@ def _compensate_reels_grid(tile, scale_x=GRID_SCALE_X):
 
 
 def _apply_play_overlay(cover):
-    """Play overlay'i kapağın ortasına, en-boy koruyarak sığdır ve bindir."""
+    """Fit the play overlay to the cover's center, preserving aspect ratio, and composite it on top."""
     play = _load_play_overlay()
     cw, ch = cover.size
     pw, ph = play.size
@@ -81,8 +84,9 @@ def _apply_play_overlay(cover):
 
 
 def make_reels_cover(img):
-    """3120×1350 → [sol(1080×1350), orta reels kapağı(1080×1920, play overlay'li),
-    sağ(1080×1350)]. Sol/sağ orijinalden birebir; orta kare warp+kompanze edilir."""
+    """3120x1350 -> [left(1080x1350), center reels cover(1080x1920, with play
+    overlay), right(1080x1350)]. Left/right are exact copies of the
+    original; the center tile is warped+compensated."""
     if img.size != WIDE_SIZE:
         raise ImageToolError(
             f"Görsel {img.size[0]}×{img.size[1]}, {WIDE_SIZE[0]}×{WIDE_SIZE[1]} olmalı.")
@@ -98,7 +102,7 @@ def make_reels_cover(img):
 
 
 def encode(img, ext):
-    """PIL görseli (bytes, mime) olarak kodla. ext: jpg|jpeg|png."""
+    """Encode a PIL image as (bytes, mime). ext: jpg|jpeg|png."""
     ext = (ext or 'jpg').lower()
     buf = io.BytesIO()
     if ext in ('jpg', 'jpeg'):
@@ -115,10 +119,11 @@ def encode(img, ext):
 
 
 def split_wide_bytes(data, ext, reels=False):
-    """Bytes girdi → [(dosya_adı, bytes, mime), ...]. UI için hazır.
+    """Bytes input -> [(file_name, bytes, mime), ...]. Ready for the UI.
 
-    reels=True: orta kare 1080×1920 video kapağına çevrilir (play overlay'li),
-    sol/sağ orijinal parçalar; orta dosya 'instagram_video_kapagi.<ext>' olur."""
+    reels=True: the center tile is converted to a 1080x1920 video cover
+    (with a play overlay), left/right stay original tiles; the center file
+    is named 'instagram_video_kapagi.<ext>'."""
     try:
         img = Image.open(io.BytesIO(data))
         img.load()

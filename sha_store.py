@@ -1,51 +1,54 @@
-"""İçerik-adresli disk deposu (2026-08-09) — sha256 adıyla atomik yazma.
+"""Content-addressed disk store (2026-08-09) — atomic write under the sha256 name.
 
-`design_files` (çalışma dosyaları) ve `voice_notes` (sesli notlar) bu modülü
-PAYLAŞIR. Ayrı ayrı yazılsaydı drift üretirdi: 2026-08-08'de canlıda bulunan
-"mkstemp 0600 üretiyor → nginx (www-data) dosyayı okuyamıyor, her indirme 403"
-hatası iki yerde ayrı ayrı düzeltilmek zorunda kalırdı.
+`design_files` (working files) and `voice_notes` (voice notes) SHARE this
+module. Writing them separately would have caused drift: the "mkstemp
+produces 0600 → nginx (www-data) can't read the file, every download 403s"
+bug found in production on 2026-08-08 would have had to be fixed in two
+places separately.
 
-Yerleşim `<store_dir>/<sha[:2]>/<sha>.<ext>`: iki harfli ön ek dizini, tek
-dizinde on binlerce dosya birikmesin.
+Layout is `<store_dir>/<sha[:2]>/<sha>.<ext>`: a two-character prefix
+directory so tens of thousands of files don't pile up in a single directory.
 """
 import hashlib
 import os
 import tempfile
 
-# Okuma bloğu: 8 MB — 1 GB'lık dosyada 128 tur, RAM'de tek blok kalır.
+# Read block: 8 MB — 128 iterations for a 1 GB file, only one block stays in RAM.
 CHUNK = 8 * 1024 * 1024
-# 0644: sahibi yazar, herkes okur. nginx X-Accel ile dosyayı www-data okuyor;
-# mkstemp varsayılanı 0600 ve `os.replace` bunu KORUR.
+# 0644: owner writes, everyone reads. nginx reads the file as www-data via
+# X-Accel; mkstemp's default is 0600 and `os.replace` PRESERVES it.
 FILE_MODE = 0o644
 
 
 def uzanti(file_name):
-    """Son uzantı: küçük harf, noktasız, yalnız alfanümerik, ≤12. Uzantısız
-    dosya 'bin' olur — disk adı her zaman `<sha>.<ext>` biçiminde kalsın."""
+    """The last extension: lowercase, no dot, alphanumeric only, ≤12 chars. A
+    file with no extension becomes 'bin' — so the disk name always stays in
+    the `<sha>.<ext>` shape."""
     ext = os.path.splitext(file_name or '')[1].lstrip('.').lower()
     return ''.join(ch for ch in ext if ch.isalnum())[:12] or 'bin'
 
 
 def yol(store_dir, sha256, file_name):
-    """Bu içeriğin kanonik disk yolu."""
+    """This content's canonical disk path."""
     return os.path.join(store_dir, sha256[:2], f'{sha256}.{uzanti(file_name)}')
 
 
 def yaz(stream, store_dir, file_name, on_hashed=None):
-    """Akışı diske yaz, sha256'yı AYNI geçişte hesapla; `(sha256, boyut)` döner.
+    """Write the stream to disk, computing sha256 in the SAME pass; returns `(sha256, size)`.
 
-    Önce geçici dosyaya yazılır, sonra `os.replace` ile kanonik yola taşınır:
-    yarım dosya asla kanonik yolda görünmez (aynı hash'i bekleyen bir indirme
-    yarım içerik okumasın). Hedef zaten varsa (dedup) geçici dosya silinir —
-    ama modu yine de onarılır: yedekten dönmüş 0600'lük bir dosya aksi halde
-    kalıcı olarak okunamaz kalırdı ve yeni yükleme onu düzeltmezdi.
+    First written to a temp file, then moved to the canonical path via
+    `os.replace`: a half-written file never appears at the canonical path (so
+    a download waiting on the same hash never reads partial content). If the
+    target already exists (dedup), the temp file is deleted — but its mode is
+    still repaired: a 0600 file restored from a backup would otherwise stay
+    permanently unreadable, and a new upload wouldn't fix it.
 
-    `on_hashed`: sha256 hesaplandıktan HEMEN SONRA, hedefin var olup olmadığına
-    bakılmadan ÖNCE çağrılan isteğe bağlı geri çağırma (`on_hashed(sha)`).
-    Hash-sonrası ama yazmadan-önce bir senkronizasyon noktasına ihtiyaç duyan
-    çağıranlar için (örn. `design_files._sha_kilidi` — yükleme ile purge
-    arasındaki TOCTOU yarışını kapatan Postgres advisory lock; bu modüle
-    devredilmeden önceki sıralama BİREBİR korunsun diye kanca eklendi)."""
+    `on_hashed`: an optional callback (`on_hashed(sha)`) invoked RIGHT AFTER
+    sha256 is computed, BEFORE checking whether the target exists. For callers
+    that need a synchronization point after hashing but before writing (e.g.
+    `design_files._sha_kilidi` — a Postgres advisory lock that closes the
+    TOCTOU race between upload and purge; this hook was added so the ordering
+    that existed before delegating to this module is preserved EXACTLY)."""
     os.makedirs(store_dir, exist_ok=True)
     h = hashlib.sha256()
     boyut = 0

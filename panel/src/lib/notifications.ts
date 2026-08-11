@@ -1,6 +1,6 @@
-// Panel-içi bildirim (bell) + (2026-08-05) kişiye özel ntfy kanalı.
-// İki kanal tek kaynaktan beslenir: her bildirim panele düşer, `severity` ve
-// kullanıcının tercihi uyuyorsa ayrıca telefona ntfy ile gider.
+// In-panel notifications (bell) + (2026-08-05) a per-user ntfy channel.
+// Both channels are fed from a single source: every notification lands in the panel,
+// and if `severity` matches the user's preference, it's also sent to the phone via ntfy.
 import { apiGet, apiJson } from "./api"
 
 export type Severity = "kritik" | "normal" | "bilgi"
@@ -28,8 +28,8 @@ export interface PrefsResponse {
   prefs: NotificationPrefs
   severities: Severity[]
   channel_ready: boolean
-  // ntfy uygulaması abonelikte sunucu ve konuyu AYRI alanlarda ister; birleşik
-  // `subscribe_url` tarayıcıda açmak/paylaşmak için.
+  // The ntfy app wants the server and topic in SEPARATE fields for subscribing; the
+  // combined `subscribe_url` is for opening/sharing in the browser.
   server_url: string
   subscribe_url: string
 }
@@ -70,8 +70,8 @@ export function markAllNotificationsRead(): Promise<{ ok: boolean; count: number
   return apiJson("/notifications/read-all", {})
 }
 
-// --- anons (2026-08-05) — yönetici elle bildirim gönderir ------------------
-// Otomatik türlerden farkı: önem derecesini VERİ değil, GÖNDEREN belirler.
+// --- announcement (2026-08-05) — a manager sends a notification manually --------
+// Difference from automatic types: severity is decided by the SENDER, not the DATA.
 
 export interface AnnounceUser {
   sub: string

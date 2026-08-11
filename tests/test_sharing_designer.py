@@ -36,8 +36,8 @@ def test_designer_cards_pending_403(client, two_clients):
 
 
 def test_designer_cards_hepsini_gorur_assigned_bayragi(client, two_clients):
-    # Yeni davranış: designer TÜM müşterileri görür; atanmışlar assigned=True
-    # ("Müşterilerim"), atanmayanlar assigned=False ("Diğer Müşteriler").
+    # New behavior: designer sees ALL clients; assigned ones have assigned=True
+    # ("My Clients"), unassigned ones have assigned=False ("Other Clients").
     a, b = two_clients
     login_as(client, DESIGNER)
     rows = client.get(f"/api/sharing/designer/cards?week_iso={WK}").get_json()["rows"]
@@ -53,7 +53,7 @@ def test_designer_cards_management_hepsi_assigned_true(client, two_clients):
     rows = client.get(f"/api/sharing/designer/cards?week_iso={WK}").get_json()["rows"]
     by_id = {r["client"]["id"]: r for r in rows}
     assert a in by_id and b in by_id
-    # Management görünümünde ayrım yok — hepsi assigned=True.
+    # No distinction in the management view — all are assigned=True.
     assert by_id[a]["assigned"] is True and by_id[b]["assigned"] is True
 
 
@@ -83,15 +83,15 @@ def test_designer_upload_atanan_201(client, two_clients, fake_drive):
 
 
 def test_designer_upload_atanmayan_da_201(client, two_clients, fake_drive):
-    # Yeni davranış: designer atanmamış müşteriye de yükleyebilir (tam aksiyon).
+    # New behavior: designer can also upload for an unassigned client (full action).
     a, b = two_clients
     login_as(client, DESIGNER)
     assert _upload(client, b).status_code == 201
 
 
 def test_designer_upload_video_201(client, two_clients, fake_drive):
-    """2026-08-05: video kısıtı kalktı — designer atanmamış müşteriye de video yükler
-    (post/story ile aynı 'tam aksiyon' kararı)."""
+    """2026-08-05: the video restriction was removed — designer can also upload video
+    for an unassigned client (same 'full action' decision as post/story)."""
     a, b = two_clients
     login_as(client, DESIGNER)
     assert _upload(client, a, category="video", name="v.mp4").status_code == 201
@@ -99,7 +99,7 @@ def test_designer_upload_video_201(client, two_clients, fake_drive):
 
 
 def test_designer_review_link_uretebilir(client, two_clients):
-    # Designer onay linki üretebilir — atanmamış müşteri (b) için bile (tam aksiyon).
+    # Designer can generate a review link — even for an unassigned client (b) (full action).
     a, b = two_clients
     login_as(client, DESIGNER)
     r = client.post("/api/sharing/review-link",

@@ -1,7 +1,7 @@
-// Tuval dışı görünümler: Liste · Takvim · "Bana atanan" şeridi.
+// Off-canvas views: List · Calendar · "Assigned to me" strip.
 //
-// Neden tuvalin yanında liste/takvim: 600 kartlık bir panoda "geciken işler
-// hangileri" sorusu tuvalde gözle taranamıyor. Aynı veri, üç okuma biçimi.
+// Why list/calendar alongside the canvas: on a board with 600 cards, "which items
+// are overdue" can't be scanned visually on the canvas. Same data, three ways to read it.
 import { useMemo } from "react"
 import { Link } from "react-router-dom"
 import { CalendarDays, Building2, Camera, Megaphone, User } from "lucide-react"
@@ -10,8 +10,9 @@ import { Badge } from "@/components/ui/badge"
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
+import { useI18n } from "@/lib/i18n"
 import {
-  dueTone, fmtDay, ITEM_STATUS_LABELS, type AssignedItem, type PlanningItem,
+  dueTone, fmtDay, itemStatusLabels, type AssignedItem, type PlanningItem,
 } from "@/lib/planlama"
 import { cn } from "@/lib/utils"
 
@@ -21,7 +22,9 @@ export function ListView({ items, onOpen }: {
   items: PlanningItem[]
   onOpen: (it: PlanningItem) => void
 }) {
-  // Sıralama: geciken önce, sonra son tarihe göre, tarihsizler en sonda.
+  const { t } = useI18n()
+  const statusLabels = useMemo(() => itemStatusLabels(t), [t])
+  // Sort order: overdue first, then by due date, undated last.
   const rows = useMemo(() => [...items]
     .filter((it) => it.type === "card" || it.type === "note")
     .sort((a, b) => {
@@ -32,7 +35,7 @@ export function ListView({ items, onOpen }: {
     }), [items])
 
   if (!rows.length) {
-    return <p className="py-12 text-center text-muted-foreground">Gösterilecek kart yok.</p>
+    return <p className="py-12 text-center text-muted-foreground">{t("components.planlama.boardViews.noCards")}</p>
   }
 
   return (
@@ -40,23 +43,23 @@ export function ListView({ items, onOpen }: {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Başlık</TableHead>
-            <TableHead className="w-28">Durum</TableHead>
-            <TableHead className="w-32">Son tarih</TableHead>
-            <TableHead className="w-40">Sorumlu</TableHead>
-            <TableHead className="w-56">Bağlantılar</TableHead>
+            <TableHead>{t("components.planlama.boardViews.colTitle")}</TableHead>
+            <TableHead className="w-28">{t("components.planlama.boardViews.colStatus")}</TableHead>
+            <TableHead className="w-32">{t("components.planlama.boardViews.colDueDate")}</TableHead>
+            <TableHead className="w-40">{t("components.planlama.boardViews.colAssignee")}</TableHead>
+            <TableHead className="w-56">{t("components.planlama.boardViews.colLinks")}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.map((it) => (
             <TableRow key={it.item_key} className="cursor-pointer" onClick={() => onOpen(it)}>
               <TableCell className={cn("font-medium", it.status === "done" && "text-muted-foreground line-through")}>
-                {it.title || it.text || <span className="text-muted-foreground italic">Başlıksız</span>}
+                {it.title || it.text || <span className="text-muted-foreground italic">{t("components.planlama.boardViews.untitled")}</span>}
                 {it.label && <Badge variant="outline" className="ml-2 text-[10px]">{it.label}</Badge>}
               </TableCell>
               <TableCell>
                 <Badge variant={it.status === "done" ? "secondary" : "outline"} className="text-[10px]">
-                  {ITEM_STATUS_LABELS[it.status]}
+                  {statusLabels[it.status]}
                 </Badge>
               </TableCell>
               <TableCell>
@@ -93,15 +96,16 @@ function LinkChips({ it }: { it: PlanningItem }) {
   )
 }
 
-// --- Takvim ---------------------------------------------------------------
+// --- Calendar ---------------------------------------------------------------
 
-/** Son tarihi olan kartları aya göre gruplar. Tam bir takvim ızgarası değil:
- *  ajansın sorusu "hangi gün ne var" değil "yaklaşan işler neler" — gün gün
- *  boş kutu çizmek 600 kartlık panoda gürültü üretiyordu. */
+/** Groups cards with a due date by month. Not a full calendar grid: the agency's
+ *  question isn't "what's on which day" but "what's coming up" — drawing empty
+ *  boxes day by day produced noise on a 600-card board. */
 export function CalendarView({ items, onOpen }: {
   items: PlanningItem[]
   onOpen: (it: PlanningItem) => void
 }) {
+  const { t, lang } = useI18n()
   const groups = useMemo(() => {
     const withDue = items.filter((it) => it.due_date && it.type !== "edge" && it.type !== "region")
     const map = new Map<string, PlanningItem[]>()
@@ -116,7 +120,7 @@ export function CalendarView({ items, onOpen }: {
   if (!groups.length) {
     return (
       <p className="py-12 text-center text-muted-foreground">
-        Son tarihi olan kart yok — bir kartın ayrıntılarından tarih ver, burada belirsin.
+        {t("components.planlama.boardViews.noDueDateCards")}
       </p>
     )
   }
@@ -127,7 +131,7 @@ export function CalendarView({ items, onOpen }: {
         <section key={month} className="space-y-2">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-muted-foreground">
             <CalendarDays className="h-4 w-4" />
-            {new Date(`${month}-01`).toLocaleDateString("tr-TR", { month: "long", year: "numeric" })}
+            {new Date(`${month}-01`).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { month: "long", year: "numeric" })}
             <Badge variant="outline" className="text-[10px]">{list.length}</Badge>
           </h3>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -136,7 +140,7 @@ export function CalendarView({ items, onOpen }: {
                 className="rounded-lg border bg-card p-3 text-left transition-colors hover:bg-muted/50">
                 <div className="flex items-start justify-between gap-2">
                   <span className={cn("text-sm font-medium", it.status === "done" && "line-through opacity-60")}>
-                    {it.title || "Başlıksız"}
+                    {it.title || t("components.planlama.boardViews.untitled")}
                   </span>
                   <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[10px]", dueTone(it.due_date, it.status))}>
                     {fmtDay(it.due_date)}
@@ -157,25 +161,27 @@ export function CalendarView({ items, onOpen }: {
   )
 }
 
-// --- "Bana atanan" şeridi --------------------------------------------------
+// --- "Assigned to me" strip --------------------------------------------------
 
-/** Pano sınırını AŞAN atama listesi — SALT-OKUNUR.
+/** A list of assignments that CROSSES board boundaries — READ-ONLY.
  *
- *  Bilinçli yetki gediği (2026-07-26 kararı): yönetim panosundaki bir kart bu
- *  kişiye atanmışsa burada görünür, oysa kişi o panoyu açamaz. Aksi halde
- *  yöneticinin atama yapması çalışan açısından tamamen görünmez kalırdı.
- *  Sızan alan kümesi dar: gövde metni, renk, konum ve `extra` DÖNMEZ. */
+ *  A deliberate authorization gap (decision from 2026-07-26): if a card on a
+ *  management board is assigned to this person, it shows up here, even though
+ *  they can't open that board. Otherwise a manager's assignment would be
+ *  completely invisible to the employee. The field set that leaks through is
+ *  narrow: body text, color, position, and `extra` are NOT returned. */
 export function AssignedStrip({ items, currentBoard }: {
   items: AssignedItem[]
   currentBoard: string
 }) {
+  const { t } = useI18n()
   const other = items.filter((i) => i.board_key !== currentBoard)
   if (!other.length) return null
   return (
     <section className="rounded-lg border border-dashed bg-muted/30 p-3">
       <h3 className="mb-2 text-xs font-semibold text-muted-foreground">
-        Bana atanan · başka panolardan {other.length}
-        <span className="ml-2 font-normal">— salt-okunur, düzenlemek için kartın kendi panosuna git</span>
+        {t("components.planlama.boardViews.assignedHeading", { count: other.length })}
+        <span className="ml-2 font-normal">{t("components.planlama.boardViews.assignedHint")}</span>
       </h3>
       <div className="flex flex-wrap gap-2">
         {other.map((it) => (
@@ -183,7 +189,7 @@ export function AssignedStrip({ items, currentBoard }: {
             to={`/planlama?pano=${encodeURIComponent(it.board_key)}`}
             className="flex max-w-xs items-center gap-2 rounded-md border bg-card px-2 py-1.5 text-xs hover:bg-muted">
             <span className={cn("truncate font-medium", it.status === "done" && "line-through opacity-60")}>
-              {it.title || "Başlıksız"}
+              {it.title || t("components.planlama.boardViews.untitled")}
             </span>
             {it.due_date && (
               <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[10px]", dueTone(it.due_date, it.status))}>

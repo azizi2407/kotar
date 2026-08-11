@@ -1,9 +1,10 @@
-"""AI akışları için ortak bağlam okuma servisi (Faz 0 — Task 2).
+"""Shared context-reading service for AI flows (Phase 0 — Task 2).
 
-6 AI akışının (caption, hashtag, brief özeti vb.) ortak girdisi burada tek yerde
-toplanır: müşteri profili, global kurallar, geçmiş caption'lar, hafta bağlamı.
-Saf okuma — yan etkisi yoktur, DB'ye yazmaz. `ai_worker.py`'nin caption
-handler'ı bugün bu bilgileri inline okuyor; bu modülü ona bağlamak Faz 1 işidir.
+The shared input of the 6 AI flows (caption, hashtag, brief summary etc.) is
+gathered here in one place: client profile, global rules, past captions, week
+context. Pure reads — no side effects, doesn't write to the DB. Today
+`ai_worker.py`'s caption handler reads this information inline; wiring this module
+into it is Phase 1 work.
 """
 from datetime import date
 
@@ -11,7 +12,7 @@ from extensions import db
 from models import AppSetting, Client
 from models_sharing import Share, SpecialDayEvent
 
-# Ay (1-12) → TR mevsim adı.
+# Month (1-12) → Turkish season name.
 _SEASON_BY_MONTH = {
     12: 'kış', 1: 'kış', 2: 'kış',
     3: 'ilkbahar', 4: 'ilkbahar', 5: 'ilkbahar',
@@ -26,16 +27,16 @@ _EMPTY_PROFILE = {'name': '', 'sector': '', 'brand_voice': '', 'target_audience'
 
 
 def client_profile(client_id):
-    """Müşteri temel bilgisi (name, sector) + brand_profile'ı tek dict'te birleştirir.
+    """Merges the client's basic info (name, sector) + brand_profile into a single dict.
 
-    Müşteri bulunamazsa veya brand_profile NULL/kısmi ise eksik alanlar boş
-    string/liste/dict döner — çağıran patlamaz. `color_palette` (renk paleti),
-    `content_mix` (içerik dağılımı: 3 foto+slogan / 1 reel / carousel) ve
-    `content_pillars` (içerik sütunları — brief fikirlerinin dağıtıldığı steering
-    metni) brief akışının ihtiyacı — brand_profile JSON'unda yoksa boş liste/dict/str.
-    `hashtags` (konu/marka/sektor hashtag kümeleri) ve `ideas_per_week` (haftalık
-    fikir sayısı, yoksa 5) brief steering alanları — brief_handler `ideas_per_week`'i
-    doğrudan tüketir.
+    If the client isn't found or brand_profile is NULL/partial, missing fields
+    return an empty string/list/dict — the caller doesn't blow up. `color_palette`
+    (color palette), `content_mix` (content distribution: 3 photo+slogan / 1 reel /
+    carousel) and `content_pillars` (content pillars — the steering text ideas are
+    distributed against) are what the brief flow needs — an empty list/dict/str if
+    not in the brand_profile JSON. `hashtags` (topic/brand/sector hashtag sets) and
+    `ideas_per_week` (ideas per week, 5 if unset) are brief steering fields —
+    brief_handler consumes `ideas_per_week` directly.
     """
     c = db.session.get(Client, client_id)
     if c is None:
@@ -58,27 +59,29 @@ def client_profile(client_id):
 
 
 def global_rules():
-    """Tüm müşterilerde geçerli ortak caption/hashtag kuralları (panelden düzenlenir)."""
+    """Shared caption/hashtag rules applying to all clients (edited from the panel)."""
     return AppSetting.get('caption_global_rules', '') or ''
 
 
-# Caption üretim ayarları sistem-varsayılanı (Faz 1b — step 09). Tüm alanlar opsiyonel;
-# `model=None` verilince ai_claude env/DEFAULT_MODEL'e düşer (per-job model 03 yoluyla).
+# System default for caption generation settings (Phase 1b — step 09). All fields
+# are optional; when `model=None` is given, ai_claude falls back to
+# env/DEFAULT_MODEL (via the per-job model, 03).
 CAPTION_SETTINGS_DEFAULTS = {
     'model': None,          # None → ai_claude.DEFAULT_MODEL / env CAPTION_MODEL
-    'tone': None,           # None → brand_profile.brand_voice'tan türer (override değilse)
-    'emoji_limit': 3,       # caption başına makul emoji üst sınırı
-    'hashtag_count': 14,    # varsayılan hashtag sayısı (2026-07-18 proje sahibi kararı)
-    'lang': 'TR',           # 'TR' | 'EN' | 'TR+EN' (iki dilli)
-    'use_brief': False,     # True → brief intro prompt'a katılır (varsayılan kapalı — 2026-07-18 proje sahibi kararı)
-    'char_limit': None,     # None → karakter limiti talimatı yok
+    'tone': None,           # None → derived from brand_profile.brand_voice (unless overridden)
+    'emoji_limit': 3,       # reasonable emoji ceiling per caption
+    'hashtag_count': 14,    # default hashtag count (2026-07-18 project owner decision)
+    'lang': 'TR',           # 'TR' | 'EN' | 'TR+EN' (bilingual)
+    'use_brief': False,     # True → brief intro is included in the prompt (off by default — 2026-07-18 project owner decision)
+    'char_limit': None,     # None → no character-limit instruction
 }
 
 
 def resolve_caption_settings(client, payload_settings=None):
-    """Caption ayarlarını katmanlı çözer: sistem-varsayılanı ⊕ client.caption_settings
-    ⊕ payload_settings (sağdan override). Yalnız bilinen şema anahtarları döner
-    (bilinmeyen anahtar sonuca sızmaz). `client` None olabilir (varsayılanlar döner)."""
+    """Resolves caption settings in layers: system default ⊕ client.caption_settings
+    ⊕ payload_settings (rightmost overrides). Only known schema keys are returned
+    (an unknown key doesn't leak into the result). `client` can be None (defaults
+    are returned)."""
     resolved = dict(CAPTION_SETTINGS_DEFAULTS)
     cs = getattr(client, 'caption_settings', None) if client is not None else None
     if isinstance(cs, dict):
@@ -89,12 +92,12 @@ def resolve_caption_settings(client, payload_settings=None):
 
 
 def recent_captions(client_id, n=10):
-    """Müşterinin en son N dolu caption metni (en yeni önce).
+    """The client's last N non-empty caption texts (newest first).
 
-    Kaynak `Share.caption_text` — `CaptionHistory` bu fazda kullanılmaz (YAGNI,
-    ölü tablo); yayımlanan/seçilen caption'lar zaten Share'de duruyor. Soft-delete
-    edilmiş (`deleted_at` dolu) Share'ler hariç tutulur — codebase konvansiyonu
-    (bkz. review.py, sharing.py: her yerde `Share.deleted_at.is_(None)`).
+    Source is `Share.caption_text` — `CaptionHistory` isn't used in this phase
+    (YAGNI, a dead table); published/selected captions already live in Share.
+    Soft-deleted (`deleted_at` set) Shares are excluded — codebase convention (see
+    review.py, sharing.py: `Share.deleted_at.is_(None)` everywhere).
     """
     rows = (Share.query
             .filter(Share.client_id == client_id,
@@ -108,14 +111,15 @@ def recent_captions(client_id, n=10):
 
 
 def week_context(week_iso):
-    """O ISO haftaya düşen aktif özel günler (global + müşteriye özel, hepsi) + mevsim.
+    """Active special days falling in that ISO week (global + client-specific, all
+    of them) + season.
 
-    Brief-ready yapı döner: `{season, special_days, week_iso}` — `week_iso`
-    girdiyi aynen yankılar, brief akışı ayrıca taşımak zorunda kalmaz. İmza
-    yalnız `week_iso` alır — müşteriden bağımsızdır; sektörel/müşteriye özel
-    filtreleme çağıranın işidir. Mevsim, haftanın ISO tanım günü olan
-    Perşembe'nin ayına göre belirlenir. `week_iso` parse edilemezse boş sonuç
-    döner (patlamaz).
+    Returns a brief-ready structure: `{season, special_days, week_iso}` —
+    `week_iso` echoes the input as-is, so the brief flow doesn't have to carry it
+    separately. The signature only takes `week_iso` — it's client-independent;
+    sector/client-specific filtering is the caller's job. The season is determined
+    by the month of the week's ISO reference day, Thursday. If `week_iso` can't be
+    parsed, an empty result is returned (doesn't blow up).
     """
     bounds = _week_bounds(week_iso)
     if bounds is None:
@@ -123,8 +127,8 @@ def week_context(week_iso):
     monday, sunday, thursday = bounds
 
     special_days = []
-    # Onay kapısı: downstream AI bağlamı YALNIZ onaylı (approved) özel günleri okur —
-    # taslak (AI üretimi, onaysız) etkinlik prompt'a/müşteriye sızmamalı.
+    # Approval gate: the downstream AI context reads ONLY approved special days —
+    # a draft (AI-generated, unapproved) event must not leak into the prompt/to the client.
     for e in SpecialDayEvent.query.filter_by(active=True, status='approved').all():
         rng = _event_range(e)
         if rng is None:
@@ -138,7 +142,7 @@ def week_context(week_iso):
 
 
 def _week_bounds(week_iso):
-    """'YYYY-Www' → (pazartesi, pazar, perşembe) date nesneleri; parse edilemezse None."""
+    """'YYYY-Www' → (Monday, Sunday, Thursday) date objects; None if unparseable."""
     try:
         year_s, week_s = week_iso.split('-W')
         year, week = int(year_s), int(week_s)
@@ -151,7 +155,7 @@ def _week_bounds(week_iso):
 
 
 def _event_range(e):
-    """SpecialDayEvent'in kapsadığı takvim aralığı (start, end); eksik/bozuk veri → None."""
+    """The calendar range (start, end) a SpecialDayEvent covers; missing/broken data → None."""
     if e.year is None or e.month is None:
         return None
     try:
@@ -165,14 +169,15 @@ def _event_range(e):
     return None
 
 
-# --- AI görsel üretimi: prompt dönüşümü (2026-07-20) ---
+# --- AI image generation: prompt transformation (2026-07-20) ---
 
 def image_prompt_json_instruction(user_prompt):
-    """Görsel üretim istemini İngilizce'ye çevirip yapılandırılmış JSON'a dönüştüren
-    claude talimatı. Görsel modelleri (Mystic/nano banana/gpt...) İngilizce + alan-bazlı
-    JSON istemlerle belirgin daha iyi sonuç verir. Çıktı YALNIZ tek JSON nesnesi —
-    panel 'İngilizce JSON'a çevir' butonu textarea'ya koyar; worker refine adımı
-    üretime gönderir. Untrusted kullanıcı metni delimiter'la sarılır."""
+    """Claude instruction that translates an image-generation prompt into English and
+    turns it into structured JSON. Image models (Mystic/nano banana/gpt...) give
+    noticeably better results with English + field-based JSON prompts. Output is
+    ONLY a single JSON object — the panel's 'Translate to English JSON' button puts
+    it into the textarea; the worker's refine step sends it to generation.
+    Untrusted user text is wrapped with a delimiter."""
     import ai_claude
     return (
         'Aşağıdaki görsel üretim istemini İngilizce\'ye çevir ve görsel üretim modeline '
@@ -188,44 +193,46 @@ def image_prompt_json_instruction(user_prompt):
         + ai_claude.wrap_untrusted('İSTEM', user_prompt))
 
 
-# --- transkript sözlüğü (2026-08-08) --------------------------------------
+# --- transcript vocabulary (2026-08-08) --------------------------------------
 
-# Whisper'ın `initial_prompt`'una geçilecek özel adlar. Ölçümle doğrulandı:
-# sözlüksüz "Molo Pantarya", sözlükle "Mall of Antalya" (3/3 tekrarlanabilir,
-# maliyeti +0.3 sn). Model büyütmek bunu ÇÖZMÜYOR — model markayı bilmiyor;
-# large-v3-turbo da medium da aynı adı farklı şekilde uyduruyordu.
+# Proper names to pass into Whisper's `initial_prompt`. Verified by measurement:
+# without the vocabulary "Molo Pantarya", with the vocabulary "Mall of Antalya"
+# (3/3 reproducible, cost +0.3 sec). Scaling up the model does NOT fix this — the
+# model doesn't know the brand; large-v3-turbo and medium both mangled the same
+# name differently.
 #
-# Whisper `initial_prompt`'u önceki-bağlam token'ı olarak yer: faster-whisper
-# 224 token'a kırpar. Türkçe özel adlar ~2-4 token → yaklaşık 60-70 ad sığar.
-# Sınırı KARAKTERDEN uyguluyoruz (tokenizer'ı buraya taşımamak için) ve
-# müşteri adlarını ÖNCE koyuyoruz: kırpılma olursa ekip adları düşsün, marka
-# adları kalsın — asıl kazanç orada.
+# Whisper consumes `initial_prompt` as a previous-context token: faster-whisper
+# truncates it to 224 tokens. Turkish proper names are ~2-4 tokens → roughly 60-70
+# names fit. We enforce the limit in CHARACTERS (to avoid pulling the tokenizer in
+# here) and put client names FIRST: if truncation happens, team names should drop,
+# brand names should survive — that's where the real payoff is.
 VOCAB_MAX_CHARS = 700
 
-# Modelin hiçbir müşteri kaydından öğrenemeyeceği, ajansa özgü sabit terimler.
+# Agency-specific fixed terms the model can never learn from any client record.
 _SABIT_TERIMLER = ('Kotar',)
 
 
 def transcript_vocabulary(extra=None):
-    """Whisper'a verilecek özel ad sözlüğü — tek satır, virgülle ayrılmış.
+    """Proper-name vocabulary to give Whisper — a single line, comma-separated.
 
-    Kaynak: aktif müşteri adları + panel kullanıcılarının adları + ajans sabitleri.
-    `extra`: çağıranın eklemek istediği adlar (ör. o videonun müşterisi başa gelsin).
+    Source: active client names + panel user names + agency constants.
+    `extra`: names the caller wants added (e.g. so that video's client comes first).
 
-    Boş dönebilir (DB boşsa) — çağıran `initial_prompt=None` gibi davranmalı."""
+    Can return empty (if the DB is empty) — the caller should treat that like
+    `initial_prompt=None`."""
     from models import UserRef
 
     adlar = []
     if extra:
         adlar.extend(str(x).strip() for x in extra if str(x or '').strip())
     adlar.extend(_SABIT_TERIMLER)
-    # Aktif müşteriler önce: kırpılma olursa marka adları hayatta kalsın.
+    # Active clients first: if truncation happens, brand names should survive.
     adlar.extend(n for (n,) in db.session.query(Client.name)
                  .filter(Client.deleted_at.is_(None), Client.name.isnot(None))
                  .order_by(Client.name).all())
     adlar.extend(u.name for u in UserRef.query.filter(UserRef.name.isnot(None)).all())
 
-    # Tekrarı ele — Türkçe-duyarlı karşılaştır, yazılan hâli koru.
+    # Dedupe — compare Turkish-aware, keep the as-written form.
     gorulen, benzersiz = set(), []
     for ad in adlar:
         ad = ' '.join(str(ad).split())
@@ -237,8 +244,8 @@ def transcript_vocabulary(extra=None):
         gorulen.add(k)
         benzersiz.append(ad)
 
-    # Karakter sınırına kadar doldur; sınırı aşan adı YARIM ekleme (kırpılmış bir
-    # marka adı modele yanlış ipucu verir).
+    # Fill up to the character limit; don't add a name HALFWAY past the limit (a
+    # truncated brand name gives the model a wrong hint).
     out, uzunluk = [], 0
     for ad in benzersiz:
         ek = len(ad) + 2
@@ -249,38 +256,41 @@ def transcript_vocabulary(extra=None):
     return ', '.join(out) + ('.' if out else '')
 
 
-# --- sesli not ajanı (2026-08-09) -------------------------------------------
+# --- voice note agent (2026-08-09) -------------------------------------------
 
 def voice_note_instruction(transcript, bugun=None):
-    """Sesli not transkriptini yapılandırılmış nota çeviren claude talimatı.
+    """Claude instruction that turns a voice note transcript into a structured note.
 
-    Bağlam (müşteri ve ekip listeleri) prompt'a ÖNCEDEN basılır — ajana DB
-    erişimi verilmez. Gerekçe: `ai_claude` tool ve MCP'yi bilerek kapatıyor
-    (`--strict-mcp-config` + `--disallowedTools`) çünkü `claude -p` proje sahibi'in
-    abonelik oturumunda çalışıyor; tool açmak injection yüzeyini büyütürdü.
-    Ajanın ihtiyacı olan tek şey bu iki eşleme tablosu.
+    Context (client and team lists) is baked into the prompt UPFRONT — the agent
+    isn't given DB access. Rationale: `ai_claude` deliberately disables tools and
+    MCP (`--strict-mcp-config` + `--disallowedTools`) because `claude -p` runs
+    under the project owner's subscription session; opening up tools would widen
+    the injection surface. The only thing the agent needs is these two lookup
+    tables.
 
-    Transkript `wrap_untrusted` ile sarılır: kullanıcının kendi sesi de
-    untrusted veridir (transkripte 'önceki talimatları unut' geçebilir)."""
+    The transcript is wrapped with `wrap_untrusted`: the user's own voice is also
+    untrusted data (the transcript could contain "forget previous instructions")."""
     import ai_claude
     from datetime import date as _date
 
     from models import UserRef
-    # PANEL_ROLES'u planning'den import ediyoruz (tekrar TANIMLAMIYORUZ): panoya
-    # atanabilir rol kümesi TEK yerde yaşamalı. 2026-08-09 canlı bulgusu — bu
-    # süzgeç YOKTU: 'pending' rolündeki kullanıcılar (panosu olmayan, /planlama'nın
-    # reddettiği hesaplar) ajana aday olarak veriliyordu; `planning._apply_item`
-    # assignee_sub'ı TÜM users_ref'e karşı doğruladığı için yazma başarılı oluyor
-    # ama atanan kişi göreve HİÇBİR ZAMAN erişemiyordu (aynı isimde iki kullanıcı,
-    # pending/designer rol karışıklığı). İki liste ayrışırsa hata geri gelir.
+    # We import PANEL_ROLES from planning (we do NOT redefine it): the set of
+    # roles a board can be assigned to must live in ONE place. 2026-08-09 live
+    # finding — this filter was MISSING: users with the 'pending' role (accounts
+    # with no board, rejected by /planlama) were being offered to the agent as
+    # candidates; since `planning._apply_item` validates assignee_sub against ALL
+    # of users_ref, the write succeeded but the assigned person could NEVER access
+    # the task (two users with the same name, pending/designer role confusion). If
+    # the two lists diverge, the error comes back.
     from planning import PANEL_ROLES
 
     bugun = bugun or _date.today().isoformat()
     musteriler = (db.session.query(Client.id, Client.name)
                   .filter(Client.deleted_at.is_(None), Client.name.isnot(None))
                   .order_by(Client.name).all())
-    # order_by(name): prompt sırası deterministik olsun (ekip listesi büyüdükçe
-    # aynı transkript aynı JSON metnini üretsin — test/ölçüm tekrarlanabilir kalsın).
+    # order_by(name): keep the prompt order deterministic (as the team list grows,
+    # the same transcript should produce the same JSON text — tests/measurements
+    # stay reproducible).
     ekip = [(u.sub, u.name) for u in UserRef.query
             .filter(UserRef.name.isnot(None), UserRef.role.in_(PANEL_ROLES))
             .order_by(UserRef.name).all()]
@@ -312,9 +322,9 @@ def voice_note_instruction(transcript, bugun=None):
 
 
 def _marka_baglami(client):
-    """`[MARKA BAĞLAMI]` bloğunun satırları — iki görsel prompt kurucusu da bunu kullanır.
+    """Lines of the `[MARKA BAĞLAMI]` block — both image prompt builders use this.
 
-    GÜVENİLİR veri (bizim DB'miz) → `wrap_untrusted` ile sarılmaz."""
+    TRUSTED data (our own DB) → not wrapped with `wrap_untrusted`."""
     prof = client.brand_profile or {}
     satirlar = ['[MARKA BAĞLAMI]',
                 f'Müşteri: {client.name} · Sektör: {client.sector or "belirtilmemiş"}']
@@ -328,15 +338,16 @@ def _marka_baglami(client):
 
 
 def codex_image_instruction(client, brief, user_prompt, aspect_ratio):
-    """Codex `$imagegen` için deterministik resolved prompt (bkz. spec §5).
+    """Deterministic resolved prompt for Codex `$imagegen` (see spec §5).
 
-    Marka bağlamı GÜVENİLİR (bizim DB'miz), brief ve kullanıcı istemi GÜVENİLMEZ:
-    ikincisi `wrap_untrusted` ile sarılır ve zorunlu kısıtlar bloğu ondan SONRA gelir —
-    sıra önemlidir, sarmalanmış metnin içindeki "önceki talimatları unut" denemesi
-    kısıtları ezemesin.
+    The brand context is TRUSTED (our own DB), the brief and the user prompt are
+    UNTRUSTED: the latter are wrapped with `wrap_untrusted` and the mandatory
+    constraints block comes AFTER them — order matters, so that a "forget previous
+    instructions" attempt inside the wrapped text can't override the constraints.
 
-    Kırpma sınırları (brief 4000, istem 2000) prompt'un şişip üretimi bozmasını
-    engeller; `$imagegen` uzun bağlamda talimatın sonunu kaçırıyor."""
+    The truncation limits (brief 4000, prompt 2000) keep the prompt from bloating
+    and breaking generation; `$imagegen` misses the end of the instruction in a
+    long context."""
     import ai_claude
     from models_imagegen import ASPECTS
     w, h = ASPECTS.get(aspect_ratio, ASPECTS['social_post_4_5'])
@@ -356,19 +367,22 @@ def codex_image_instruction(client, brief, user_prompt, aspect_ratio):
 
 
 def image_json_instruction(client, idea):
-    """Brief fikrini İngilizce yapılandırılmış görsel JSON'una çeviren claude talimatı.
+    """Claude instruction that translates a brief idea into structured English image JSON.
 
-    Bu SADECE biçim dönüşümü DEĞİL: brief'in susduğu görsel-dil alanlarını (kamera,
-    kompozisyon, ışık, teknik) marka bağlamından türetir. Yukarıdaki
-    `image_prompt_json_instruction`'ın "istemde olmayanı uydurma" kuralı buraya
-    DEVRALINMAZ — devralınsaydı şemanın yarısı boş çıkardı (brief
-    `camera.depth_of_field` demiyor).
+    This is NOT just a format conversion: it derives the visual-language fields the
+    brief stays silent on (camera, composition, lighting, technical) from the brand
+    context. The "don't invent what's not in the prompt" rule from
+    `image_prompt_json_instruction` above does NOT carry over here — if it did,
+    half the schema would come out empty (the brief doesn't say
+    `camera.depth_of_field`).
 
-    Varyant parametresi YOK: çeviri fikir başına bir kez yapılır, iki varyant aynı
-    JSON'u paylaşır (spec §3-§4). `clean` farkı kod tarafında uygulanır.
+    There's NO variant parameter: the translation is done once per idea, both
+    variants share the same JSON (spec §3-§4). The `clean` difference is applied
+    on the code side.
 
-    Fikir alanları UNTRUSTED → `wrap_untrusted` ile sarılır; kurallar ondan ÖNCE
-    yazılır ki sarmalanmış metindeki 'önceki talimatları unut' denemesi onları ezmesin.
+    Idea fields are UNTRUSTED → wrapped with `wrap_untrusted`; the rules are written
+    BEFORE them so a "forget previous instructions" attempt inside the wrapped text
+    can't override them.
     """
     import ai_claude
     import imagegen_prompt as ip
@@ -383,8 +397,8 @@ def image_json_instruction(client, idea):
     if prof.get('forbidden'):
         marka.append(f'Avoid: {ip.url_temizle(str(prof["forbidden"]))}')
 
-    # Fikirden yalnız prompt'a girecek alanlar; hepsi URL'den arındırılır.
-    # `pinterest` BİLEREK YOK — link gönderilmez.
+    # Only the fields from the idea that go into the prompt; all are stripped of URLs.
+    # `pinterest` is DELIBERATELY MISSING — no link is sent.
     fikir = []
     for etiket, anahtar in (('Title', 'başlık'), ('Topic', 'içerik'),
                             ('Visual style', 'görsel_tarz'),

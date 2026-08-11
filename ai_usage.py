@@ -1,8 +1,9 @@
-"""claude -p token/maliyet kaydı ve toplama (Sunucu Ayarları token paneli).
+"""claude -p token/cost recording and aggregation (Server Settings token panel).
 
-`ai_claude.usage_sink` bu modülün `record`'una bağlanır (worker main()'de). Kayıt
-best-effort: hata üretimi etkilemez. `aggregate` panele bugün/7 gün/toplam + kaynak/
-model kırılımı döndürür. Sır/prompt saklanmaz — yalnız sayaç.
+`ai_claude.usage_sink` hooks into this module's `record` (in the worker's
+main()). Recording is best-effort: an error doesn't affect production.
+`aggregate` returns today/7-day/total + source/model breakdown to the panel.
+No secrets/prompts are stored — counters only.
 """
 from datetime import timedelta
 
@@ -13,10 +14,10 @@ from models import AiUsage, utcnow
 
 
 def record(model, usage, cost_usd, source=None):
-    """Bir claude -p çağrısının usage'ını yazar. `usage`: claude JSON usage dict.
+    """Writes the usage of one claude -p call. `usage`: claude's JSON usage dict.
 
-    Best-effort — kendi transaction'ını yönetir; hata durumunda sessizce vazgeçer
-    (asıl iş akışı bundan etkilenmemeli)."""
+    Best-effort — manages its own transaction; silently gives up on error
+    (the actual workflow must not be affected by this)."""
     if not isinstance(usage, dict):
         return
     try:
@@ -29,7 +30,7 @@ def record(model, usage, cost_usd, source=None):
             cache_creation_tokens=int(usage.get('cache_creation_input_tokens') or 0),
             cost_usd=float(cost_usd or 0.0)))
         db.session.commit()
-    except Exception:  # noqa: BLE001 — izleme kaydı asla üretimi bozmaz
+    except Exception:  # noqa: BLE001 — tracking record must never break production
         db.session.rollback()
 
 
@@ -62,7 +63,7 @@ def _group(col, since):
 
 
 def aggregate():
-    """Panel için token/maliyet özeti: bugün/7 gün/toplam + kaynak & model kırılımı (30g)."""
+    """Token/cost summary for the panel: today/7 days/total + source & model breakdown (30d)."""
     now = utcnow()
     day = now - timedelta(days=1)
     week = now - timedelta(days=7)

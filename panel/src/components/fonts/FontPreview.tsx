@@ -1,11 +1,13 @@
-// Tek font satırının metin önizlemesi (2026-08-05).
+// Text preview for a single font row (2026-08-05).
 //
-// Font dosyası GÖRÜNÜR OLUNCA yüklenir (IntersectionObserver): havuzda 30+ dosya
-// olabiliyor, sayfa açılışta hepsini indirmemeli. Yükleme bitene kadar metin
-// sistem fontuyla soluk gösterilir — boş kutu yerine okunur bir ara durum.
+// The font file is loaded WHEN IT BECOMES VISIBLE (IntersectionObserver): the
+// pool can have 30+ files, so we shouldn't download all of them on page load.
+// Until loading finishes, the text is shown faded in the system font — a
+// readable in-between state instead of an empty box.
 import { useEffect, useRef, useState } from "react"
 
 import { cssFamily, loadFontFace, type FontItem } from "@/lib/fonts"
+import { useI18n } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
 export function FontPreview({ font, text, size, dark, className }: {
@@ -15,6 +17,7 @@ export function FontPreview({ font, text, size, dark, className }: {
   dark?: boolean
   className?: string
 }) {
+  const { t } = useI18n()
   const ref = useRef<HTMLDivElement>(null)
   const [durum, setDurum] = useState<"bekliyor" | "yuklendi" | "hata">("bekliyor")
 
@@ -25,7 +28,7 @@ export function FontPreview({ font, text, size, dark, className }: {
       if (!girisler.some((g) => g.isIntersecting)) return
       gozlemci.disconnect()
       loadFontFace(font).then(() => setDurum("yuklendi")).catch(() => setDurum("hata"))
-    }, { rootMargin: "200px" })     // ekrana girmeden biraz önce başlat
+    }, { rootMargin: "200px" })     // start slightly before it enters the viewport
     gozlemci.observe(el)
     return () => gozlemci.disconnect()
   }, [font, durum])
@@ -46,7 +49,7 @@ export function FontPreview({ font, text, size, dark, className }: {
           fontSize: `${size}px`,
         }}
       >
-        {durum === "hata" ? "Font yüklenemedi" : (text || " ")}
+        {durum === "hata" ? t("components.fonts.fontPreview.fontLoadFailed") : (text || " ")}
       </div>
     </div>
   )

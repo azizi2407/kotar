@@ -1,4 +1,4 @@
-"""users_ref projeksiyonu: login'de upsert + /api/users listesi."""
+"""users_ref projection: upsert on login + /api/users listing."""
 from conftest import DESIGNER, MANAGER, login_as
 
 

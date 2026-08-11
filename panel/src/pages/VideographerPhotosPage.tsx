@@ -1,7 +1,7 @@
-// Videografçı Fotoğraf Kütüphanesi — müşteri-merkezli master-detail. Sol: müşteri
-// listesi (foto sayısı + son çekim). Sağ: seçili müşterinin fotoğrafları çekim
-// tarihine göre gruplu galeri + sürükle-bırak yükleme (staging önizlemeli), çoklu
-// seçim (toplu sil/indir), lightbox ve "designer kullandı mı" rozeti/filtresi.
+// Videographer Photo Library — client-centric master-detail. Left: client
+// list (photo count + last shoot). Right: selected client's photos, grouped
+// gallery by shoot date + drag-and-drop upload (with staging preview), multi
+// select (bulk delete/download), lightbox, and a "used by designer" badge/filter.
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
@@ -17,6 +17,7 @@ import {
 import { acceptsFile, MAX_UPLOAD_BYTES, MAX_UPLOAD_MB } from "@/lib/api"
 import { useClients } from "@/lib/clients"
 import { useAuth } from "@/lib/auth"
+import { useI18n, type Lang } from "@/lib/i18n"
 import { trFold } from "@/lib/week"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -31,11 +32,13 @@ import {
 import { cn } from "@/lib/utils"
 
 const TR_MONTHS = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
+const EN_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
-function fmtDate(d: string | null): string {
-  if (!d) return "Tarih yok"
+function fmtDate(d: string | null, lang: Lang, noDateLabel: string): string {
+  if (!d) return noDateLabel
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(d)
-  return m ? `${Number(m[3])} ${TR_MONTHS[Number(m[2]) - 1]} ${m[1]}` : d
+  const months = lang === "tr" ? TR_MONTHS : EN_MONTHS
+  return m ? `${Number(m[3])} ${months[Number(m[2]) - 1]} ${m[1]}` : d
 }
 
 function fmtSize(b: number | null): string {
@@ -48,6 +51,7 @@ function fmtSize(b: number | null): string {
 type Filter = "all" | "used" | "unused"
 
 export function VideographerPhotosPage() {
+  const { t, lang } = useI18n()
   const [params, setParams] = useSearchParams()
   const { user } = useAuth()
   const canMarkUsed = user?.role === "management" || user?.role === "designer"
@@ -71,7 +75,7 @@ export function VideographerPhotosPage() {
   const setSelectedClient = (id: number) =>
     setParams((p) => { p.set("client", String(id)); return p }, { replace: true })
 
-  // Müşteri başına foto sayısı + son çekim tarihi
+  // Photo count per client + last shoot date
   const perClient = useMemo(() => {
     const map = new Map<number, { count: number; last: string | null }>()
     for (const p of photos ?? []) {
@@ -83,7 +87,7 @@ export function VideographerPhotosPage() {
     return map
   }, [photos])
 
-  // Sol liste: fotoğrafı olanlar üstte (foto sayısı azalan), sonra diğerleri; aramayla süz.
+  // Left list: clients with photos first (descending photo count), then the rest; filter by search.
   const clientRows = useMemo(() => {
     const nq = trFold(clientSearch.trim())
     const list = (clients ?? [])
@@ -96,12 +100,12 @@ export function VideographerPhotosPage() {
     })
   }, [clients, clientSearch, perClient])
 
-  // Seçili müşterinin TÜM fotoğrafları (filtreden bağımsız) — kullanım özeti için.
+  // ALL photos of the selected client (independent of filter) — for the usage summary.
   const clientPhotos = useMemo(
     () => (photos ?? []).filter((p) => p.client_id === selectedClientId), [photos, selectedClientId])
   const usedCount = clientPhotos.filter((p) => p.used).length
 
-  // Seçili müşterinin görünür (filtreli) fotoğrafları, çekim tarihi azalan
+  // Visible (filtered) photos of the selected client, descending shoot date
   const visible = useMemo(() => {
     let list = (photos ?? []).filter((p) => p.client_id === selectedClientId)
     if (filter === "used") list = list.filter((p) => p.used)
@@ -109,7 +113,7 @@ export function VideographerPhotosPage() {
     return list.sort((a, b) => (b.shoot_date ?? "").localeCompare(a.shoot_date ?? ""))
   }, [photos, selectedClientId, filter])
 
-  // Tarihe göre gruplar (boş tarih sona)
+  // Group by date (empty date goes last)
   const groups = useMemo(() => {
     const map = new Map<string, VgPhoto[]>()
     for (const p of visible) {
@@ -124,7 +128,7 @@ export function VideographerPhotosPage() {
     })
   }, [visible])
 
-  // Müşteri/filtre değişince seçim + lightbox sıfırlansın
+  // Reset selection + lightbox when client/filter changes
   useEffect(() => { setSelected(new Set()); setLastIdx(null); setLightbox(null) }, [selectedClientId, filter])
 
   const clientName = clientRows.find((c) => c.id === selectedClientId)?.name
@@ -149,7 +153,7 @@ export function VideographerPhotosPage() {
     bulkDelete.mutate(ids, {
       onSuccess: (r) => {
         if (r.errors?.length) toast.error(r.errors.join(", "))
-        if (r.deleted) toast.success(`${r.deleted} fotoğraf silindi`)
+        if (r.deleted) toast.success(t("pages.videographerPhotos.bulkDeleted", { count: r.deleted }))
         setSelected(new Set())
       },
       onError: (e) => toast.error(e.message),
@@ -162,14 +166,14 @@ export function VideographerPhotosPage() {
     try {
       await downloadVgPhotosZip(ids)
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "İndirilemedi")
+      toast.error(e instanceof Error ? e.message : t("pages.videographerPhotos.downloadFailed"))
     }
   }
 
   function doDelete(id: number) {
     delPhoto.mutate(id, {
       onSuccess: () => {
-        toast.success("Fotoğraf silindi")
+        toast.success(t("pages.videographerPhotos.photoDeleted"))
         setSelected((prev) => { const n = new Set(prev); n.delete(id); return n })
         setLightbox(null)
       },
@@ -179,30 +183,30 @@ export function VideographerPhotosPage() {
 
   function doRename(id: number, name: string) {
     rename.mutate({ id, name }, {
-      onSuccess: () => { toast.success("Yeniden adlandırıldı"); setRenaming(null) },
+      onSuccess: () => { toast.success(t("pages.videographerPhotos.renamed")); setRenaming(null) },
       onError: (e) => toast.error(e.message),
     })
   }
 
-  if (isError) return <p className="text-destructive">Fotoğraflar yüklenemedi.</p>
+  if (isError) return <p className="text-destructive">{t("pages.videographerPhotos.loadError")}</p>
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Fotoğraflar</h1>
-        <p className="text-muted-foreground">Çekim fotoğrafları — müşteriye göre kütüphane.</p>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("pages.videographerPhotos.title")}</h1>
+        <p className="text-muted-foreground">{t("pages.videographerPhotos.subtitle")}</p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-[260px_1fr]">
-        {/* Sol: müşteri listesi */}
+        {/* Left: client list */}
         <aside className="space-y-2">
-          <Input placeholder="Müşteri ara…" value={clientSearch}
+          <Input placeholder={t("pages.videographerPhotos.clientSearchPlaceholder")} value={clientSearch}
             onChange={(e) => setClientSearch(e.target.value)} className="h-9" />
           <div className="max-h-[70vh] overflow-y-auto rounded-lg border">
             {isLoading ? (
               <div className="space-y-1 p-2">{[...Array(6)].map((_, i) => <Skeleton key={i} className="h-11 w-full" />)}</div>
             ) : clientRows.length === 0 ? (
-              <p className="p-3 text-sm text-muted-foreground">Müşteri yok.</p>
+              <p className="p-3 text-sm text-muted-foreground">{t("pages.videographerPhotos.noClients")}</p>
             ) : (
               <ul className="divide-y">
                 {clientRows.map((c) => (
@@ -212,7 +216,13 @@ export function VideographerPhotosPage() {
                         c.id === selectedClientId && "bg-muted", c.count === 0 && "text-muted-foreground")}>
                       <span className="min-w-0 flex-1">
                         <span className="block truncate font-medium">{c.name}</span>
-                        {c.last && <span className="text-[11px] text-muted-foreground">son: {fmtDate(c.last)}</span>}
+                        {c.last && (
+                          <span className="text-[11px] text-muted-foreground">
+                            {t("pages.videographerPhotos.lastShootLabel", {
+                              date: fmtDate(c.last, lang, t("pages.videographerPhotos.noDate")),
+                            })}
+                          </span>
+                        )}
                       </span>
                       {c.count > 0 && (
                         <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
@@ -227,48 +237,54 @@ export function VideographerPhotosPage() {
           </div>
         </aside>
 
-        {/* Sağ: galeri */}
+        {/* Right: gallery */}
         <section className="min-w-0 space-y-4">
           {selectedClientId === null ? (
             <div className="flex h-64 items-center justify-center rounded-lg border border-dashed text-muted-foreground">
-              Soldan bir müşteri seç.
+              {t("pages.videographerPhotos.selectClientHint")}
             </div>
           ) : (
             <>
               <Uploader clientId={selectedClientId} upload={upload} />
 
-              {/* Kullanım özeti — designer kaç fotoğraf kullandı / kaç kaldı */}
+              {/* Usage summary — how many photos the designer used / how many remain */}
               {clientPhotos.length > 0 && (
                 <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <span className="rounded-full bg-muted px-2 py-0.5">Toplam {clientPhotos.length}</span>
+                  <span className="rounded-full bg-muted px-2 py-0.5">
+                    {t("pages.videographerPhotos.totalLabel", { count: clientPhotos.length })}
+                  </span>
                   <span className="rounded-full bg-emerald-600/15 px-2 py-0.5 text-emerald-700 dark:text-emerald-400">
-                    Kullanıldı {usedCount}
+                    {t("pages.videographerPhotos.usedLabel", { count: usedCount })}
                   </span>
                   <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-amber-700 dark:text-amber-400">
-                    Kalan {clientPhotos.length - usedCount}
+                    {t("pages.videographerPhotos.remainingLabel", { count: clientPhotos.length - usedCount })}
                   </span>
                 </div>
               )}
 
-              {/* Filtre + toplu aksiyon şeridi */}
+              {/* Filter + bulk action bar */}
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex gap-1 rounded-lg border p-1 text-sm">
                   {(["all", "unused", "used"] as Filter[]).map((f) => (
                     <button key={f} onClick={() => setFilter(f)}
                       className={cn("rounded-md px-2.5 py-1 transition-colors",
                         filter === f ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}>
-                      {f === "all" ? "Hepsi" : f === "used" ? "Kullanılan" : "Kullanılmayan"}
+                      {f === "all" ? t("pages.videographerPhotos.filterAll")
+                        : f === "used" ? t("pages.videographerPhotos.filterUsed")
+                          : t("pages.videographerPhotos.filterUnused")}
                     </button>
                   ))}
                 </div>
                 {selected.size > 0 && (
                   <div className="flex items-center gap-2">
-                    <span className="text-sm text-muted-foreground">{selected.size} seçili</span>
+                    <span className="text-sm text-muted-foreground">
+                      {t("pages.videographerPhotos.selectedCount", { count: selected.size })}
+                    </span>
                     <Button size="sm" variant="outline" onClick={doBulkDownload}>
-                      <Download className="mr-1 h-4 w-4" /> İndir
+                      <Download className="mr-1 h-4 w-4" /> {t("pages.videographerPhotos.downloadBtn")}
                     </Button>
                     <Button size="sm" variant="destructive" onClick={doBulkDelete} disabled={bulkDelete.isPending}>
-                      <Trash2 className="mr-1 h-4 w-4" /> Sil
+                      <Trash2 className="mr-1 h-4 w-4" /> {t("pages.videographerPhotos.deleteBtn")}
                     </Button>
                     <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
                       <X className="h-4 w-4" />
@@ -283,13 +299,18 @@ export function VideographerPhotosPage() {
                 </div>
               ) : visible.length === 0 ? (
                 <p className="text-muted-foreground">
-                  {clientName ? `${clientName} için bu filtrede fotoğraf yok.` : "Fotoğraf yok."}
+                  {clientName
+                    ? t("pages.videographerPhotos.noPhotosForClient", { name: clientName })
+                    : t("pages.videographerPhotos.noPhotosAtAll")}
                 </p>
               ) : (
                 groups.map(([dateKey, items]) => (
                   <div key={dateKey || "nodate"} className="space-y-2">
                     <h3 className="text-sm font-medium text-muted-foreground">
-                      {fmtDate(dateKey || null)} · {items.length} foto
+                      {t("pages.videographerPhotos.photoCountLabel", {
+                        date: fmtDate(dateKey || null, lang, t("pages.videographerPhotos.noDate")),
+                        count: items.length,
+                      })}
                     </h3>
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
                       {items.map((p) => {
@@ -334,37 +355,39 @@ export function VideographerPhotosPage() {
   )
 }
 
-// Yeniden adlandırma dialog'u — uzantı backend'de korunur; kullanıcı sadece adı girer.
+// Rename dialog — the extension is preserved by the backend; the user only enters the name.
 function RenameDialog({ photo, pending, onClose, onSave }: {
   photo: VgPhoto | null
   pending: boolean
   onClose: () => void
   onSave: (id: number, name: string) => void
 }) {
+  const { t } = useI18n()
   const [name, setName] = useState("")
   useEffect(() => { setName(photo?.file_name ?? "") }, [photo])
   return (
     <Dialog open={photo !== null} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-md">
-        <DialogHeader><DialogTitle>Yeniden adlandır</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{t("pages.videographerPhotos.renameTitle")}</DialogTitle></DialogHeader>
         <Input value={name} onChange={(e) => setName(e.target.value)} autoFocus
           onKeyDown={(e) => { if (e.key === "Enter" && photo && name.trim()) onSave(photo.id, name.trim()) }} />
         <DialogFooter>
-          <Button variant="ghost" onClick={onClose}>İptal</Button>
+          <Button variant="ghost" onClick={onClose}>{t("pages.videographerPhotos.cancelBtn")}</Button>
           <Button disabled={pending || !name.trim()}
-            onClick={() => photo && onSave(photo.id, name.trim())}>Kaydet</Button>
+            onClick={() => photo && onSave(photo.id, name.trim())}>{t("pages.videographerPhotos.saveBtn")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   )
 }
 
-// Sürükle-bırak yükleme — staging önizlemeli. Dosyalar önce sahnelenir, "Yükle" ile
-// gönderilir; yüklemeden önce küçük önizleme + dosya başına toplam ilerleme.
+// Drag-and-drop upload — with staging preview. Files are staged first, then
+// sent via "Upload"; small preview before upload + overall per-file progress.
 function Uploader({ clientId, upload }: {
   clientId: number
   upload: ReturnType<typeof useUploadVgPhotos>
 }) {
+  const { t } = useI18n()
   const [staged, setStaged] = useState<File[]>([])
   const [shootDate, setShootDate] = useState("")
   const [pct, setPct] = useState(0)
@@ -377,9 +400,13 @@ function Uploader({ clientId, upload }: {
 
   function addFiles(files: File[]) {
     let imgs = files.filter((f) => acceptsFile(f, "image"))
-    if (imgs.length < files.length) toast.error(`${files.length - imgs.length} dosya eklenmedi (görsel değil)`)
+    if (imgs.length < files.length) {
+      toast.error(t("pages.videographerPhotos.filesRejectedNotImage", { count: files.length - imgs.length }))
+    }
     const tooBig = imgs.filter((f) => f.size > MAX_UPLOAD_BYTES)
-    if (tooBig.length) toast.error(`${tooBig.length} dosya ${MAX_UPLOAD_MB} MB sınırını aşıyor, eklenmedi`)
+    if (tooBig.length) {
+      toast.error(t("pages.videographerPhotos.filesTooBig", { count: tooBig.length, maxMb: MAX_UPLOAD_MB }))
+    }
     imgs = imgs.filter((f) => f.size <= MAX_UPLOAD_BYTES)
     if (imgs.length) setStaged((s) => [...s, ...imgs])
   }
@@ -392,11 +419,11 @@ function Uploader({ clientId, upload }: {
       {
         onSuccess: (r: { saved: unknown[]; errors: string[] }) => {
           if (r.errors?.length) toast.error(r.errors.join(", "))
-          if (r.saved?.length) toast.success(`${r.saved.length} fotoğraf yüklendi`)
+          if (r.saved?.length) toast.success(t("pages.videographerPhotos.uploadedCount", { count: r.saved.length }))
           setStaged([])
           setPct(0)
         },
-        onError: (err) => toast.error(err instanceof Error ? err.message : "Yükleme başarısız"),
+        onError: (err) => toast.error(err instanceof Error ? err.message : t("pages.videographerPhotos.uploadFailed")),
       },
     )
   }
@@ -411,7 +438,10 @@ function Uploader({ clientId, upload }: {
         className={cn("flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed py-6 text-center text-sm transition-colors",
           dragOver ? "border-primary bg-primary/5" : "border-muted-foreground/25 hover:border-primary/40")}>
         <Upload className="mb-1 h-5 w-5 text-muted-foreground" />
-        <span className="text-muted-foreground">Fotoğrafları buraya sürükle ya da <span className="text-primary">seç</span></span>
+        <span className="text-muted-foreground">
+          {t("pages.videographerPhotos.dropHintPrefix")}{" "}
+          <span className="text-primary">{t("pages.videographerPhotos.dropHintAction")}</span>
+        </span>
         <input ref={fileInput} type="file" accept="image/*" multiple className="hidden"
           onChange={(e) => { addFiles(Array.from(e.target.files ?? [])); e.target.value = "" }} />
       </div>
@@ -431,14 +461,18 @@ function Uploader({ clientId, upload }: {
           </div>
           <div className="flex flex-wrap items-end gap-3">
             <div className="space-y-1">
-              <label className="text-xs text-muted-foreground">Çekim tarihi (ops.)</label>
+              <label className="text-xs text-muted-foreground">{t("pages.videographerPhotos.shootDateLabel")}</label>
               <Input type="date" value={shootDate} onChange={(e) => setShootDate(e.target.value)} className="h-9 w-40" />
             </div>
             <Button onClick={doUpload} disabled={upload.isPending}>
               <Upload className="mr-1 h-4 w-4" />
-              {upload.isPending ? `Yükleniyor… %${pct}` : `${staged.length} fotoğrafı yükle`}
+              {upload.isPending
+                ? t("pages.videographerPhotos.uploading", { pct })
+                : t("pages.videographerPhotos.uploadCount", { count: staged.length })}
             </Button>
-            <Button variant="ghost" onClick={() => setStaged([])} disabled={upload.isPending}>Temizle</Button>
+            <Button variant="ghost" onClick={() => setStaged([])} disabled={upload.isPending}>
+              {t("pages.videographerPhotos.clearBtn")}
+            </Button>
           </div>
         </>
       )}
@@ -446,19 +480,19 @@ function Uploader({ clientId, upload }: {
   )
 }
 
-// Fotoğrafın KENDİSİNE giden kalıcı bağlantıyı panoya alır (2026-07-30). Sunucudaki
-// 21 günlük kopyadan servis edilir; süresi dolunca uç Drive'a 302 yönlendirir, yani
-// kopyalanmış link ölmez. Panel oturumu gerektirmez (bkz. public_media.py).
-async function copyPhotoLink(photo: VgPhoto) {
+// Copies a permanent link to the photo ITSELF to the clipboard (2026-07-30). Served
+// from the server's 21-day copy; once that expires the endpoint 302-redirects to
+// Drive, so the copied link never dies. Requires no panel session (see public_media.py).
+async function copyPhotoLink(photo: VgPhoto, t: (key: string, vars?: Record<string, string | number>) => string) {
   if (!photo.file_id) {
-    toast.error("Bu fotoğrafın dosya kimliği yok")
+    toast.error(t("pages.videographerPhotos.noFileId"))
     return
   }
   try {
     await navigator.clipboard.writeText(publicMediaUrl(photo.file_id))
-    toast.success("Doğrudan bağlantı kopyalandı")
+    toast.success(t("pages.videographerPhotos.directLinkCopied"))
   } catch {
-    toast.error("Kopyalanamadı — tarayıcı izin vermedi")
+    toast.error(t("pages.videographerPhotos.copyFailedPermission"))
   }
 }
 
@@ -473,10 +507,11 @@ function PhotoCard({ photo, selected, onOpen, onToggle, canMarkUsed, onMarkUsed,
   onRename: () => void
   onDelete: () => void
 }) {
+  const { t } = useI18n()
   return (
     <div className={cn("group relative overflow-hidden rounded-lg border bg-muted/20 transition-shadow",
       selected && "ring-2 ring-primary")}>
-      {/* seçim kutusu */}
+      {/* selection checkbox */}
       <button onClick={(e) => onToggle(e.shiftKey)}
         className={cn("absolute left-1.5 top-1.5 z-10 flex h-5 w-5 items-center justify-center rounded border bg-background/80 transition",
           selected ? "border-primary bg-primary text-primary-foreground opacity-100" : "opacity-0 group-hover:opacity-100")}>
@@ -488,14 +523,16 @@ function PhotoCard({ photo, selected, onOpen, onToggle, canMarkUsed, onMarkUsed,
           <img src={thumbnailUrl(photo.file_id, 300)} alt={photo.file_name ?? ""} loading="lazy"
             className="aspect-square w-full object-cover" />
         ) : (
-          <div className="flex aspect-square w-full items-center justify-center text-xs text-muted-foreground">görsel yok</div>
+          <div className="flex aspect-square w-full items-center justify-center text-xs text-muted-foreground">
+            {t("pages.videographerPhotos.noImage")}
+          </div>
         )}
       </button>
 
-      {/* kullanım rozeti */}
+      {/* usage badge */}
       <span className={cn("absolute right-1.5 top-1.5 z-10 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
         photo.used ? "bg-emerald-600 text-white" : "bg-background/80 text-muted-foreground border")}>
-        {photo.used ? "Kullanıldı" : "Kullanılmadı"}
+        {photo.used ? t("pages.videographerPhotos.usedBadge") : t("pages.videographerPhotos.unusedBadge")}
       </span>
 
       <div className="flex items-center justify-between gap-1 px-2 py-1.5">
@@ -505,23 +542,24 @@ function PhotoCard({ photo, selected, onOpen, onToggle, canMarkUsed, onMarkUsed,
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger
-            render={<button className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" title="İşlemler" />}>
+            render={<button className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground" title={t("pages.videographerPhotos.actionsTitle")} />}>
             <MoreVertical className="h-4 w-4" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={onDownload}><Download className="mr-2 h-4 w-4" /> İndir</DropdownMenuItem>
-            <DropdownMenuItem onClick={() => copyPhotoLink(photo)}>
-              <Link2 className="mr-2 h-4 w-4" /> Bağlantıyı kopyala
+            <DropdownMenuItem onClick={onDownload}><Download className="mr-2 h-4 w-4" /> {t("pages.videographerPhotos.downloadBtn")}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => copyPhotoLink(photo, t)}>
+              <Link2 className="mr-2 h-4 w-4" /> {t("pages.videographerPhotos.copyLinkBtn")}
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={onRename}><Pencil className="mr-2 h-4 w-4" /> Yeniden adlandır</DropdownMenuItem>
+            <DropdownMenuItem onClick={onRename}><Pencil className="mr-2 h-4 w-4" /> {t("pages.videographerPhotos.renameBtn")}</DropdownMenuItem>
             {canMarkUsed && (
               <DropdownMenuItem onClick={() => onMarkUsed(!photo.used)}>
-                <Check className="mr-2 h-4 w-4" /> {photo.used ? "Kullanımı geri al" : "Kullanıldı işaretle"}
+                <Check className="mr-2 h-4 w-4" />{" "}
+                {photo.used ? t("pages.videographerPhotos.undoUsedBtn") : t("pages.videographerPhotos.markUsedBtn")}
               </DropdownMenuItem>
             )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={onDelete} className="text-destructive focus:text-destructive">
-              <Trash2 className="mr-2 h-4 w-4" /> Sil
+              <Trash2 className="mr-2 h-4 w-4" /> {t("pages.videographerPhotos.deleteBtn")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -539,6 +577,7 @@ function Lightbox({ photos, index, onClose, onNav, onDownload, onRename, onDelet
   onRename: (p: VgPhoto) => void
   onDelete: (id: number) => void
 }) {
+  const { t, lang } = useI18n()
   const p = photos[index]
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -552,19 +591,19 @@ function Lightbox({ photos, index, onClose, onNav, onDownload, onRename, onDelet
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4" onClick={onClose}>
-      {/* aksiyon çubuğu */}
+      {/* action bar */}
       <div className="absolute right-4 top-4 z-10 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
         <button className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
-          title="İndir" onClick={() => onDownload(p.id)}><Download className="h-5 w-5" /></button>
+          title={t("pages.videographerPhotos.downloadBtn")} onClick={() => onDownload(p.id)}><Download className="h-5 w-5" /></button>
         <button className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
-          title="Doğrudan bağlantıyı kopyala (sunucudan; süresi dolarsa Drive'a yönlenir)"
-          onClick={() => copyPhotoLink(p)}><Link2 className="h-5 w-5" /></button>
+          title={t("pages.videographerPhotos.copyDirectLinkTitle")}
+          onClick={() => copyPhotoLink(p, t)}><Link2 className="h-5 w-5" /></button>
         <button className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
-          title="Yeniden adlandır" onClick={() => onRename(p)}><Pencil className="h-5 w-5" /></button>
+          title={t("pages.videographerPhotos.renameBtn")} onClick={() => onRename(p)}><Pencil className="h-5 w-5" /></button>
         <button className="rounded-full bg-white/10 p-2 text-white hover:bg-red-500/70"
-          title="Sil" onClick={() => onDelete(p.id)}><Trash2 className="h-5 w-5" /></button>
+          title={t("pages.videographerPhotos.deleteBtn")} onClick={() => onDelete(p.id)}><Trash2 className="h-5 w-5" /></button>
         <button className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
-          title="Kapat" onClick={onClose}><X className="h-5 w-5" /></button>
+          title={t("pages.videographerPhotos.closeBtn")} onClick={onClose}><X className="h-5 w-5" /></button>
       </div>
       {index > 0 && (
         <button className="absolute left-4 rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
@@ -585,11 +624,11 @@ function Lightbox({ photos, index, onClose, onNav, onDownload, onRename, onDelet
         )}
         <div className="flex items-center gap-3 text-sm text-white/80">
           <span>{p.file_name}</span>
-          {p.shoot_date && <span>· {fmtDate(p.shoot_date)}</span>}
+          {p.shoot_date && <span>· {fmtDate(p.shoot_date, lang, t("pages.videographerPhotos.noDate"))}</span>}
           {p.file_size ? <span>· {fmtSize(p.file_size)}</span> : null}
           <span className={cn("rounded-full px-2 py-0.5 text-[11px]",
             p.used ? "bg-emerald-600 text-white" : "bg-white/15")}>
-            {p.used ? "Kullanıldı" : "Kullanılmadı"}
+            {p.used ? t("pages.videographerPhotos.usedBadge") : t("pages.videographerPhotos.unusedBadge")}
           </span>
         </div>
       </div>

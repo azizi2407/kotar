@@ -1,6 +1,7 @@
-// Kullanıcı yönetimi API'si — /api/admin/* (AUTH_MODE=local: yerel tablo;
-// AUTH_MODE=oidc: dış sağlayıcı proxy'si, bkz. admin_api.py). Yalnız superadmin.
+// User management API — /api/admin/* (AUTH_MODE=local: local table;
+// AUTH_MODE=oidc: proxies an external provider, see admin_api.py). Superadmin only.
 import { apiGet, apiJson } from "@/lib/api"
+import { useI18n } from "@/lib/i18n"
 
 export interface SsoUser {
   id: number
@@ -8,10 +9,10 @@ export interface SsoUser {
   name: string | null
   role: string
   status: string // active | disabled
-  linked: boolean // en az bir kez giriş yaptı mı (google_sub dolu) — AUTH_MODE=local'de her zaman true
+  linked: boolean // has logged in at least once (google_sub set) — always true under AUTH_MODE=local
   last_login: string | null
   created_at: string | null
-  // AUTH_MODE=local: oluşturma/parola sıfırlama yanıtında BİR KEZ döner (bkz. local_admin.py).
+  // AUTH_MODE=local: returned ONCE in the create/password-reset response (see local_admin.py).
   temp_password?: string
 }
 
@@ -25,14 +26,17 @@ export const ROLES = [
   "pending",
 ] as const
 
-export const ROLE_LABELS: Record<string, string> = {
-  management: "Yönetim",
-  designer: "Tasarımcı",
-  videographer: "Videografçı",
-  content_creator: "İçerik Üretici",
-  client: "Müşteri",
-  restaurant_owner: "Restoran Sahibi",
-  pending: "Beklemede",
+export function useRoleLabels(): Record<string, string> {
+  const { t } = useI18n()
+  return {
+    management: t("pages.users.role.management"),
+    designer: t("pages.users.role.designer"),
+    videographer: t("pages.users.role.videographer"),
+    content_creator: t("pages.users.role.contentCreator"),
+    client: t("pages.users.role.client"),
+    restaurant_owner: t("pages.users.role.restaurantOwner"),
+    pending: t("pages.users.role.pending"),
+  }
 }
 
 export const listUsers = () => apiGet("/admin/users").then((r) => r.users as SsoUser[])

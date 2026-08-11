@@ -1,14 +1,14 @@
-"""Müşteri örnek (referans) hesapları — 2026-08-07.
+"""Client example (reference) accounts — 2026-08-07.
 
-Tasarımcı/videograf "bu müşteri için nasıl içerik üretilir" sorusuna bakacağı
-örnekler: aynı sektörde, aynı işi yapan Instagram hesapları.
+Examples the designer/videographer look at for "how is content produced for
+this client": Instagram accounts in the same sector doing the same kind of work.
 
-**Onay kapısı var (proje sahibi kararı):** hesaplar `candidate` doğar, yönetim tek tek
-inceleyip `approved`/`rejected` işaretler. Marka rehberinde üretim rollerine
-YALNIZ `approved` olanlar görünür. Bu, projedeki AI içerik kapısıyla aynı desen:
-otomatik derlenen bir liste, insan onayından geçmeden ekibe sunulmaz — yanlış
-sektörden ya da ölü bir hesap "ajansın önerisi" gibi görünürdü.
-"""
+**There's an approval gate (project owner's decision):** accounts are born as
+`candidate`, management reviews them one by one and marks them
+`approved`/`rejected`. Only `approved` ones show up to production roles in the
+brand guide. This is the same pattern as the project's AI content gate: an
+automatically compiled list isn't shown to the team without human approval —
+otherwise a wrong-sector or dead account would look like "the agency's suggestion"."""
 from extensions import db
 from models import iso, utcnow
 
@@ -16,11 +16,11 @@ REFERENCE_STATUSES = ('candidate', 'approved', 'rejected')
 
 
 class ClientReferenceAccount(db.Model):
-    """Bir müşteri için örnek alınabilecek Instagram hesabı.
+    """An Instagram account that can be used as an example for a client.
 
-    `handle` müşteri içinde UNIQUE: aynı hesabı iki kez aday göstermek listeyi
-    kirletir. Farklı müşterilerde aynı handle serbest — bir hesap birden çok
-    müşteriye örnek olabilir (ör. iki inşaat firması).
+    `handle` is UNIQUE within a client: nominating the same account twice
+    pollutes the list. The same handle is free across different clients — one
+    account can be an example for multiple clients (e.g. two construction firms).
     """
     __tablename__ = 'client_reference_accounts'
     __table_args__ = (
@@ -30,12 +30,12 @@ class ClientReferenceAccount(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), nullable=False)
-    handle = db.Column(db.String(64), nullable=False)      # '@' YOK, düz kullanıcı adı
-    title = db.Column(db.String(200))                      # görünen ad / işletme adı
-    note = db.Column(db.Text)                              # neden örnek: ne iyi yapıyor
-    followers = db.Column(db.Integer)                      # eklendiği andaki kaba sayı
-    # Kaynak izi: elle mi eklendi yoksa araştırmayla mı derlendi. Yönetim
-    # incelerken "bunu ben mi eklemiştim" sorusunun cevabı.
+    handle = db.Column(db.String(64), nullable=False)      # NO '@', plain username
+    title = db.Column(db.String(200))                      # display name / business name
+    note = db.Column(db.Text)                              # why it's an example: what it does well
+    followers = db.Column(db.Integer)                      # rough count at time of adding
+    # Source trail: added manually or compiled via research. The answer to
+    # "did I add this?" when management is reviewing.
     source = db.Column(db.String(16), nullable=False, default='manual')   # manual | research
     status = db.Column(db.String(16), nullable=False, default='candidate')
     added_by = db.Column(db.String(64))

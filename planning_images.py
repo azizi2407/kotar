@@ -1,19 +1,19 @@
-"""Planlama Panosu görselleri — pano başına lokal dosya deposu.
+"""Planning Board images — a local file store per board.
 
-Kullanıcı panoya pano'dan (clipboard) görsel yapıştırır, dosya sürükler ya da
-sağ tık → "Görsel ekle" der; dosya SUNUCUDA saklanır ve `planning_items`'ta
-`type='image'` bir öğe ona işaret eder.
+The user pastes an image onto the board from the clipboard, drags a file, or
+right-clicks → "Add image"; the file is stored ON THE SERVER and an item with
+`type='image'` in `planning_items` points to it.
 
-Neden `img_bucket` değil: o depo `/img/<ad>` ile **public** servis eder (harici
-sitelere gömmek için). Pano içeriği iç veridir — public URL'e konamaz. Neden
-`media_store` değil: orası 21 GÜNLÜK önbellek (Drive kanonik), pano görselinin
-kanonik kopyası yoktur, silinirse öğe boşa düşer. Neden Drive değil: pano
-görselleri küçük ve çok sayıda; Drive OAuth kotası zaten %85 dolu ve her
-yapıştırmada ağ turu gecikme demek.
+Why not `img_bucket`: that store serves **publicly** via `/img/<name>` (for
+embedding on external sites). Board content is internal data — it can't be put
+on a public URL. Why not `media_store`: that's a 21-DAY cache (Drive is
+canonical), a board image has no canonical copy, and if deleted the item is left
+dangling. Why not Drive: board images are small and numerous; the Drive OAuth
+quota is already 85% full and every paste would mean a network round trip delay.
 
-Yerleşim: `data/planning-images/<board_id>/<uuid>.<ext>` — dizinin pano başına
-ayrılması yetkilendirmeyi bedavaya getirir: servis ucu `_board_access(key)`'den
-geçer, dosya adı tahmin edilse bile başka panonun görseline erişilemez.
+Layout: `data/planning-images/<board_id>/<uuid>.<ext>` — splitting the directory
+per board gets authorization for free: the serving endpoint goes through
+`_board_access(key)`, so even a guessed file name can't reach another board's image.
 """
 import io
 import os
@@ -22,19 +22,20 @@ import uuid
 from flask import current_app
 from PIL import Image, UnidentifiedImageError
 
-# Kabul edilen türler — PIL'in tanıdığı ve tarayıcının gösterebildiği kesişim.
-# SVG BİLEREK YOK: metin tabanlı, script taşıyabilir ve panoda inline render
-# edilecek (img_bucket'ta kabul edilir çünkü orası harici gömme içindir).
+# Accepted types — the intersection of what PIL recognizes and the browser can display.
+# SVG IS DELIBERATELY EXCLUDED: it's text-based, can carry scripts, and would be
+# rendered inline on the board (it's accepted in img_bucket because that's for
+# external embedding).
 ALLOWED = {'PNG': '.png', 'JPEG': '.jpg', 'GIF': '.gif', 'WEBP': '.webp'}
 
-MAX_BYTES = 10 * 1024 * 1024              # 10 MB/dosya — ekran görüntüsü için bol
-MAX_BOARD_BYTES = 500 * 1024 * 1024       # 500 MB/pano
-MAX_EDGE = 2000                           # bundan büyük kenar küçültülür
+MAX_BYTES = 10 * 1024 * 1024              # 10 MB/file — plenty for a screenshot
+MAX_BOARD_BYTES = 500 * 1024 * 1024       # 500 MB/board
+MAX_EDGE = 2000                           # edges larger than this are downscaled
 NAME_LEN = 32                             # uuid4().hex
 
 
 class ImageError(Exception):
-    """Kullanıcıya gösterilecek doğrulama hatası (400)."""
+    """Validation error to show the user (400)."""
 
 
 def board_dir(board_id, create=False):
@@ -47,10 +48,11 @@ def board_dir(board_id, create=False):
 
 
 def safe_name(name):
-    """`<32 hex>.<ext>` biçimini doğrular — path traversal'a kapalı.
+    """Validates the `<32 hex>.<ext>` format — closed against path traversal.
 
-    Ad istemciden gelir (öğenin `extra.image.name`'i); tek karakter bile
-    kaçmasına izin verilmez, aksi halde `../../etc/passwd` okunabilirdi."""
+    The name comes from the client (the item's `extra.image.name`); not even a
+    single stray character is allowed through, otherwise `../../etc/passwd` could
+    be read."""
     if not isinstance(name, str) or len(name) > NAME_LEN + 8:
         return None
     stem, ext = os.path.splitext(name)
@@ -62,10 +64,10 @@ def safe_name(name):
 
 
 def board_bytes(board_id):
-    """Panonun kullandığı toplam disk — sayaç kolonu YOK (depot deseni).
+    """Total disk used by the board — NO counter column (depot pattern).
 
-    Sayaç, dosya yazımı ile DB commit'i arasındaki her çökmede kalıcı drift
-    üretirdi; dizin taraması pano başına birkaç yüz dosyada ihmal edilebilir."""
+    A counter would produce permanent drift on every crash between the file write
+    and the DB commit; a directory scan is negligible at a few hundred files per board."""
     d = board_dir(board_id)
     if not os.path.isdir(d):
         return 0
@@ -74,10 +76,11 @@ def board_bytes(board_id):
 
 
 def store(board_id, data):
-    """Ham bytes → diske yazılmış görsel. `{name, width, height, size}` döner.
+    """Raw bytes → image written to disk. Returns `{name, width, height, size}`.
 
-    Doğrulama SIRASI önemli: boyut → içerik → kota. Kota kontrolü en sonda ama
-    yazmadan ÖNCE; büyük dosyayı önce diske koyup sonra silmek gereksiz I/O."""
+    Validation ORDER matters: size → content → quota. The quota check is last but
+    BEFORE writing; putting a large file on disk first and deleting it later is
+    needless I/O."""
     if not data:
         raise ImageError('boş dosya')
     if len(data) > MAX_BYTES:
@@ -91,14 +94,15 @@ def store(board_id, data):
     if fmt not in ALLOWED:
         raise ImageError(f'desteklenmeyen görsel türü: {fmt or "bilinmiyor"}')
 
-    # Çok büyük görseli panoda tam çözünürlükte tutmanın karşılığı yok; küçültme
-    # animasyonlu GIF'i ilk kareye indirirdi → GIF olduğu gibi saklanır.
+    # There's no benefit to keeping a very large image at full resolution on the
+    # board; downscaling would reduce an animated GIF to its first frame → GIFs
+    # are stored as-is.
     payload, w, h = data, img.width, img.height
     if fmt != 'GIF' and max(img.width, img.height) > MAX_EDGE:
         img = img.copy()
         img.thumbnail((MAX_EDGE, MAX_EDGE))
         buf = io.BytesIO()
-        # PNG'de şeffaflık korunur; JPEG'e çevirmek beyaz zemin basardı.
+        # Transparency is preserved for PNG; converting to JPEG would stamp a white background.
         img.save(buf, format=fmt, **({'quality': 88} if fmt == 'JPEG' else {}))
         payload, w, h = buf.getvalue(), img.width, img.height
 
@@ -108,25 +112,27 @@ def store(board_id, data):
     name = uuid.uuid4().hex + ALLOWED[fmt]
     d = board_dir(board_id, create=True)
     tmp = os.path.join(d, '.tmp-' + name)
-    # Önce geçici ada yaz, sonra rename: yarım dosya asla kalıcı adı almasın
-    # (istemci o adı öğeye yazdıktan sonra bozuk görsel servis edilirdi).
+    # Write to a temp name first, then rename: a half-written file should never
+    # get the permanent name (the client would be served a corrupt image after
+    # writing that name onto the item).
     with open(tmp, 'wb') as f:
         f.write(payload)
     final = os.path.join(d, name)
     os.replace(tmp, final)
-    # GRUP YAZILABİLİR: dosyayı Flask (svc-agency) yazar, temizlik timer'ı
-    # `proje sahibi` olarak koşar; ikisi de `appdev` grubunda ve `data/` setgid'li, ama
-    # varsayılan umask (022) grubu salt-okur bırakır → janitor silemezdi.
+    # GROUP-WRITABLE: the file is written by Flask (svc-agency), the cleanup timer
+    # runs as `project owner`; both are in the `appdev` group and `data/` is setgid,
+    # but the default umask (022) leaves the group read-only → the janitor
+    # couldn't delete it.
     try:
         os.chmod(final, 0o664)
         os.chmod(d, 0o775)
     except OSError:
-        pass                     # izin ayarı en-iyi-çaba; yükleme yine geçerli
+        pass                     # permission setting is best-effort; the upload is still valid
     return {'name': name, 'width': w, 'height': h, 'size': len(payload)}
 
 
 def path_of(board_id, name):
-    """Servis edilecek dosyanın tam yolu; ad geçersiz/dosya yoksa None."""
+    """Full path of the file to serve; None if the name is invalid/the file is missing."""
     safe = safe_name(name)
     if not safe:
         return None

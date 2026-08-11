@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Google Fonts'tan havuza font aktarımı (2026-08-06).
+"""Import fonts from Google Fonts into the pool (2026-08-06).
 
-**Tek kaynak: `github.com/google/fonts`** — resmi depo, hepsi OFL/Apache lisanslı
-(ticari kullanıma açık) ve Google tarafından taranmış. Rastgele "ücretsiz font"
-siteleri BİLEREK kullanılmaz: oralarda hem lisans hem kötücül dosya riski var.
+**Single source: `github.com/google/fonts`** — the official repo, all
+OFL/Apache licensed (open for commercial use) and scanned by Google.
+Random "free font" sites are DELIBERATELY not used: they carry both a
+licensing risk and a malicious-file risk.
 
-Her dosya havuza girmeden ÜÇ kapıdan geçer:
-  1. **Font imzası** (`fonts._format_of`) — uzantıya güvenilmez.
-  2. **Türkçe glifleri** — fontun kendi `cmap` tablosunda Ğ ğ İ ı Ş ş var mı.
-     Google'ın `latin-ext` etiketine güvenmiyoruz: etiket alt-küme adıdır, glif
-     garantisi değil. Türkçesi olmayan font ajansın işine yaramaz.
-  3. **Boyut** — `fonts.MAX_FONT_BYTES`.
+Every file passes THREE gates before entering the pool:
+  1. **Font signature** (`fonts._format_of`) — the extension isn't trusted.
+  2. **Turkish glyphs** — whether the font's own `cmap` table has Ğ ğ İ ı Ş ş.
+     We don't trust Google's `latin-ext` tag: the tag is a subset name, not a
+     glyph guarantee. A font without Turkish is useless to the agency.
+  3. **Size** — `fonts.MAX_FONT_BYTES`.
 
-Kullanım:
-    python scripts/font_import.py                 # kuru koşu (indirir, doğrular, yazmaz)
-    python scripts/font_import.py --apply         # havuza ekle
+Usage:
+    python scripts/font_import.py                 # dry run (downloads, validates, doesn't write)
+    python scripts/font_import.py --apply         # add to the pool
     python scripts/font_import.py --apply --only inter
 """
 import argparse
@@ -32,13 +33,15 @@ from extensions import db  # noqa: E402
 RAW = 'https://raw.githubusercontent.com/google/fonts/main'
 UA = {'User-Agent': 'agency-font-import'}
 
-# Türkçenin font seçiminde ayırt edici harfleri. "İ" (U+0130) ve "ı" (U+0131) çoğu
-# eksik fontta ilk düşenlerdir — kontrolün asıl amacı bunlar.
+# The distinguishing letters of Turkish for font selection. "İ" (U+0130) and
+# "ı" (U+0131) are usually the first to be missing in an incomplete font —
+# they're the real point of this check.
 TURKCE = {0x011E: 'Ğ', 0x011F: 'ğ', 0x0130: 'İ', 0x0131: 'ı', 0x015E: 'Ş', 0x015F: 'ş'}
 
-# (dizin, dosya, aile, stil). Lisans dizini `ofl` (SIL Open Font License).
-# Variable fontlarda dosya adı `Aile[wght].ttf` — tek dosya tüm ağırlıkları taşır;
-# stil "Variable" olarak işaretlenir ki panelde ne olduğu açık olsun.
+# (dir, file, family, style). License directory is `ofl` (SIL Open Font License).
+# For variable fonts the file name is `Family[wght].ttf` — a single file
+# carries all weights; the style is tagged "Variable" so it's clear in the
+# panel what it is.
 KATALOG = [
     # --- Sans ---
     ('montserrat', 'Montserrat[wght].ttf', 'Montserrat', 'Variable'),
@@ -49,7 +52,7 @@ KATALOG = [
     ('dmsans', 'DMSans[opsz,wght].ttf', 'DM Sans', 'Variable'),
     ('manrope', 'Manrope[wght].ttf', 'Manrope', 'Variable'),
     ('figtree', 'Figtree[wght].ttf', 'Figtree', 'Variable'),
-    # Poppins statik dağıtılıyor (variable sürümü yok) — dört kullanışlı kesit.
+    # Poppins is distributed as static (no variable version) — four useful cuts.
     ('poppins', 'Poppins-Regular.ttf', 'Poppins', 'Regular'),
     ('poppins', 'Poppins-Italic.ttf', 'Poppins', 'Italic'),
     ('poppins', 'Poppins-SemiBold.ttf', 'Poppins', 'SemiBold'),
@@ -59,11 +62,11 @@ KATALOG = [
     ('lora', 'Lora[wght].ttf', 'Lora', 'Variable'),
     ('merriweather', 'Merriweather[opsz,wdth,wght].ttf', 'Merriweather', 'Variable'),
     ('ebgaramond', 'EBGaramond[wght].ttf', 'EB Garamond', 'Variable'),
-    # --- Başlık / display ---
+    # --- Headline / display ---
     ('oswald', 'Oswald[wght].ttf', 'Oswald', 'Variable'),
     ('bebasneue', 'BebasNeue-Regular.ttf', 'Bebas Neue', 'Regular'),
     ('archivoblack', 'ArchivoBlack-Regular.ttf', 'Archivo Black', 'Regular'),
-    # --- El yazısı ---
+    # --- Handwriting ---
     ('caveat', 'Caveat[wght].ttf', 'Caveat', 'Variable'),
     ('dancingscript', 'DancingScript[wght].ttf', 'Dancing Script', 'Variable'),
     # --- Mono ---
@@ -71,11 +74,12 @@ KATALOG = [
 ]
 
 
-# --- toplu keşif (2026-08-06) ----------------------------------------------
-# Aile listesi elle küratörlü (ajans işine uygun aileler), DOSYA ADLARI otomatik:
-# her ailenin `METADATA.pb`'si hem dosya adlarını hem alt-kümeleri veriyor. GitHub
-# API yerine `raw.githubusercontent.com` kullanılır — API anonim 60 istek/saatle
-# sınırlı, 100+ aile taranırken hemen tükenirdi; raw CDN'de böyle bir sınır yok.
+# --- bulk discovery (2026-08-06) ----------------------------------------------
+# The family list is manually curated (families relevant to agency work), the
+# FILE NAMES are automatic: each family's `METADATA.pb` gives both file names
+# and subsets. `raw.githubusercontent.com` is used instead of the GitHub API —
+# the API is limited to 60 anonymous requests/hour, which would run out
+# immediately when scanning 100+ families; the raw CDN has no such limit.
 
 KURATORLU_AILELER = """
 roboto opensans lato notosans sourcesans3 nunito nunitosans rubik karla mulish
@@ -102,20 +106,20 @@ LISANS_DIZINLERI = ('ofl', 'apache', 'ufl')
 
 
 def _metadata(aile):
-    """(lisans_dizini, metin) veya (None, None) — üç lisans dizini denenir."""
+    """(license_dir, text) or (None, None) — three license directories are tried."""
     for lis in LISANS_DIZINLERI:
         try:
             req = urllib.request.Request(
                 f'{RAW}/{lis}/{aile}/METADATA.pb', headers=UA)
             with urllib.request.urlopen(req, timeout=30) as r:
                 return lis, r.read().decode('utf-8', 'replace')
-        except Exception:  # noqa: BLE001 — 404 normal, sıradaki dizine geç
+        except Exception:  # noqa: BLE001 — 404 is normal, move to the next directory
             continue
     return None, None
 
 
 def _metadata_coz(metin):
-    """METADATA.pb'den (aile_adı, latin_ext, [(dosya, stil, ağırlık)…])."""
+    """From METADATA.pb: (family_name, latin_ext, [(file, style, weight)...])."""
     import re as _re
     aile = (_re.search(r'^name:\s*"([^"]+)"', metin, _re.M) or [None, aile_yok := ''])[1]
     latin_ext = 'subsets: "latin-ext"' in metin
@@ -131,11 +135,12 @@ def _metadata_coz(metin):
 
 
 def _dosya_sec(kayitlar):
-    """Aileden hangi dosyalar alınsın? `[(dosya, stil_etiketi)…]`
+    """Which files should be taken from the family? `[(file, style_label)...]`
 
-    Variable varsa yalnız o (tek dosya tüm ağırlıkları taşır → havuz şişmez);
-    yoksa Regular (400) ve Bold (700) kesitleri. Amaç aile başına 1–2 dosya:
-    100+ font eklerken her aileden 9 ağırlık almak havuzu kullanılmaz yapardı."""
+    If a Variable exists, take only that (one file carries all weights ->
+    the pool doesn't bloat); otherwise the Regular (400) and Bold (700)
+    cuts. Goal is 1-2 files per family: taking 9 weights from every family
+    while adding 100+ fonts would make the pool unusable."""
     variable = [(d, s) for d, s, _w in kayitlar if '[' in d]
     if variable:
         return [(d, 'Variable' if s == 'normal' else 'Variable Italic')
@@ -145,13 +150,13 @@ def _dosya_sec(kayitlar):
         eslesen = [d for d, s, w in kayitlar if w == hedef and s == 'normal']
         if eslesen:
             secim.append((eslesen[0], etiket))
-    if not secim and kayitlar:                 # tek ağırlıklı aileler
+    if not secim and kayitlar:                 # single-weight families
         secim = [(kayitlar[0][0], 'Regular')]
     return secim
 
 
 def kesfet(aileler):
-    """Aile dizinlerini tarayıp `KATALOG` biçiminde satırlar üretir."""
+    """Scan family directories and produce rows in `KATALOG` shape."""
     satirlar, elenen = [], []
     for aile in aileler:
         lis, metin = _metadata(aile)
@@ -175,14 +180,16 @@ def indir(dizin, dosya, lisans='ofl'):
 
 
 def _cmap_kodlari(data):
-    """TTF/OTF `cmap` tablosundaki Unicode kod noktaları (format 4 ve 12).
+    """Unicode code points in the TTF/OTF `cmap` table (formats 4 and 12).
 
-    fontTools BAĞIMLILIĞI EKLENMEDİ: tek seferlik bir doğrulama için üretim
-    bağımlılığı büyütmeye değmez, ihtiyacımız olan tek şey "şu kod var mı".
+    fontTools DEPENDENCY WAS NOT ADDED: not worth growing a production
+    dependency for a one-off validation, all we need is "does this code point exist".
     """
-    # Bozuk/kısa veride `struct.error` yerine BOŞ küme dönmeli: çağıran boş kümeyi
-    # "hiçbir Türkçe harf yok" sayıp fontu eliyor — güvenli taraf. (Patlaması tüm
-    # aktarımı düşürürdü; 2026-08-06'da doğrulayıcı sınanırken görüldü.)
+    # On corrupt/short data this should return an EMPTY set instead of
+    # raising `struct.error`: the caller treats an empty set as "no Turkish
+    # letters at all" and rejects the font — the safe side. (A crash here
+    # would take down the whole import; seen while testing the validator on
+    # 2026-08-06.)
     try:
         if len(data) < 12:
             return set()
@@ -223,7 +230,7 @@ def _alt_tablolar(data, cmap_off):
             for b, s in zip(bas, son):
                 if s == 0xFFFF and b == 0xFFFF:
                     continue
-                if s - b > 0x1000:          # aşırı geniş segment: tarama maliyeti
+                if s - b > 0x1000:          # excessively wide segment: scan cost
                     continue
                 kodlar.update(range(b, s + 1))
         elif bicim == 12:
@@ -238,10 +245,10 @@ def _alt_tablolar(data, cmap_off):
 
 
 def turkce_eksikleri(data):
-    """Fontta bulunmayan Türkçe harfler (boş küme = tamam)."""
+    """Turkish letters missing from the font (empty set = all good)."""
     kodlar = _cmap_kodlari(data)
     if not kodlar:
-        return set(TURKCE.values())          # cmap okunamadı → güvenli tarafta kal
+        return set(TURKCE.values())          # cmap couldn't be read -> stay on the safe side
     return {ad for kod, ad in TURKCE.items() if kod not in kodlar}
 
 
@@ -271,7 +278,7 @@ def main():
             etiket = f'{aile} {stil}'
             try:
                 data = indir(dizin, dosya, lisans)
-            except Exception as e:  # noqa: BLE001 — ağ hatası tek satırı düşürsün
+            except Exception as e:  # noqa: BLE001 — let a network error drop only this one row
                 print(f'  HATA   {etiket}: indirilemedi ({e})')
                 hatali += 1
                 continue

@@ -1,7 +1,7 @@
-// Kaydetme kuyruğu — panelin İLK frontend testleri.
+// Save queue — the panel's FIRST frontend tests.
 //
-// Buradaki her test, gerçekte yaşanmış bir veri kaybı sınıfını kilitler:
-// zombi kart, yutulan silme, sunucu türevi alanları geri yazan undo.
+// Every test here locks down a class of data loss that actually happened:
+// zombie cards, swallowed deletes, undo writing back server-derived fields.
 import { describe, expect, it } from "vitest"
 
 import {
@@ -19,8 +19,8 @@ describe("mergeUpsert", () => {
     const q = mergeUpsert(delta(), [{ item_key: "a", x: 10, y: 20 }])
     const q2 = mergeUpsert(q, [{ item_key: "a", title: "Merhaba" }])
     expect(q2.upsert).toHaveLength(1)
-    // Konum kaybolmamalı: ayrı satır eklemek ya da üzerine yazmak, son yazanın
-    // öncekini yutmasına yol açardı.
+    // Position shouldn't be lost: adding a separate row or overwriting outright
+    // would let the most recent write swallow the previous one.
     expect(q2.upsert[0]).toEqual({ item_key: "a", x: 10, y: 20, title: "Merhaba" })
   })
 
@@ -52,11 +52,11 @@ describe("mergeDelete", () => {
 describe("requeueFailed", () => {
   it("başarısız batch'i geri koyar ama DAHA YENİ niyeti ezmez", () => {
     const failed = delta([{ item_key: "a", x: 10 }, { item_key: "b", y: 3 }])
-    // Bu arada kullanıcı 'a'yı yeniden taşıdı:
+    // Meanwhile the user moved 'a' again:
     const current = delta([{ item_key: "a", x: 99 }])
     const q = requeueFailed(failed, current)
     const a = q.upsert.find((u) => u.item_key === "a")
-    expect(a).toEqual({ item_key: "a", x: 99 })   // yeni kazanır
+    expect(a).toEqual({ item_key: "a", x: 99 })   // the newer one wins
     expect(q.upsert.find((u) => u.item_key === "b")).toEqual({ item_key: "b", y: 3 })
   })
 
@@ -77,7 +77,7 @@ describe("requeueFailed", () => {
   })
 
   it("bir anahtar ASLA hem upsert hem delete'te kalmaz", () => {
-    // Sözleşmeyi doğrudan ihlal eden bir girdi zorlayalım:
+    // Let's force an input that directly violates the contract:
     const q = requeueFailed(delta([{ item_key: "a", x: 1 }]), delta([], ["a"]))
     const upsertKeys = new Set(q.upsert.map((u) => u.item_key))
     expect(q.delete.some((k) => upsertKeys.has(k))).toBe(false)

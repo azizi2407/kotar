@@ -1,4 +1,4 @@
-"""img-bucket — yönetici resim deposu (list/upload/delete/convert + public /img)."""
+"""img-bucket — admin image storage (list/upload/delete/convert + public /img)."""
 import io
 
 import pytest
@@ -28,7 +28,7 @@ def test_bucket_list_designer_403(client):
 def test_bucket_total_limit_4gb(client):
     login_as(client, MANAGER)
     lst = client.get("/api/tools/img-bucket/list").get_json()
-    assert lst["usage"]["total"] == 4 * 1024 * 1024 * 1024  # genel depo sınırı 4 GB
+    assert lst["usage"]["total"] == 4 * 1024 * 1024 * 1024  # general storage limit is 4 GB
 
 
 def test_bucket_upload_ve_list(client):
@@ -83,7 +83,7 @@ def test_bucket_convert_webp(client):
     assert r.status_code == 200
     assert r.get_json()["name"] == "c.webp"
     names = [f["name"] for f in client.get("/api/tools/img-bucket/list").get_json()["files"]]
-    assert "c.webp" in names and "c.png" not in names  # orijinal silindi
+    assert "c.webp" in names and "c.png" not in names  # original deleted
 
 
 def test_public_img_serve(client):
@@ -91,11 +91,11 @@ def test_public_img_serve(client):
     _upload(client, name="pub.png")
     with client.session_transaction() as s:
         s.clear()
-    r = client.get("/img/pub.png")  # auth'suz erişilebilir
+    r = client.get("/img/pub.png")  # accessible without auth
     assert r.status_code == 200
     assert r.mimetype == "image/png"
     assert len(r.get_data()) > 0
-    r.close()  # test client dosya handle'ını elle kapat (ResourceWarning'i önle)
+    r.close()  # manually close the test client's file handle (avoid ResourceWarning)
 
 
 def test_public_img_gecersiz_404(client):

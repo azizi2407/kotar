@@ -1,27 +1,30 @@
-// Planlama Panosu yerel durumu: uçuşan taslak katmanı + kaydetme kuyruğu + geri alma.
+// Local state for the Planning Board: an in-flight draft layer + a save queue + undo.
 //
-// ESKİ KODUN HATASI: `useEffect(() => { if (data) setTasks(data.tasks) }, [data])` —
-// sunucudan gelen her yeni veri yerel state'i EZİYORDU. Kaydet → invalidate → refetch
-// → setTasks döngüsünde kullanıcı o sırada bir kartı sürüklüyorsa değişikliği uçuyordu.
+// THE OLD CODE'S BUG: `useEffect(() => { if (data) setTasks(data.tasks) }, [data])` —
+// every new piece of data from the server OVERWROTE local state. In the save →
+// invalidate → refetch → setTasks loop, if the user was dragging a card at that
+// moment, the change would fly away.
 //
-// MODEL — iki katman, ezilme fiziken imkânsız:
-//   * queryItems (React Query cache) = sunucu gerçeği; tazeleme yalnız BUNU değiştirir
-//   * draft (Map<item_key, Partial<Item>>) = UÇUŞAN katman; parmağın altındaki kart
-//   * render = merge(queryItems, draft) — draft her zaman üstte
-// Bir öğe ancak kendi yazması sunucuda onaylandıktan sonra draft'tan düşer.
+// THE MODEL — two layers, overwriting is physically impossible:
+//   * queryItems (React Query cache) = server truth; a refresh only changes THIS
+//   * draft (Map<item_key, Partial<Item>>) = the IN-FLIGHT layer; the card under the finger
+//   * render = merge(queryItems, draft) — draft always wins
+// An item only drops out of draft once its own write has been confirmed by the server.
 //
-// KİMLİK SABİTLİĞİ (2026-08-09) — bu dosyanın ikinci sözleşmesi.
-// Dönen nesne ve içindeki callback'ler HER RENDER'DA YENİ olursa tüketici zincir
-// şöyle çöküyordu: yeni `store` → `PlanlamaPage`teki `onPatch` yeni → `PlanningFlow`
-// içindeki `nodes` useMemo'su yeniden kuruluyor → tüm node `data` nesneleri yeni →
-// `memo` çöküyor → görünür TÜM node'lar her render'da yeniden çiziliyor (sürüklemede
-// her karede, aramada her tuş vuruşunda). Bu yüzden sık değişen `byKey` deps'te DEĞİL,
-// ref üzerinden okunuyor ve dönüş `useMemo`'da. Ref'ler RENDER SIRASINDA atanır —
-// effect'te atansa commit anında bayat okurdu.
+// IDENTITY STABILITY (2026-08-09) — this file's second contract.
+// If the returned object and its callbacks were NEW ON EVERY RENDER, the consumer
+// chain collapsed like this: new `store` → new `onPatch` in `PlanlamaPage` → the
+// `nodes` useMemo in `PlanningFlow` rebuilds → every node's `data` object is new →
+// `memo` breaks → ALL visible nodes re-render on every render (every frame while
+// dragging, every keystroke while searching). That's why the frequently-changing
+// `byKey` is NOT in the deps — it's read through a ref, and the return value is
+// memoized. Refs are assigned DURING RENDER — if assigned in an effect, a commit
+// would read a stale value.
 //
-// AMA HER ŞEY REF'E ALINMAZ: yazma isteği `boardKey`e bağlıdır ve onu ref'te taşımak
-// pano değişiminde yazmayı YANLIŞ PANOYA gönderiyordu (bkz. `gonder`). Ref'e almanın
-// güvenli olduğu değer, hedefi değil yalnız İÇERİĞİ etkileyen değerdir.
+// BUT NOT EVERYTHING GOES INTO A REF: the write request depends on `boardKey`, and
+// carrying that in a ref sent the write to the WRONG BOARD on a board change (see
+// `gonder`). It's only safe to put a value in a ref when it affects the CONTENT,
+// not the destination.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 
@@ -33,8 +36,8 @@ import {
   type Delta, type ItemPatch,
 } from "@/lib/planlama-queue"
 
-// Tüketiciler bu tipi buradan import ediyor — tek kaynak `planlama-queue`, burada
-// yalnız yeniden yayınlanıyor.
+// Consumers import this type from here — the single source of truth is
+// `planlama-queue`, it's just re-exported here.
 export type { ItemPatch }
 
 interface UndoOp {
@@ -58,35 +61,36 @@ export function usePlanningStore(boardKey: string, serverItems: PlanningItem[],
   const redoStack = useRef<UndoOp[]>([])
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  /** Geri/İleri alma düğmelerinin pasifleşebilmesi için yığın derinlikleri STATE.
-   *  Eskiden yalnız `canUndo()` (ref okuyan fonksiyon) vardı; reaktif olmadığı için
-   *  düğmeler hiç pasifleşmiyor, boş yığında basınca ancak toast çıkıyordu. */
+  /** Stack depths are STATE so the Undo/Redo buttons can be disabled. There used to
+   *  be only `canUndo()` (a function reading a ref); since it wasn't reactive, the
+   *  buttons never disabled and pressing on an empty stack just triggered a toast. */
   const [undoDepth, setUndoDepth] = useState(0)
   const [redoDepth, setRedoDepth] = useState(0)
 
-  /** Kullanıcı şu an sürüklüyor/yazıyor mu — tazeleme bunu bekler.
-   *  REF DEĞİL STATE: eskiden ref'ti ve render sırasında okunuyordu, yani
-   *  "kaydediliyor" şeridi ancak alakasız bir re-render'da doğru görünüyordu.
-   *  Ayrıca yalnız commit false'a çekiyordu; commit hiç çağrılmazsa (ör. sürükleme
-   *  yarıda kalırsa) sonsuza kadar true kalıp otomatik tazelemeyi KALICI olarak
-   *  öldürüyordu. Artık flush bittiğinde de sıfırlanır. */
+  /** Is the user currently dragging/typing — a refresh waits for this.
+   *  STATE, NOT A REF: it used to be a ref read during render, meaning the
+   *  "saving" indicator only appeared correct on some unrelated re-render.
+   *  It was also only ever set to false by commit; if commit was never called
+   *  (e.g. a drag left half-finished), it stayed true forever and PERMANENTLY
+   *  killed auto-refresh. It's now also reset when a flush finishes. */
   const [interacting, setInteracting] = useState(false)
 
-  /** base_version'ı closure'dan DEĞİL ref'ten oku: debounce'lu flush, commit
-   *  anındaki sürümü taşıyordu; arada uzak refetch olursa bayat sürüm gidiyor ve
-   *  sunucu gereksiz yere `stale: true` + tam liste döndürüyordu. */
+  /** Read `base_version` from a ref, NOT the closure: the debounced flush was
+   *  carrying the version from the moment of commit; if a background refetch
+   *  happened in between, a stale version would be sent and the server would
+   *  needlessly return `stale: true` + the full list. */
   const versionRef = useRef(serverVersion)
   versionRef.current = serverVersion
 
-  /** Yazma isteği DÜZ FONKSİYONLA kurulur, mutation nesnesiyle DEĞİL.
+  /** The write request is built as a PLAIN FUNCTION, NOT a mutation object.
    *
-   *  Mutation her render'da yeni kimlik alır; deps'te olsaydı `flush` ve ondan
-   *  türeyen `commit`/`remove` de her render'da yenilenirdi. Ama onu bir REF'e
-   *  almak çok daha kötüydü: pano değişiminde unmount temizliği ESKİ `flush`'ı
-   *  çağırır, ref ise o an ÇOKTAN yeni panonun mutation'ını tutar → bekleyen
-   *  yazma YANLIŞ PANOYA giderdi (ref'ler render gövdesinde atanır, temizlik
-   *  render'dan sonra koşar). `boardKey` artık closure'dan geliyor, hem kimlik
-   *  sabit hem hedef doğru. */
+   *  A mutation gets a new identity on every render; if it were in the deps,
+   *  `flush` and the `commit`/`remove` derived from it would also be renewed every
+   *  render. But putting it in a REF was even worse: on a board change, the
+   *  unmount cleanup calls the OLD `flush`, while the ref would ALREADY hold the
+   *  new board's mutation by then → the pending write would go to the WRONG BOARD
+   *  (refs are assigned in the render body, cleanup runs after render). `boardKey`
+   *  now comes from the closure, so identity is stable and the target is correct. */
   const gonder = useCallback(
     (delta: { base_version: number; upsert: ItemPatch[]; delete: string[] }) =>
       patchBoardItems(qc, boardKey, delta),
@@ -98,7 +102,7 @@ export function usePlanningStore(boardKey: string, serverItems: PlanningItem[],
       const d = draft.get(it.item_key)
       return d ? { ...it, ...d } : it
     }).concat(
-      // draft'ta olup sunucuda henüz olmayan (yeni yaratılmış) öğeler
+      // items in draft that don't exist on the server yet (newly created)
       [...draft.entries()]
         .filter(([key]) => !serverItems.some((s) => s.item_key === key))
         .map(([, v]) => v as PlanningItem),
@@ -111,12 +115,12 @@ export function usePlanningStore(boardKey: string, serverItems: PlanningItem[],
     return m
   }, [items])
 
-  /** `byKey` her öğe değişiminde (yani sürüklemede her karede) yenilenir; deps'te
-   *  olsaydı `commit`/`remove` kimliği de her karede değişirdi. */
+  /** `byKey` is renewed on every item change (i.e. every frame while dragging);
+   *  if it were in the deps, `commit`/`remove` identity would change every frame too. */
   const byKeyRef = useRef(byKey)
   byKeyRef.current = byKey
 
-  // --- kaydetme kuyruğu ---------------------------------------------------
+  // --- save queue ---------------------------------------------------
 
   const flush = useCallback(async () => {
     if (flushing.current) return
@@ -139,8 +143,8 @@ export function usePlanningStore(boardKey: string, serverItems: PlanningItem[],
         for (const applied of res.applied) next.set(applied.item_key, applied)
         return { board: res.board, items: [...next.values()] }
       })
-      // Yazılan öğeleri taslaktan düşür — ama SADECE bu turda gönderilenleri;
-      // kullanıcı bu arada başka bir kartı sürüklüyor olabilir.
+      // Drop the written items from draft — but ONLY the ones sent this round;
+      // the user might be dragging another card in the meantime.
       setDraft((prev) => {
         const next = new Map(prev)
         for (const u of batch.upsert) next.delete(u.item_key)
@@ -150,13 +154,13 @@ export function usePlanningStore(boardKey: string, serverItems: PlanningItem[],
       if (res.conflicts.length) setConflicts(res.conflicts)
       setStatus("idle")
     } catch {
-      // Kuyruğu KAYBETME — ama ham concat ile DEĞİL, çakışma kuralından geçirerek.
+      // DON'T LOSE the queue — but not with a raw concat, run it through the conflict rule.
       pending.current = requeueFailed(batch, pending.current)
       setStatus("error")
     } finally {
       flushing.current = false
-      // Bir tur sunucuya gidip geldiyse etkileşim bitmiştir; ref'ken burada
-      // sıfırlanmadığı için takılı kalabiliyor ve tazelemeyi kilitliyordu.
+      // If a round-trip to the server completed, the interaction is over; when this
+      // was a ref it wasn't reset here, so it could get stuck and lock out refreshes.
       setInteracting(false)
       if (!isEmpty(pending.current)) setTimeout(() => void flush(), 400)
     }
@@ -174,9 +178,9 @@ export function usePlanningStore(boardKey: string, serverItems: PlanningItem[],
     pending.current = q
   }, [])
 
-  // --- yerel değişiklikler -------------------------------------------------
+  // --- local changes -------------------------------------------------
 
-  /** Sürükleme/boyutlandırma sırasında: yalnız taslağa yaz, sunucuya gitme. */
+  /** While dragging/resizing: write only to the draft, don't hit the server. */
   const applyLocal = useCallback((patches: ItemPatch[]) => {
     setInteracting(true)
     setDraft((prev) => {
@@ -194,7 +198,7 @@ export function usePlanningStore(boardKey: string, serverItems: PlanningItem[],
     setRedoDepth(0)
   }, [])
 
-  /** Değişikliği kalıcılaştır (kuyruğa al + geri alma kaydı oluştur). */
+  /** Persist the change (enqueue it + create an undo record). */
   const commit = useCallback((patches: ItemPatch[], opts: { undoable?: boolean } = {}) => {
     if (!patches.length) return
     if (opts.undoable !== false) {
@@ -202,7 +206,7 @@ export function usePlanningStore(boardKey: string, serverItems: PlanningItem[],
       const undoDelete: string[] = []
       for (const p of patches) {
         const before = byKeyRef.current.get(p.item_key)
-        if (!before) { undoDelete.push(p.item_key); continue }  // yeni yaratıldı → geri al = sil
+        if (!before) { undoDelete.push(p.item_key); continue }  // newly created → undo = delete
         undoUpsert.push(inverseOf(before, p))
       }
       pushUndo({ undo: { upsert: undoUpsert, delete: undoDelete },
@@ -273,16 +277,16 @@ export function usePlanningStore(boardKey: string, serverItems: PlanningItem[],
     return true
   }, [runDelta])
 
-  // Pano değişimi / unmount → bekleyen yazmayı ÖNCE gönder.
-  // Eskiden `resetHistory()` `pending`i boşaltıyordu; debounce penceresindeki
-  // (300 ms) son düzenleme sessizce çöpe gidiyordu. Temizlik fonksiyonu, effect'in
-  // kurulduğu render'ın closure'ını taşır → burada çağrılan `flush` ESKİ boardKey'e
-  // bağlıdır, yani yazma doğru panoya gider. `flush` senkron olarak `pending`i
-  // boşalttığı için sonraki `resetHistory()` ile yarışmaz.
+  // Board change / unmount → send the pending write FIRST.
+  // `resetHistory()` used to clear `pending`; the last edit inside the debounce
+  // window (300ms) would silently vanish. The cleanup function carries the closure
+  // of the render that set up the effect → the `flush` called here is bound to the
+  // OLD boardKey, so the write goes to the right board. Since `flush` clears
+  // `pending` synchronously, it doesn't race with the following `resetHistory()`.
   useEffect(() => {
     return () => { void flush() }
-    // `flush` bilerek deps'te değil: her render'da yeniden kurulsa temizlik
-    // her render'da koşar ve debounce'u anlamsızlaştırır.
+    // `flush` is deliberately not in the deps: if it were rebuilt every render,
+    // cleanup would run every render and defeat the debounce.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boardKey])
 
@@ -300,12 +304,12 @@ export function usePlanningStore(boardKey: string, serverItems: PlanningItem[],
   const clearConflicts = useCallback(() => setConflicts([]), [])
   const hasPending = useCallback(() => !isEmpty(pending.current), [])
 
-  // Dönüş `useMemo`'da: kimliği her render'da değişirse tüketicideki `nodes`
-  // useMemo'su da her render'da yeniden kurulur (bkz. dosya başlığı).
+  // Return value is memoized: if its identity changed every render, the `nodes`
+  // useMemo in the consumer would also rebuild every render (see the file header).
   return useMemo(() => ({
     items, byKey, status, conflicts, clearConflicts,
     applyLocal, commit, remove, flush, undo, redo, resetHistory,
-    // `interacting` BOOLEAN (eskiden ref'ti) — render'da doğrudan okunabilir.
+    // `interacting` is a BOOLEAN (used to be a ref) — can be read directly in render.
     interacting,
     hasPending,
     canUndo: undoDepth > 0,

@@ -1,5 +1,5 @@
-// Kullanıcılar — svc-sso kullanıcı yönetimi (yalnız superadmin). Kullanıcı ekle
-// (e-posta ile ön-oluştur), rol ata, aktif/pasif. Kimlik svc-sso'da; bu sayfa proxy.
+// Users — svc-sso user management (superadmin only). Add a user (pre-create by
+// email), assign a role, active/disabled. Identity lives in svc-sso; this page proxies it.
 import { useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { UserPlus } from "lucide-react"
@@ -10,8 +10,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
-import { createUser, listUsers, ROLE_LABELS, ROLES, updateUser, type SsoUser } from "@/lib/admin"
+import { createUser, listUsers, ROLES, updateUser, useRoleLabels, type SsoUser } from "@/lib/admin"
 import { useAuth } from "@/lib/auth"
+import { useI18n } from "@/lib/i18n"
 
 function fmtDate(s: string | null) {
   if (!s) return "—"
@@ -19,6 +20,7 @@ function fmtDate(s: string | null) {
 }
 
 function RoleSelect({ value, onChange, disabled }: { value: string; onChange: (r: string) => void; disabled?: boolean }) {
+  const roleLabels = useRoleLabels()
   return (
     <select
       className="h-8 rounded-md border bg-background px-2 text-sm"
@@ -28,7 +30,7 @@ function RoleSelect({ value, onChange, disabled }: { value: string; onChange: (r
     >
       {ROLES.map((r) => (
         <option key={r} value={r}>
-          {ROLE_LABELS[r] ?? r}
+          {roleLabels[r] ?? r}
         </option>
       ))}
       {!ROLES.includes(value as (typeof ROLES)[number]) && <option value={value}>{value}</option>}
@@ -38,6 +40,7 @@ function RoleSelect({ value, onChange, disabled }: { value: string; onChange: (r
 
 export function UsersAdminPage() {
   const { authMode } = useAuth()
+  const { t } = useI18n()
   const qc = useQueryClient()
   const usersQ = useQuery({ queryKey: ["admin-users"], queryFn: listUsers })
   const [addOpen, setAddOpen] = useState(false)
@@ -50,7 +53,7 @@ export function UsersAdminPage() {
       qc.invalidateQueries({ queryKey: ["admin-users"] })
       if (user.temp_password) setResetPwFor(user)
     },
-    onError: (e) => toast.error(e instanceof Error ? e.message : "Güncellenemedi"),
+    onError: (e) => toast.error(e instanceof Error ? e.message : t("pages.users.updateFailed")),
   })
 
   const users = usersQ.data ?? []
@@ -59,22 +62,22 @@ export function UsersAdminPage() {
     <div className="mx-auto max-w-5xl space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Kullanıcılar</h1>
+          <h1 className="text-xl font-semibold">{t("pages.users.title")}</h1>
           <p className="text-sm text-muted-foreground">
             {authMode === "local"
-              ? "Panel kullanıcıları — rol ata, ekle, pasifleştir, parola sıfırla."
-              : "SSO kullanıcıları — rol ata, ekle, pasifleştir. Rol değişikliği kullanıcının bir sonraki girişinde etkinleşir."}
+              ? t("pages.users.subtitleLocal")
+              : t("pages.users.subtitleSso")}
           </p>
         </div>
         <Button onClick={() => setAddOpen(true)}>
-          <UserPlus className="mr-1 h-4 w-4" /> Kullanıcı ekle
+          <UserPlus className="mr-1 h-4 w-4" /> {t("pages.users.addUser")}
         </Button>
       </div>
 
       {usersQ.isLoading && <Skeleton className="h-64 w-full" />}
       {usersQ.isError && (
         <p className="text-sm text-red-600">
-          {usersQ.error instanceof Error ? usersQ.error.message : "Kullanıcılar yüklenemedi"}
+          {usersQ.error instanceof Error ? usersQ.error.message : t("pages.users.loadFailed")}
         </p>
       )}
 
@@ -83,11 +86,11 @@ export function UsersAdminPage() {
           <table className="w-full text-sm">
             <thead className="border-b bg-muted/40 text-left text-xs text-muted-foreground">
               <tr>
-                <th className="px-3 py-2">E-posta</th>
-                <th className="px-3 py-2">İsim</th>
-                <th className="px-3 py-2">Rol</th>
-                <th className="px-3 py-2">Durum</th>
-                <th className="px-3 py-2">Son giriş</th>
+                <th className="px-3 py-2">{t("pages.users.table.email")}</th>
+                <th className="px-3 py-2">{t("pages.users.table.name")}</th>
+                <th className="px-3 py-2">{t("pages.users.table.role")}</th>
+                <th className="px-3 py-2">{t("pages.users.table.status")}</th>
+                <th className="px-3 py-2">{t("pages.users.table.lastLogin")}</th>
                 {authMode === "local" && <th className="px-3 py-2" />}
               </tr>
             </thead>
@@ -97,8 +100,8 @@ export function UsersAdminPage() {
                   <td className="px-3 py-2">
                     <span className="font-medium">{u.email}</span>
                     {!u.linked && (
-                      <span className="ml-1 text-xs text-amber-600" title="Henüz giriş yapmadı">
-                        (bekliyor)
+                      <span className="ml-1 text-xs text-amber-600" title={t("pages.users.notLoggedInYet")}>
+                        {t("pages.users.pending")}
                       </span>
                     )}
                   </td>
@@ -123,7 +126,7 @@ export function UsersAdminPage() {
                         })
                       }
                     >
-                      {u.status === "active" ? "Aktif" : "Pasif"}
+                      {u.status === "active" ? t("pages.users.active") : t("pages.users.inactive")}
                     </Button>
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">{fmtDate(u.last_login)}</td>
@@ -135,7 +138,7 @@ export function UsersAdminPage() {
                         disabled={patch.isPending}
                         onClick={() => patch.mutate({ id: u.id, body: { reset_password: true } })}
                       >
-                        Parolayı sıfırla
+                        {t("pages.users.resetPassword")}
                       </Button>
                     </td>
                   )}
@@ -151,17 +154,17 @@ export function UsersAdminPage() {
         <Dialog open onOpenChange={(o) => !o && setResetPwFor(null)}>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
-              <DialogTitle>Yeni geçici parola — {resetPwFor.email}</DialogTitle>
+              <DialogTitle>{t("pages.users.newTempPasswordTitle", { email: resetPwFor.email })}</DialogTitle>
             </DialogHeader>
             <div className="space-y-3">
               <p className="text-sm text-muted-foreground">
-                Yalnız bir kez gösterilir, kaydedin ve kullanıcıya iletin.
+                {t("pages.users.tempPasswordHint")}
               </p>
               <code className="block rounded-md border bg-muted px-3 py-2 text-sm font-mono">
                 {resetPwFor.temp_password}
               </code>
               <div className="flex justify-end pt-1">
-                <Button onClick={() => setResetPwFor(null)}>Kapat</Button>
+                <Button onClick={() => setResetPwFor(null)}>{t("pages.users.close")}</Button>
               </div>
             </div>
           </DialogContent>
@@ -173,6 +176,7 @@ export function UsersAdminPage() {
 
 function AddUserDialog({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const { authMode } = useAuth()
+  const { t } = useI18n()
   const [email, setEmail] = useState("")
   const [role, setRole] = useState("designer")
   const [busy, setBusy] = useState(false)
@@ -180,7 +184,7 @@ function AddUserDialog({ onClose, onAdded }: { onClose: () => void; onAdded: () 
 
   async function submit() {
     if (!email.trim()) {
-      toast.error("E-posta gerekli")
+      toast.error(t("pages.users.emailRequired"))
       return
     }
     setBusy(true)
@@ -188,15 +192,15 @@ function AddUserDialog({ onClose, onAdded }: { onClose: () => void; onAdded: () 
       const user = await createUser({ email: email.trim().toLowerCase(), role })
       onAdded()
       if (user.temp_password) {
-        // local mod: geçici parola yalnız bu yanıtta gelir — göstermeden kapatırsak
-        // hesap kullanılamaz hale gelir, o yüzden dialog kapanmıyor.
+        // local mode: the temporary password only comes back in this response — if we
+        // close without showing it, the account becomes unusable, so the dialog stays open.
         setTempPassword(user.temp_password)
       } else {
-        toast.success("Kullanıcı eklendi — kişi bir kez giriş yapınca bağlanır")
+        toast.success(t("pages.users.userAdded"))
         onClose()
       }
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Eklenemedi")
+      toast.error(e instanceof Error ? e.message : t("pages.users.addFailed"))
     } finally {
       setBusy(false)
     }
@@ -207,18 +211,17 @@ function AddUserDialog({ onClose, onAdded }: { onClose: () => void; onAdded: () 
       <Dialog open onOpenChange={(o) => !o && onClose()}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Kullanıcı eklendi</DialogTitle>
+            <DialogTitle>{t("pages.users.userAddedTitle")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              Geçici parola — yalnız bir kez gösterilir, kaydedin ve kullanıcıya iletin.
-              İlk girişten sonra "Parolamı değiştir"den kendi parolasını seçebilir.
+              {t("pages.users.tempPasswordFullHint")}
             </p>
             <code className="block rounded-md border bg-muted px-3 py-2 text-sm font-mono">
               {tempPassword}
             </code>
             <div className="flex justify-end pt-1">
-              <Button onClick={onClose}>Kapat</Button>
+              <Button onClick={onClose}>{t("pages.users.close")}</Button>
             </div>
           </div>
         </DialogContent>
@@ -230,30 +233,30 @@ function AddUserDialog({ onClose, onAdded }: { onClose: () => void; onAdded: () 
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Kullanıcı ekle</DialogTitle>
+          <DialogTitle>{t("pages.users.addUser")}</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1">
-            <Label>E-posta</Label>
-            <Input type="email" placeholder="ad@ornek.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+            <Label>{t("pages.users.email")}</Label>
+            <Input type="email" placeholder="name@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
           </div>
           <div className="space-y-1">
-            <Label>Rol</Label>
+            <Label>{t("pages.users.role")}</Label>
             <div>
               <RoleSelect value={role} onChange={setRole} />
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
             {authMode === "local"
-              ? "Bir geçici parola üretilir, bu ekranda bir kez gösterilir."
-              : "Kişi bu e-postayla panele ilk kez giriş yapınca bu kayda bağlanır ve rolüyle gelir."}
+              ? t("pages.users.addHintLocal")
+              : t("pages.users.addHintSso")}
           </p>
           <div className="flex justify-end gap-2 pt-1">
             <Button variant="ghost" onClick={onClose} disabled={busy}>
-              İptal
+              {t("pages.users.cancel")}
             </Button>
             <Button onClick={submit} disabled={busy}>
-              {busy ? "Ekleniyor…" : "Ekle"}
+              {busy ? t("pages.users.adding") : t("pages.users.add")}
             </Button>
           </div>
         </div>

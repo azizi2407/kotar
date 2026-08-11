@@ -1,7 +1,7 @@
-"""Sertleştirilmiş claude runner — YALNIZ mock/statik testler.
+"""Hardened claude runner — mock/static tests ONLY.
 
-Gerçek `claude -p` entegrasyon kanıtı buraya DAHİL DEĞİL (kotayı tüketir, CLI
-oturumu gerektirir): bkz. scripts/verify_ai_claude_hardening.py (tek-seferlik manuel).
+Real `claude -p` integration proof is NOT INCLUDED here (consumes quota, requires
+a CLI session): see scripts/verify_ai_claude_hardening.py (one-off manual).
 """
 import ai_claude
 
@@ -25,10 +25,10 @@ def test_tool_kisiti_iki_katman_cmd_de(monkeypatch):
     cap = _capture(monkeypatch)
     ai_claude.run("prompt")
     cmd = cap["cmd"]
-    # (1) MCP tamamen kapalı: strict var, mcp-config YOK (mcp_config=None)
+    # (1) MCP fully disabled: strict is present, mcp-config is ABSENT (mcp_config=None)
     assert "--strict-mcp-config" in cmd
     assert "--mcp-config" not in cmd
-    # (2) yerleşik tehlikeli tool'lar kapalı
+    # (2) built-in dangerous tools are disabled
     assert "--disallowedTools" in cmd
     for t in ("Bash", "Edit", "Write", "Read", "WebFetch", "WebSearch"):
         assert t in cmd
@@ -59,7 +59,7 @@ def test_model_default_env(monkeypatch):
 def test_model_env_override(monkeypatch):
     monkeypatch.setenv("CAPTION_MODEL", "claude-haiku-x")
     cap = _capture(monkeypatch)
-    ai_claude.run("p")  # model verilmedi → env
+    ai_claude.run("p")  # model not given → env
     cmd = cap["cmd"]
     assert cmd[cmd.index("--model") + 1] == "claude-haiku-x"
 
@@ -69,7 +69,7 @@ def test_image_paths_pozisyonel(monkeypatch):
     ai_claude.run("p", image_paths=["/tmp/a.jpg", "/tmp/b.jpg"])
     cmd = cap["cmd"]
     assert "/tmp/a.jpg" in cmd and "/tmp/b.jpg" in cmd
-    # variadic bayraklara yutulmasın: image path'ler strict bayrağından SONRA gelir
+    # must not get swallowed by variadic flags: image paths come AFTER the strict flag
     assert cmd.index("/tmp/a.jpg") > cmd.index("--strict-mcp-config")
 
 
@@ -77,7 +77,7 @@ def test_mcp_config_yalniz_verilince(monkeypatch):
     cap = _capture(monkeypatch)
     ai_claude.run("p", mcp_config="/etc/magnific.json")
     cmd = cap["cmd"]
-    # Magnific istisnası: whitelist config geçilir AMA strict hâlâ açık
+    # Magnific exception: a whitelist config is passed, BUT strict is still on
     i = cmd.index("--mcp-config")
     assert cmd[i + 1] == "/etc/magnific.json"
     assert "--strict-mcp-config" in cmd
@@ -102,31 +102,31 @@ def test_wrap_untrusted_delimiter():
     w = ai_claude.wrap_untrusted("TRANSKRİPT", "kötü metin")
     assert "<<<TRANSKRİPT" in w and "<<<SON TRANSKRİPT>>>" in w
     assert "kötü metin" in w
-    # metin açılış ve kapanış marker'ları ARASINDA (veri konumunda)
+    # the text is BETWEEN the opening and closing markers (in the data position)
     assert w.index("<<<TRANSKRİPT") < w.index("kötü metin") < w.index("<<<SON TRANSKRİPT>>>")
 
 
 def test_image_paths_read_kapsamli_izin(monkeypatch):
-    """Görselli çağrıda Read tümden yasaklanmaz: yalnız görsel dizinine kapsamlı izin
-    verilir. (Kök neden 2026-07-18: blanket Read yasağı modelin frame'i görmesini
-    engelliyordu — caption 'görseli açamıyorum' metni üretiyordu.)"""
+    """In a call with images, Read isn't banned entirely: only scoped permission is
+    granted to the image directory. (Root cause 2026-07-18: a blanket Read ban was
+    preventing the model from seeing the frame — captioning produced the text 'I can't open the image'.)"""
     cap = _capture(monkeypatch)
     ai_claude.run("p", image_paths=["/x/frames/9/frame0.jpg"])
     cmd = cap["cmd"]
     i = cmd.index("--disallowedTools")
     j = cmd.index("--allowedTools")
     dis = cmd[i + 1:j]
-    # Read disallow'dan çıktı, diğer tehlikeli tool'lar duruyor
+    # Read was removed from disallow, other dangerous tools remain
     assert "Read" not in dis
     assert "Bash" in dis and "Edit" in dis and "Write" in dis and "WebFetch" in dis
-    # İzin YALNIZ görselin dizinine kapsamlı
+    # permission is scoped ONLY to the image's directory
     assert cmd[j + 1] == "Read(/x/frames/9/**)"
-    # Görsel hâlâ pozisyonel son argüman
+    # image is still the final positional argument
     assert cmd[-1] == "/x/frames/9/frame0.jpg"
 
 
 def test_imagesiz_cagri_read_yasakli_kalir(monkeypatch):
-    """NEGATİF: görselsiz çağrıda Read yasağı ve tam kısıt aynen korunur."""
+    """NEGATIVE: in a call without images, the Read ban and full restriction are preserved exactly."""
     cap = _capture(monkeypatch)
     ai_claude.run("p")
     cmd = cap["cmd"]
@@ -135,11 +135,11 @@ def test_imagesiz_cagri_read_yasakli_kalir(monkeypatch):
     assert "--allowedTools" not in cmd
 
 
-# --- proje bağlamı izolasyonu (2026-07-27) ---------------------------------
-# `claude -p` cwd'yi bir Claude Code projesi sayar: `.claude/settings.json`
-# hook'larını ve CLAUDE.md'yi yükler. Worker repo kökünde koştuğu için üretim
-# çağrıları bu repoyu proje sanıyordu; job 224'te caption alanına Stop hook'una
-# verilmiş bir CEVAP yazıldı ve müşteri önerisi diye saklandı.
+# --- project context isolation (2026-07-27) ---------------------------------
+# `claude -p` treats cwd as a Claude Code project: it loads `.claude/settings.json`
+# hooks and CLAUDE.md. Since the worker ran at the repo root, production calls
+# thought this repo was the project; in job 224 an ANSWER meant for the Stop hook
+# was written into the caption field and saved as if it were a client suggestion.
 
 def test_run_repo_disinda_izole_cwd_ile_kosar(monkeypatch, tmp_path):
     import os
@@ -153,10 +153,10 @@ def test_run_repo_disinda_izole_cwd_ile_kosar(monkeypatch, tmp_path):
     ai_claude.run('merhaba')
     cwd = yakalanan['cwd']
     assert os.path.isdir(cwd)
-    # Repo kökü (ve altı) OLMAMALI — orada .claude/ ve CLAUDE.md var.
+    # Must NOT be the repo root (or under it) — that's where .claude/ and CLAUDE.md live.
     repo = os.path.dirname(os.path.abspath(ai_claude.__file__))
     assert os.path.commonpath([os.path.realpath(cwd), os.path.realpath(repo)]) != os.path.realpath(repo)
-    # Dizin boş olmalı: hiçbir proje işareti taşımasın.
+    # The directory must be empty: it shouldn't carry any project markers.
     assert os.listdir(cwd) == []
 
 
@@ -170,7 +170,7 @@ def test_izole_cwd_silinirse_yeniden_yaratilir():
 
 
 def test_run_claude_project_dir_env_ini_temizler(monkeypatch):
-    """CLAUDE_PROJECT_DIR set kalırsa hook yolları yine repoyu gösterirdi."""
+    """If CLAUDE_PROJECT_DIR stays set, hook paths would still point at the repo."""
     yakalanan = {}
     monkeypatch.setenv('CLAUDE_PROJECT_DIR', '/srv/apps/agency')
     monkeypatch.setattr(ai_claude.subprocess, 'run', lambda cmd, **kw: (
@@ -178,5 +178,5 @@ def test_run_claude_project_dir_env_ini_temizler(monkeypatch):
         type('R', (), {'returncode': 0, 'stdout': '{"result":"ok"}', 'stderr': ''})())[1])
     ai_claude.run('merhaba')
     assert 'CLAUDE_PROJECT_DIR' not in yakalanan['env']
-    # Diğer env korunmalı (PATH olmadan `claude` bulunamaz).
+    # Other env vars must be preserved (without PATH, `claude` can't be found).
     assert 'PATH' in yakalanan['env']

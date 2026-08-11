@@ -1,13 +1,13 @@
-"""Web uyumlu video türevi — tarayıcıda oynamayan yüklemeler için (2026-08-01).
+"""Web-compatible video variant — for uploads that won't play in the browser (2026-08-01).
 
-NEDEN VAR: telefonla çekilen videolar 4K/60fps **HEVC Main 10** (10-bit) olarak
-geliyor. Android Chrome bunu açamıyor — oynatmaya basınca hiç görüntü vermeden
-kapanıyor (decoder reddi). 1080p HEVC aynı cihazda oynuyor, yani sorun codec'in
-kendisi değil PROFİLİN ağırlığı; ama Firefox HEVC'yi hiç desteklemediği için
-kapsam "h264 + 8-bit + ≤1080p olmayan her video" olarak seçildi (beyaz liste).
+WHY IT EXISTS: videos shot on phones come in as 4K/60fps **HEVC Main 10** (10-bit).
+Android Chrome can't open it — pressing play closes without ever showing a frame
+(decoder rejection). 1080p HEVC plays fine on the same device, so the problem isn't
+the codec itself but the PROFILE's weight; but since Firefox doesn't support HEVC at
+all, the scope was chosen as "h264 + 8-bit + anything not ≤1080p" (allowlist).
 
-Orijinal DOKUNULMAZ: `/m/<id>` sayfası türevi oynatır, "İndir" düğmesi hep tam
-kaliteli orijinali verir.
+The original is UNTOUCHED: the `/m/<id>` page plays the variant, the "Download"
+button always gives the full-quality original.
 """
 import os
 import shutil
@@ -21,7 +21,7 @@ ffmpeg_gerekli = pytest.mark.skipif(
 
 
 def _video(path, w=64, h=64, codec="libx264", pix="yuv420p", saniye=1):
-    """Test videosu üret (ffmpeg lavfi kaynağı)."""
+    """Generate a test video (ffmpeg lavfi source)."""
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
          "-f", "lavfi", "-i", f"testsrc=duration={saniye}:size={w}x{h}:rate=10",
@@ -30,7 +30,7 @@ def _video(path, w=64, h=64, codec="libx264", pix="yuv420p", saniye=1):
     return str(path)
 
 
-# --- media.needs_web_variant: kimin türevi gerekiyor ---
+# --- media.needs_web_variant: who needs a variant ---
 
 @ffmpeg_gerekli
 def test_h264_1080p_alti_turev_gerektirmez(tmp_path):
@@ -41,7 +41,8 @@ def test_h264_1080p_alti_turev_gerektirmez(tmp_path):
 
 @ffmpeg_gerekli
 def test_4k_turev_gerektirir(tmp_path):
-    """Uzun kenar 1920'yi aşıyorsa küçültülmeli — asıl şikâyet buydu."""
+    """If the long edge exceeds 1920 it should be downscaled — that was the original
+    complaint."""
     import media
     p = _video(tmp_path / "4k.mp4", w=2160, h=3840)
     assert media.needs_web_variant(p) is True
@@ -49,7 +50,7 @@ def test_4k_turev_gerektirir(tmp_path):
 
 @ffmpeg_gerekli
 def test_hevc_turev_gerektirir(tmp_path):
-    """1080p bile olsa: Firefox HEVC'yi hiç oynatmaz."""
+    """Even at 1080p: Firefox never plays HEVC at all."""
     import media
     if not _encoder_var("libx265"):
         pytest.skip("libx265 yok")
@@ -59,14 +60,15 @@ def test_hevc_turev_gerektirir(tmp_path):
 
 @ffmpeg_gerekli
 def test_10bit_turev_gerektirir(tmp_path):
-    """10-bit H.264'ün tarayıcı desteği yok."""
+    """10-bit H.264 has no browser support."""
     import media
     p = _video(tmp_path / "10bit.mp4", pix="yuv420p10le")
     assert media.needs_web_variant(p) is True
 
 
 def test_okunamayan_dosya_turev_gerektirmez(tmp_path):
-    """ffprobe çözemiyorsa dokunma — tahminle transkod başlatma."""
+    """If ffprobe can't decode it, don't touch it — don't start a transcode based on a
+    guess."""
     import media
     p = tmp_path / "bozuk.mp4"
     p.write_bytes(b"bu-video-degil")
@@ -79,7 +81,7 @@ def _encoder_var(name):
     return name in out.stdout
 
 
-# --- media.make_web_variant: türevin kendisi ---
+# --- media.make_web_variant: the variant itself ---
 
 @ffmpeg_gerekli
 def test_turev_1080p_h264_faststart_uretir(tmp_path):
@@ -96,7 +98,7 @@ def test_turev_1080p_h264_faststart_uretir(tmp_path):
     assert codec == "h264"
     assert max(int(w), int(h)) <= 1920, "uzun kenar 1080p'ye inmeli"
     assert pix == "yuv420p", "8-bit olmalı"
-    # faststart: moov, mdat'tan önce
+    # faststart: moov comes before mdat
     with open(dst, "rb") as f:
         bas = f.read(4096)
     assert bas.index(b"moov") < bas.index(b"mdat") if b"mdat" in bas else True
@@ -105,7 +107,7 @@ def test_turev_1080p_h264_faststart_uretir(tmp_path):
 @ffmpeg_gerekli
 def test_turev_en_boy_oranini_korur(tmp_path):
     import media
-    src = _video(tmp_path / "genis.mp4", w=3840, h=2160)  # yatay 4K
+    src = _video(tmp_path / "genis.mp4", w=3840, h=2160)  # horizontal 4K
     dst = str(tmp_path / "web2.mp4")
     assert media.make_web_variant(src, dst) is True
     r = subprocess.run(
@@ -127,8 +129,9 @@ def test_bozuk_kaynak_turev_uretmez(tmp_path):
 
 
 def test_basarisiz_transkod_mevcut_turevi_bozmaz(tmp_path):
-    """Hedefe DOĞRUDAN yazılsaydı: geri dolum ile worker aynı dosyaya denk
-    gelince yarısı bozuk türev kalırdı. Yazım geçici dosya + atomik rename."""
+    """If it wrote DIRECTLY to the destination: a backfill and the worker landing on
+    the same file at once would leave a half-corrupt variant. Writing uses a temp
+    file + atomic rename."""
     import media
     dst = tmp_path / "var.mp4"
     dst.write_bytes(b"onceki-saglam-turev")
@@ -138,7 +141,7 @@ def test_basarisiz_transkod_mevcut_turevi_bozmaz(tmp_path):
     assert dst.read_bytes() == b"onceki-saglam-turev", "mevcut türev ezilmemeli"
 
 
-# --- media_store: türevin saklanması ---
+# --- media_store: storing the variant ---
 
 @pytest.fixture
 def store(monkeypatch, tmp_path):
@@ -152,8 +155,8 @@ def test_web_turevi_bulunur_ve_silinir(store):
     with open(p, "wb") as f:
         f.write(b"turev")
     assert store.find_web("WEBID1") == p
-    # orijinal silinince türev de gitmeli — yoksa silinen videonun türevi
-    # /m/<id> üzerinden 21 gün daha oynatılabilirdi
+    # when the original is deleted the variant should go too — otherwise a deleted
+    # video's variant could still be played via /m/<id> for another 21 days
     store.save_original("WEBID1", b"asil", "video/mp4", "v.mp4")
     assert store.remove("WEBID1") >= 2
     assert store.find_web("WEBID1") is None
@@ -177,7 +180,7 @@ def test_cleanup_web_turevini_de_siler(store):
     assert store.find_web("ESKI1") is None
 
 
-# --- /m/<file_id>: türev oynatılır, indirme orijinali verir ---
+# --- /m/<file_id>: variant plays, download gives the original ---
 
 def _kayit(cid, file_id, name="klip.mp4"):
     from extensions import db
@@ -197,7 +200,7 @@ def cid(client):
     r = client.post("/api/clients", json={"name": "Türev Müşteri"},
                     headers=csrf_headers(client))
     c = r.get_json()["client"]["id"]
-    client.get("/auth/logout")     # uç oturumsuz çalışmalı
+    client.get("/auth/logout")     # endpoint should work without a session
     return c
 
 
@@ -211,7 +214,7 @@ def test_sayfa_turev_varsa_onu_oynatir(client, cid, monkeypatch, tmp_path):
 
     html_ = client.get("/m/TUREVLI00001").get_data(as_text=True)
     assert "raw=1&amp;web=1" in html_, "oynatıcı türevi kullanmalı"
-    # İndir düğmesi türeve DEĞİL orijinale gitmeli
+    # Download button should go to the ORIGINAL, NOT the variant
     assert "?dl=1" in html_ and "dl=1&amp;web=1" not in html_
 
 
@@ -227,7 +230,7 @@ def test_turev_yoksa_sayfa_orijinali_oynatir(client, cid, monkeypatch, tmp_path)
 def test_web_bayragi_turevi_servis_eder(client, cid, monkeypatch, tmp_path):
     import media_store
     monkeypatch.setenv("MEDIA_STORE_DIR", str(tmp_path))
-    _kayit(cid, "TUREVLI00002", name="klip.mov")   # orijinal .mov → mime tuzağı
+    _kayit(cid, "TUREVLI00002", name="klip.mov")   # original .mov → mime trap
     media_store.save_original("TUREVLI00002", b"asil-mov", "video/quicktime", "klip.mov")
     with open(media_store.web_path("TUREVLI00002"), "wb") as f:
         f.write(b"turev-mp4")
@@ -238,11 +241,11 @@ def test_web_bayragi_turevi_servis_eder(client, cid, monkeypatch, tmp_path):
         assert r.get_data() == b"turev-mp4"
         assert r.mimetype == "video/mp4", "türev .mov adından quicktime sanılmamalı"
     finally:
-        r.close()          # send_file dosya tanıtıcısı — elle kapatılır
+        r.close()          # send_file file handle — closed manually
 
 
 def test_indirme_daima_orijinali_verir(client, cid, monkeypatch, tmp_path):
-    """4K çeken videografın dosyası linkten 1080p dönmemeli."""
+    """A videographer's 4K file shouldn't come back as 1080p from the link."""
     import media_store
     monkeypatch.setenv("MEDIA_STORE_DIR", str(tmp_path))
     _kayit(cid, "TUREVLI00003")
@@ -250,14 +253,14 @@ def test_indirme_daima_orijinali_verir(client, cid, monkeypatch, tmp_path):
     with open(media_store.web_path("TUREVLI00003"), "wb") as f:
         f.write(b"turev")
 
-    r = client.get("/m/TUREVLI00003?dl=1&web=1")      # web=1 verilse bile
+    r = client.get("/m/TUREVLI00003?dl=1&web=1")      # even if web=1 is given
     try:
         assert r.get_data() == b"asil-4k-tam-kalite"
     finally:
         r.close()
 
 
-# --- media_worker: web_variant işi ---
+# --- media_worker: the web_variant job ---
 
 def test_worker_turev_uretir(client, monkeypatch, tmp_path):
     import jobqueue
@@ -282,7 +285,7 @@ def test_worker_turev_uretir(client, monkeypatch, tmp_path):
 
 
 def test_worker_uyumlu_videoyu_atlar(client, monkeypatch, tmp_path):
-    """Zaten h264/1080p olan videoya boşuna CPU harcanmamalı."""
+    """CPU shouldn't be wasted on a video that's already h264/1080p."""
     import jobqueue
     import media
     import media_store

@@ -1,19 +1,19 @@
-"""gunicorn.conf.py — fork sonrası DB havuzu muhafızı.
+"""gunicorn.conf.py — DB pool guard after fork.
 
-`preload_app=True` uygulamayı master süreçte kurar; `app.py` modül sonundaki
-`create_app()` orada `db.create_all()` çağırıp havuzda gerçek bir Postgres
-bağlantısı bırakır. Fork'ta bu soket her iki worker'a birden miras kalır ve iki
-süreç aynı TCP soketinde konuşunca psycopg protokolü bozulur (canlıda 2026-08-09
-18:09-18:15: IndexError / ResourceClosedError / "server closed the connection").
-Çözüm `post_fork` içinde `engine.dispose(close=False)`. Buradaki testler o
-eşleşmenin sessizce bozulmasını engeller.
+`preload_app=True` builds the app in the master process; `create_app()` at the
+end of `app.py`'s module calls `db.create_all()` there, leaving a real Postgres
+connection in the pool. On fork, this socket is inherited by both workers at
+once, and when two processes talk over the same TCP socket the psycopg protocol
+breaks (in production 2026-08-09 18:09-18:15: IndexError / ResourceClosedError /
+"server closed the connection"). The fix is `engine.dispose(close=False)` inside
+`post_fork`. The tests here guard against that fix silently breaking again.
 """
 import importlib.util
 import pathlib
 
 import pytest
 
-# `gunicorn.conf` adıyla yüklemek kurulu `gunicorn` paketiyle çakışır → ayrık ad.
+# Loading it under the name `gunicorn.conf` clashes with the installed `gunicorn` package → distinct name.
 _KONF_YOLU = pathlib.Path(__file__).resolve().parent.parent / 'gunicorn.conf.py'
 
 
@@ -26,10 +26,10 @@ def konf():
 
 
 def test_preload_acikken_post_fork_zorunlu(konf):
-    """Asıl muhafız: `preload_app` açıksa fork'ta havuzu atan bir kanca ŞART.
+    """The actual guard: if `preload_app` is on, a hook that drops the pool on fork is MANDATORY.
 
-    Biri `preload_app=True` bırakıp `post_fork`'u silerse (ya da tersine çevirip
-    kancayı gereksiz sanıp kaldırırsa) bu test düşer.
+    If someone leaves `preload_app=True` and deletes `post_fork` (or reverses it
+    and removes the hook thinking it's unnecessary), this test fails.
     """
     if getattr(konf, 'preload_app', False):
         assert callable(getattr(konf, 'post_fork', None)), (
@@ -39,10 +39,10 @@ def test_preload_acikken_post_fork_zorunlu(konf):
 
 
 def test_post_fork_havuzu_close_false_ile_atar(konf, app, monkeypatch):
-    """`close=False` kritik: soket kapatılmaz, yalnız bu sürecin havuzundan düşer.
+    """`close=False` is critical: the socket isn't closed, it's only dropped from this process's pool.
 
-    `close=True` olsaydı çocuk, kardeş worker'ın hâlâ kullandığı soketi de
-    kapatırdı — düzeltmenin kendisi yeni bir yarış yaratırdı.
+    If `close=True`, the child would also close the socket the sibling worker is
+    still using — the fix itself would create a new race condition.
     """
     from extensions import db
 
@@ -58,14 +58,15 @@ def test_post_fork_havuzu_close_false_ile_atar(konf, app, monkeypatch):
     assert cagrilar == [False], f'dispose çağrıları beklenenden farklı: {cagrilar}'
 
 
-# --- whisper-service ile kazara config paylaşımı ---------------------------
+# --- accidental config sharing with whisper-service -------------------------
 #
-# `whisper-service.service` `WorkingDirectory=/srv/apps/agency` ile koşuyor.
-# Gunicorn `-c` verilmediğinde cwd'deki `gunicorn.conf.py`'yi sessizce yükler →
-# whisper yıllardır PANELİN config'ini devralıyormuş. 2026-08-09'da panele
-# `post_fork` eklenince whisper worker'ı `from app import app` → `KeyError:
-# 'SECRET_KEY'` ile boot edemedi ve servis `failed`'a düştü: transkripsiyon
-# tümden durdu, üstelik sessizce (socket ayakta, istek reset yiyor).
+# `whisper-service.service` runs with `WorkingDirectory=/srv/apps/agency`.
+# When gunicorn isn't given `-c`, it silently loads the `gunicorn.conf.py` in
+# the cwd → whisper had been inheriting the PANEL's config for years. When
+# `post_fork` was added to the panel on 2026-08-09, the whisper worker's
+# `from app import app` failed to boot with `KeyError: 'SECRET_KEY'` and the
+# service dropped to `failed`: transcription stopped entirely, and silently
+# too (the socket stayed up, requests just got reset).
 
 _WHISPER_KONF_YOLU = pathlib.Path(__file__).resolve().parent.parent / 'whisper_gunicorn.conf.py'
 _WHISPER_UNIT_YOLU = pathlib.Path.home() / '.config/systemd/user/whisper-service.service'
@@ -81,11 +82,11 @@ def whisper_konf():
 
 
 def test_whisper_konfu_panelin_kancasini_tasimaz(whisper_konf):
-    """Whisper'ın kendi config'i panele ait DB kancasını ASLA taşımamalı.
+    """Whisper's own config must NEVER carry the panel's DB hook.
 
-    Whisper süreci Flask app'ini (`app.py`) hiç import etmez; SECRET_KEY gibi
-    panel env'i orada yoktur. Buraya bir `post_fork` kopyalanırsa servis boot
-    edemez.
+    The whisper process never imports the Flask app (`app.py`); panel env like
+    SECRET_KEY doesn't exist there. If a `post_fork` gets copied in here, the
+    service can't boot.
     """
     assert not hasattr(whisper_konf, 'post_fork')
     assert whisper_konf.workers == 1, 'ikinci worker modeli RAM\'de ikiye katlar'
@@ -94,7 +95,7 @@ def test_whisper_konfu_panelin_kancasini_tasimaz(whisper_konf):
 @pytest.mark.skipif(not _WHISPER_UNIT_YOLU.exists(),
                     reason='whisper unit dosyası yalnız bu sunucuda var')
 def test_whisper_uniti_kendi_configini_acikca_veriyor():
-    """Unit `-c` ile kendi config'ini vermeli — yoksa panelinkini devralır."""
+    """The unit must give its own config via `-c` — otherwise it inherits the panel's."""
     icerik = _WHISPER_UNIT_YOLU.read_text(encoding='utf-8')
     exec_satiri = next(
         (s for s in icerik.splitlines() if s.startswith('ExecStart=')), '')

@@ -1,4 +1,4 @@
-"""Lokal medya servis uçları — sharing tarafı (Drive'a ağ çıkışı YOK)."""
+"""Local media serving endpoints — sharing side (NO network access to Drive)."""
 import io
 
 import pytest
@@ -35,8 +35,8 @@ def test_media_ucu_lokal_dosyayi_range_destekli_doner(client):
     r = client.get("/api/sharing/media/VIDLOCAL1")
     assert r.status_code == 200
     assert r.data == b"vid-bytes"
-    r.close()  # send_file dosya tanıtıcısı — test client'ta elle kapatılır
-    # werkzeug 3.0: Accept-Ranges yalnız Range'li istekte yazılır; 206 esas kanıt.
+    r.close()  # send_file file handle — closed manually in the test client
+    # werkzeug 3.0: Accept-Ranges is only written on a Range request; 206 is the real proof.
     r2 = client.get("/api/sharing/media/VIDLOCAL1", headers={"Range": "bytes=0-2"})
     assert r2.status_code == 206
     assert r2.data == b"vid"
@@ -54,12 +54,12 @@ def test_thumbnail_lokal_preview_once(client):
     _store("IMGLOCAL1", _jpeg_bytes(), "image/jpeg", "f.jpg")
     r = client.get("/api/sharing/thumbnail/IMGLOCAL1")
     assert r.status_code == 200
-    assert r.mimetype == "image/jpeg"  # Drive'a gidilmedi (dg mock'suz ağ çıkışı olsaydı patlardı)
-    r.close()  # send_file dosya tanıtıcısı — test client'ta elle kapatılır
+    assert r.mimetype == "image/jpeg"  # didn't go to Drive (would blow up without the dg mock's network access)
+    r.close()  # send_file file handle — closed manually in the test client
 
 
 def test_build_rows_local_bayraklari(client, client_id):
-    import media_store  # noqa: F401 — store env'i conftest kurdu
+    import media_store  # noqa: F401 — conftest sets up the store env
     from extensions import db
     from models import Client, utcnow
     from models_sharing import CardUpload, Share
@@ -84,12 +84,12 @@ def test_media_dl_attachment_turkce_isim(client):
     r = client.get("/api/sharing/media/IMGDL1?dl=1&name=camsa%C5%9F-1.jpg")
     assert r.status_code == 200
     cd = r.headers.get("Content-Disposition", "")
-    assert "attachment" in cd and "camsa" in cd  # Türkçe isim korunur (RFC5987)
+    assert "attachment" in cd and "camsa" in cd  # Turkish name preserved (RFC5987)
     r.close()
 
 
 def test_media_dl_lokal_yoksa_drive_fallback(client, monkeypatch):
-    # Lokal kopya yoksa indirme isteği Drive'dan orijinali çeker (tam boyut).
+    # If there's no local copy, the download request fetches the original from Drive (full size).
     login_as(client, MANAGER)
     import drive_gateway
     monkeypatch.setattr(drive_gateway, "available", lambda: True)

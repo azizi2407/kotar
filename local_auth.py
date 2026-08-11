@@ -1,7 +1,7 @@
-"""Yerel giriş — kimlik doğrulama çekirdeği (AUTH_MODE=local).
+"""Local login — the authentication core (AUTH_MODE=local).
 
-`auth.py` POST /auth/local-login burayı çağırır. Kullanıcı yönetimi (oluşturma/
-rol/parola sıfırlama) `local_admin.py`'de — burada yalnız giriş doğrulaması var.
+`auth.py` POST /auth/local-login calls into here. User management (creation/
+role/password reset) lives in `local_admin.py` — only login verification is here.
 """
 from extensions import db
 from models import utcnow
@@ -9,15 +9,15 @@ from models_auth import LocalUser
 
 
 def authenticate(email, password):
-    """(email, password) doğruysa LocalUser döner (last_login_at güncellenir, commit
-    edilir); yanlışsa/pasifse None.
+    """Returns a LocalUser if (email, password) is correct (last_login_at is
+    updated, committed); None if wrong/inactive.
 
-    Zamanlama yan kanalını azaltmak için kullanıcı bulunamasa da bir hash
-    karşılaştırması YAPILIR (sabit-zamana yakın); yine de bu basit bir panel
-    girişi — üretimde daha güçlü bir rate-limit önündedir (bkz. ratelimit.py)."""
+    To reduce the timing side channel, a hash comparison IS PERFORMED even if the
+    user isn't found (close to constant-time); still, this is a simple panel
+    login — in production it sits behind a stronger rate limit (see ratelimit.py)."""
     email = (email or '').strip().lower()
     user = LocalUser.query.filter_by(email=email).first() if email else None
-    dummy_hash = 'pbkdf2:sha256:600000$dummy$0'  # gerçek bir eşleşmesi imkansız sabit hash
+    dummy_hash = 'pbkdf2:sha256:600000$dummy$0'  # a fixed hash that can never actually match
     ok = (user or _Dummy(dummy_hash)).check_password(password or '')
     if user is None or not ok or user.status != 'active':
         return None
@@ -27,7 +27,7 @@ def authenticate(email, password):
 
 
 class _Dummy:
-    """Kullanıcı yoksa da bir hash karşılaştırması yapılsın diye kukla nesne."""
+    """A dummy object so a hash comparison still happens even without a user."""
     def __init__(self, h):
         self._h = h
 

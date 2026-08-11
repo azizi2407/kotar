@@ -1,4 +1,4 @@
-// Müşteri örnek (referans) hesapları (2026-08-07). Sözleşme: sharing.py.
+// Client example (reference) accounts (2026-08-07). Contract: sharing.py.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiDelete, apiGet, apiJson } from "./api"
@@ -12,7 +12,7 @@ export interface ReferenceAccount {
   followers: number | null
   url: string
   source: "manual" | "research"
-  /** Üretim rollerine backend zaten yalnız `approved` döndürür. */
+  /** The backend already returns only `approved` to production roles. */
   status: "candidate" | "approved" | "rejected"
   created_at: string | null
   decided_by: string | null

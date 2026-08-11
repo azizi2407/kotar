@@ -1,4 +1,4 @@
-"""media_store — lokal medya deposu birim testleri (tmp_path izolasyonu)."""
+"""media_store — local media store unit tests (tmp_path isolation)."""
 import os
 import time
 
@@ -29,7 +29,7 @@ def test_save_ve_bul_original(store):
     with open(path, "rb") as f:
         assert f.read() == b"videodata"
     assert store.has_original("Abc-123_x") is True
-    assert store.find_preview("Abc-123_x") is None  # video: önizleme üretilmez
+    assert store.find_preview("Abc-123_x") is None  # video: no preview is generated
 
 
 def test_gorsel_kaydinda_preview_uretilir(store):
@@ -39,11 +39,11 @@ def test_gorsel_kaydinda_preview_uretilir(store):
     assert prev and prev.endswith("IMG1.jpg")
     from PIL import Image
     with Image.open(prev) as img:
-        assert max(img.size) <= 800  # ~800px önizleme
+        assert max(img.size) <= 800  # ~800px preview
 
 
 def test_bozuk_gorsel_previewsuz_ama_original_kalir(store):
-    # PIL açamaz → önizleme yok ama orijinal yazılmış olmalı (best-effort)
+    # PIL can't open it → no preview, but the original should still have been written (best-effort)
     assert store.save_original("BROKEN", b"bu-gorsel-degil", "image/jpeg", "x.jpg") is True
     assert store.has_original("BROKEN") is True
     assert store.find_preview("BROKEN") is None
@@ -57,7 +57,7 @@ def test_gecersiz_file_id_reddedilir(store):
 
 
 def test_uzanti_mimetan_turetilir(store):
-    # Dosya adında güvenilir uzantı yoksa mime'dan türet
+    # If there's no reliable extension in the filename, derive it from mime
     store.save_original("NOEXT", b"x", "video/mp4", "uzantisiz")
     path = store.find_original("NOEXT")
     assert path and path.endswith(".mp4")
@@ -83,17 +83,17 @@ def test_cleanup_idempotent(store):
     aged = time.time() - 30 * 86400
     os.utime(store.find_original("X1"), (aged, aged))
     assert store.cleanup() == 1
-    assert store.cleanup() == 0  # ikinci çağrı sessizce 0 döner
+    assert store.cleanup() == 0  # second call silently returns 0
 
 
-# --- Akış tabanlı yol (stage/commit/discard) ---
+# --- Stream-based path (stage/commit/discard) ---
 
 def test_stage_commit_akisi(store):
     from io import BytesIO
     tmp = store.stage(BytesIO(b"buyuk-video-icerigi"))
     assert tmp and os.path.exists(tmp)
     assert store.commit(tmp, "STREAM1", "video/mp4", "v.mp4") is True
-    assert not os.path.exists(tmp)  # geçici kalıcı ada taşındı
+    assert not os.path.exists(tmp)  # temp file was moved to the permanent name
     path = store.find_original("STREAM1")
     assert path and path.endswith("STREAM1.mp4")
     with open(path, "rb") as f:
@@ -112,30 +112,30 @@ def test_discard_gecici_siler(store):
     tmp = store.stage(BytesIO(b"x"))
     store.discard(tmp)
     assert not os.path.exists(tmp)
-    store.discard(None)  # None güvenli
-    assert store.commit(None, "X", "video/mp4") is False  # stage başarısızlığı yolu
+    store.discard(None)  # None is safe
+    assert store.commit(None, "X", "video/mp4") is False  # path for stage failure
 
 
 def test_cleanup_bayat_tmp_siler(store):
     from io import BytesIO
     tmp = store.stage(BytesIO(b"yarim-kalmis"))
-    aged = time.time() - 2 * 86400  # 2 gün: 21 gün dolmadı ama tmp eşiği (1 gün) doldu
+    aged = time.time() - 2 * 86400  # 2 days: hasn't hit 21 days, but has hit the tmp threshold (1 day)
     os.utime(tmp, (aged, aged))
-    store.save_original("TAZE", b"t", "video/mp4", "t.mp4")  # taze dosya silinmemeli
+    store.save_original("TAZE", b"t", "video/mp4", "t.mp4")  # fresh file must not be deleted
     assert store.cleanup() == 1
     assert not os.path.exists(tmp)
     assert store.has_original("TAZE") is True
 
 
-# --- faststart (moov atom'u başa alma) ---
+# --- faststart (moving the moov atom to the front) ---
 #
-# NEDEN: kamera/telefon çıktısı mp4'lerde `moov` atom dosyanın SONUNDA olur.
-# Tarayıcı oynatmaya başlamak için `moov`'u okumak zorunda → mobilde video
-# "bir türlü başlamıyor" (2026-08-01, Android/Chrome; indirme çalışıyordu çünkü
-# indirme moov'u beklemez). `-movflags +faststart` onu başa taşır, KAYIPSIZ.
+# WHY: in mp4s output by cameras/phones, the `moov` atom sits at the END of the file.
+# The browser has to read `moov` before it can start playback → on mobile the video
+# "just won't start" (2026-08-01, Android/Chrome; downloading worked because
+# downloading doesn't wait for moov). `-movflags +faststart` moves it to the front, LOSSLESSLY.
 
 def _atom_sirasi(path):
-    """Dosyanın üst düzey atom adlarını sırayla döndür (ftyp/moov/mdat...)."""
+    """Return the file's top-level atom names in order (ftyp/moov/mdat...)."""
     import struct
     out = []
     size = os.path.getsize(path)
@@ -159,7 +159,7 @@ def _atom_sirasi(path):
 
 
 def _mp4_moov_sonda(path, saniye=1):
-    """ffmpeg ile küçük bir mp4 üret. Varsayılan çıktıda moov SONDA olur."""
+    """Produce a small mp4 with ffmpeg. In the default output, moov is at the END."""
     import subprocess
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -189,7 +189,7 @@ def test_video_commit_moovu_basa_alir(store, tmp_path):
 
 @ffmpeg_gerekli
 def test_faststart_videoyu_bozmaz(store, tmp_path):
-    """Remux kayıpsız olmalı: süre ve codec korunur, dosya oynatılabilir kalır."""
+    """Remux must be lossless: duration and codec are preserved, file stays playable."""
     import json
     import subprocess
     from io import BytesIO
@@ -212,7 +212,7 @@ def test_faststart_videoyu_bozmaz(store, tmp_path):
 
 @ffmpeg_gerekli
 def test_faststart_idempotent(store, tmp_path):
-    """Zaten önde olan dosya ikinci kez remux edilse de bozulmaz."""
+    """A file that's already at the front doesn't get corrupted even if remuxed a second time."""
     from io import BytesIO
     kaynak = _mp4_moov_sonda(tmp_path / "k3.mp4")
     with open(kaynak, "rb") as fh:
@@ -228,7 +228,7 @@ def test_faststart_idempotent(store, tmp_path):
 
 
 def test_video_olmayan_icerik_oldugu_gibi_kalir(store):
-    """ffmpeg çözemezse orijinal korunur — remux best-effort, yükleme kritik."""
+    """If ffmpeg can't decode it, the original is preserved — remux is best-effort, upload is critical."""
     from io import BytesIO
     tmp = store.stage(BytesIO(b"bu-mp4-degil"))
     assert store.commit(tmp, "BOZUKVID", "video/mp4", "v.mp4") is True
@@ -237,7 +237,7 @@ def test_video_olmayan_icerik_oldugu_gibi_kalir(store):
 
 
 def test_gorsel_remux_edilmez(store):
-    """Yalnız video/* remux edilir; görsel baytları aynen kalmalı."""
+    """Only video/* gets remuxed; image bytes must stay exactly as-is."""
     from io import BytesIO
     data = _jpeg_bytes()
     tmp = store.stage(BytesIO(data))

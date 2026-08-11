@@ -1,8 +1,9 @@
-"""img-bucket — yönetici resim deposu (eski monolitten).
+"""img-bucket — admin image store (from the old monolith).
 
-Yöneticiler resim yükler; `data/img-bucket/` altına yazılır ve `/img/<ad>` public
-URL'iyle servis edilir (harici sitelere gömmek için). Şema/göç yok (dosya sistemi);
-eski görseller cutover'a kadar eski sunucuda kalır. Depolama dizini gitignore'lu.
+Admins upload images; they're written under `data/img-bucket/` and served via the
+public `/img/<name>` URL (for embedding on external sites). No schema/migration
+(filesystem); old images stay on the old server until cutover. The storage directory
+is gitignored.
 """
 import os
 
@@ -11,8 +12,8 @@ from PIL import Image
 from werkzeug.utils import secure_filename
 
 ALLOWED_EXT = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'}
-MAX_BYTES = 50 * 1024 * 1024            # 50 MB/dosya
-MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024  # 4 GB klasör
+MAX_BYTES = 50 * 1024 * 1024            # 50 MB/file
+MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024  # 4 GB folder
 
 
 def bucket_dir():
@@ -30,7 +31,7 @@ def public_url(name):
 
 
 def _unique(directory, filename):
-    """Çakışmada ad_1.jpg, ad_2.jpg ... döndür."""
+    """On collision return name_1.jpg, name_2.jpg ..."""
     base, ext = os.path.splitext(filename)
     candidate, i = filename, 1
     while os.path.exists(os.path.join(directory, candidate)):
@@ -109,7 +110,7 @@ def delete_image(name):
 
 
 def convert_webp(name):
-    """Görseli aynı çözünürlükte .webp'ye çevir, orijinali sil. (yeni_ad, hata)."""
+    """Convert the image to .webp at the same resolution, delete the original. (new_name, error)."""
     if not _valid_flat_name(name):
         return None, 'geçersiz ad'
     ext = name.rsplit('.', 1)[1].lower()

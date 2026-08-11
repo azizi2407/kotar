@@ -1,9 +1,10 @@
-"""Reklam Takibi — `/api/ads/*` [Blueprint: /api/ads]. YALNIZ management (mali bilgi).
+"""Ad Tracking — `/api/ads/*` [Blueprint: /api/ads]. Management ONLY (financial data).
 
-Müşteri başına reklam çıkışları: tarih aralığı, harcanan tutar (₺), platform, durum,
-sonuç metrikleri, notlar. Liste ucu aynı yanıtta **özet** de döner (filtreye göre toplam
-+ müşteri bazlı kırılım) — panel iki ayrı istek atmasın. Silme SOFT (`deleted_at`).
-CSRF `api.csrf_protect` ile paylaşılır (sharing.py deseni).
+Ad spends per client: date range, amount spent (₺), platform, status, result
+metrics, notes. The list endpoint also returns a **summary** in the same response
+(total per filter + per-client breakdown) — so the panel doesn't fire two separate
+requests. Deletion is SOFT (`deleted_at`). CSRF is shared via `api.csrf_protect`
+(same pattern as sharing.py).
 """
 import datetime as dt
 from decimal import Decimal, InvalidOperation
@@ -16,29 +17,29 @@ from models import AdCampaign, Client, utcnow
 from sso_client import current_user
 
 bp = Blueprint('ads', __name__)
-bp.before_request(csrf_protect)  # api ile aynı CSRF (session token)
+bp.before_request(csrf_protect)  # same CSRF as api (session token)
 
 
 def _require_management():
-    """(user, err) döner — reklam verisi yalnız yönetime açık."""
+    """Returns (user, err) — ad data is only open to management."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='no active session'), 401)
     if u.get('role') != 'management':
-        return None, (jsonify(error='bu sayfa yalnız yönetim içindir'), 403)
+        return None, (jsonify(error='this page is for management only'), 403)
     return u, None
 
 
 def _parse_date(value, field, required=False):
-    """'YYYY-MM-DD' → date. Hatalıysa ValueError (çağıran 400'e çevirir)."""
+    """'YYYY-MM-DD' → date. Raises ValueError on error (caller turns it into a 400)."""
     if value in (None, ''):
         if required:
-            raise ValueError(f'{field} zorunlu')
+            raise ValueError(f'{field} is required')
         return None
     try:
         return dt.date.fromisoformat(str(value)[:10])
     except ValueError:
-        raise ValueError(f'{field} geçersiz tarih (YYYY-MM-DD bekleniyor)')
+        raise ValueError(f'{field} is not a valid date (expected YYYY-MM-DD)')
 
 
 def _parse_amount(value):
@@ -47,9 +48,9 @@ def _parse_amount(value):
     try:
         amount = Decimal(str(value).replace(',', '.'))
     except (InvalidOperation, ValueError):
-        raise ValueError('tutar sayı olmalı')
+        raise ValueError('amount must be a number')
     if amount < 0:
-        raise ValueError('tutar negatif olamaz')
+        raise ValueError('amount cannot be negative')
     return amount
 
 
@@ -59,45 +60,45 @@ def _parse_int(value, field):
     try:
         n = int(value)
     except (TypeError, ValueError):
-        raise ValueError(f'{field} sayı olmalı')
+        raise ValueError(f'{field} must be a number')
     if n < 0:
-        raise ValueError(f'{field} negatif olamaz')
+        raise ValueError(f'{field} cannot be negative')
     return n
 
 
 def _apply(camp, data, user, creating=False):
-    """Gövdeyi kampanyaya uygula + doğrula. ValueError → 400."""
+    """Apply the request body to the campaign + validate. ValueError → 400."""
     if creating or 'client_id' in data:
         client = db.session.get(Client, data.get('client_id') or 0)
         if client is None or client.status != 'active':
-            raise ValueError('geçerli bir müşteri seçin')
+            raise ValueError('select a valid client')
         camp.client_id = client.id
     if creating or 'start_date' in data:
-        camp.start_date = _parse_date(data.get('start_date'), 'başlangıç tarihi', required=True)
+        camp.start_date = _parse_date(data.get('start_date'), 'start date', required=True)
     if creating or 'end_date' in data:
-        camp.end_date = _parse_date(data.get('end_date'), 'bitiş tarihi')
+        camp.end_date = _parse_date(data.get('end_date'), 'end date')
     if camp.end_date and camp.start_date and camp.end_date < camp.start_date:
-        raise ValueError('bitiş tarihi başlangıçtan önce olamaz')
+        raise ValueError('end date cannot be before start date')
     if creating or 'amount_spent' in data:
         camp.amount_spent = _parse_amount(data.get('amount_spent'))
     if creating or 'platform' in data:
         platform = (data.get('platform') or 'meta').strip().lower()
         if platform not in AdCampaign.PLATFORMS:
-            raise ValueError(f'geçersiz platform: {platform}')
+            raise ValueError(f'invalid platform: {platform}')
         camp.platform = platform
     if creating or 'status' in data:
         status = (data.get('status') or 'active').strip().lower()
         if status not in AdCampaign.STATUSES:
-            raise ValueError(f'geçersiz durum: {status}')
+            raise ValueError(f'invalid status: {status}')
         camp.status = status
     if 'title' in data or creating:
         camp.title = (data.get('title') or None)
     if 'notes' in data or creating:
         camp.notes = (data.get('notes') or None)
     if 'reach' in data or creating:
-        camp.reach = _parse_int(data.get('reach'), 'erişim')
+        camp.reach = _parse_int(data.get('reach'), 'reach')
     if 'clicks' in data or creating:
-        camp.clicks = _parse_int(data.get('clicks'), 'tıklama')
+        camp.clicks = _parse_int(data.get('clicks'), 'clicks')
     camp.updated_by = user.get('sub')
     if creating:
         camp.created_by = user.get('sub')
@@ -105,8 +106,8 @@ def _apply(camp, data, user, creating=False):
 
 
 def _filtered_query():
-    """Sorgu parametrelerine göre filtrelenmiş (silinmemiş) kampanya sorgusu.
-    Tarih filtresi ÖRTÜŞME mantığıdır: kampanya aralığı [from, to] ile kesişiyorsa girer."""
+    """Campaign query filtered by query parameters (excluding deleted).
+    The date filter uses OVERLAP logic: matches if the campaign range intersects [from, to]."""
     q = AdCampaign.query.filter(AdCampaign.deleted_at.is_(None))
     if request.args.get('client_id'):
         q = q.filter(AdCampaign.client_id == int(request.args['client_id']))
@@ -117,7 +118,7 @@ def _filtered_query():
     date_from = _parse_date(request.args.get('from'), 'from')
     date_to = _parse_date(request.args.get('to'), 'to')
     if date_from:
-        # kampanya bitmemişse (end_date NULL) da örtüşme sayılır
+        # also counts as overlap if the campaign hasn't ended yet (end_date NULL)
         q = q.filter(db.or_(AdCampaign.end_date.is_(None), AdCampaign.end_date >= date_from))
     if date_to:
         q = q.filter(AdCampaign.start_date <= date_to)
@@ -127,7 +128,7 @@ def _filtered_query():
 @bp.get('')
 @bp.get('/')
 def ads_list():
-    """Kampanya listesi + özet. Yanıt: {campaigns, summary:{total_amount, count,
+    """Campaign list + summary. Response: {campaigns, summary:{total_amount, count,
     by_client:[{client_id, client_name, total, count}]}}"""
     _, err = _require_management()
     if err:
@@ -180,7 +181,7 @@ def ads_update(camp_id):
         return err
     camp = AdCampaign.query.filter_by(id=camp_id, deleted_at=None).first()
     if camp is None:
-        return jsonify(error='kayıt bulunamadı'), 404
+        return jsonify(error='record not found'), 404
     try:
         _apply(camp, request.get_json(silent=True) or {}, u)
     except ValueError as e:
@@ -192,13 +193,13 @@ def ads_update(camp_id):
 
 @bp.delete('/<int:camp_id>')
 def ads_delete(camp_id):
-    """Soft-delete — kayıt geçmişi korunur, listelerden düşer."""
+    """Soft-delete — record history is preserved, dropped from lists."""
     u, err = _require_management()
     if err:
         return err
     camp = AdCampaign.query.filter_by(id=camp_id, deleted_at=None).first()
     if camp is None:
-        return jsonify(error='kayıt bulunamadı'), 404
+        return jsonify(error='record not found'), 404
     camp.deleted_at = utcnow()
     camp.updated_by = u.get('sub')
     db.session.commit()

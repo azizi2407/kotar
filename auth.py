@@ -1,13 +1,13 @@
-"""Agency auth uçları.
+"""Agency auth endpoints.
 
-`AUTH_MODE=oidc` (varsayılan): kimlik dış OIDC sağlayıcısına delege edilir.
-  `/auth/login` → sağlayıcı yetkilendirme uç noktası → Google/... →
-  `/auth/callback?code` → code'u token'a çevir → `id_token`'ı JWKS ile doğrula →
-  claim'ler Flask session'a yazılır.
-`AUTH_MODE=local`: `/auth/login` panelin kendi `/login` sayfasına (SPA) yönlendirir;
-  bu sayfa POST `/auth/local-login` ile e-posta/parola gönderir (bkz. `local_auth.py`).
+`AUTH_MODE=oidc` (default): identity is delegated to an external OIDC provider.
+  `/auth/login` → provider's authorization endpoint → Google/... →
+  `/auth/callback?code` → exchange the code for a token → verify `id_token` with JWKS →
+  claims are written to the Flask session.
+`AUTH_MODE=local`: `/auth/login` redirects to the panel's own `/login` page (SPA);
+  that page POSTs email/password to `/auth/local-login` (see `local_auth.py`).
 
-Her iki modda da sonraki istekler yalnız imzalı Flask session cookie'sine güvenir.
+In both modes, subsequent requests trust only the signed Flask session cookie.
 """
 import secrets
 
@@ -37,10 +37,10 @@ def callback():
         abort(404)
     code = request.args.get('code')
     if not code:
-        abort(400, 'code parametresi yok')
+        abort(400, 'missing code parameter')
     state = request.args.get('state')
     if not state or state != session.pop('oauth_state', None):
-        abort(400, 'state doğrulanamadı')
+        abort(400, 'state could not be verified')
     return_url = current_app.config['AGENCY_BASE_URL'].rstrip('/') + url_for('auth.callback')
     data = oidc().exchange(code, return_url)
     claims = oidc().verify(data['id_token'])
@@ -51,16 +51,16 @@ def callback():
 
 @bp.post('/local-login')
 def local_login():
-    """AUTH_MODE=local: e-posta/parola girişi. Panelin /login sayfası bunu fetch ile
-    çağırır — `/api/*`'nin CSRF korumasına tabi DEĞİL (oturum burada henüz kurulmadı,
-    CSRF token'ı zaten olamaz — OIDC `/callback` ile aynı gerekçe)."""
+    """AUTH_MODE=local: email/password login. The panel's /login page calls this via
+    fetch — this is NOT subject to `/api/*`'s CSRF protection (the session isn't
+    established yet here, so there can't be a CSRF token anyway — same rationale as OIDC `/callback`)."""
     if AUTH_MODE != 'local':
         abort(404)
     data = request.get_json(silent=True) or {}
     import local_auth
     user = local_auth.authenticate(data.get('email'), data.get('password'))
     if user is None:
-        return jsonify(error='e-posta veya parola hatalı'), 401
+        return jsonify(error='incorrect email or password'), 401
     _start_session({'sub': f'local:{user.id}', 'email': user.email,
                     'name': user.name, 'role': user.role})
     return jsonify(ok=True)
@@ -68,21 +68,21 @@ def local_login():
 
 @bp.post('/change-password')
 def change_password():
-    """AUTH_MODE=local: oturum sahibi kendi parolasını değiştirir (mevcut parola + yeni)."""
+    """AUTH_MODE=local: the session owner changes their own password (current password + new)."""
     if AUTH_MODE != 'local':
         abort(404)
     u = session.get('user')
     if not u or not str(u.get('sub', '')).startswith('local:'):
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     data = request.get_json(silent=True) or {}
     current_pw, new_pw = data.get('current_password'), data.get('new_password')
     if not new_pw or len(new_pw) < 8:
-        return jsonify(error='yeni parola en az 8 karakter olmalı'), 400
+        return jsonify(error='new password must be at least 8 characters'), 400
     from models_auth import LocalUser
     user_id = int(u['sub'].split(':', 1)[1])
     row = db.session.get(LocalUser, user_id)
     if row is None or not row.check_password(current_pw or ''):
-        return jsonify(error='mevcut parola hatalı'), 401
+        return jsonify(error='current password is incorrect'), 401
     row.set_password(new_pw)
     db.session.commit()
     return jsonify(ok=True)

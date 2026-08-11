@@ -1,9 +1,9 @@
-// Ok uçlarının hangi kenardan çıkacağı — geometri.
+// Which edge an arrow's endpoint exits from — geometry.
 //
-// Yaşanan hata (2026-08-09, ekran görüntüsüyle bildirildi): kullanıcı bir notun
-// SAĞ tutamağından çekip sağ üstteki kartlara bağladı, oklar SOLDAN çıkıp
-// dolandı. Sebep: kenar nesnesine tutamak yazılmıyordu, RF de listedeki ilk
-// tutamağa (`l`) düşüyordu.
+// The bug that happened (2026-08-09, reported with a screenshot): the user
+// dragged from a note's RIGHT handle to connect to cards up and to the right,
+// but the arrows exited from the LEFT and looped around. Cause: no handle was
+// written to the edge object, and RF fell back to the first handle in the list (`l`).
 import { describe, expect, it } from "vitest"
 
 import {
@@ -41,7 +41,7 @@ describe("bestHandles", () => {
   })
 
   it("bildirilen durum: hedef sağ ÜSTTE ve yatay fark daha büyük → SAĞDAN çıkar", () => {
-    // Ekran görüntüsündeki yerleşime yakın: kaynak sol altta, hedef sağ üstte.
+    // Close to the layout in the screenshot: source at bottom-left, target at top-right.
     const kaynak = kutu(170, 650)
     const hedef = kutu(965, 130)
     expect(bestHandles(kaynak, hedef)).toEqual(["r", "l"])
@@ -85,7 +85,7 @@ describe("connectedEdgeKeys", () => {
   })
 
   it("zaten silinmekte olan oku TEKRAR döndürmez", () => {
-    // Kullanıcı hem kartı hem okunu seçip sildiyse ok iki kez gitmemeli.
+    // If the user selected and deleted both the card and its arrow, the arrow shouldn't be counted twice.
     expect(connectedEdgeKeys(["a", "ok1"], items).sort()).toEqual(["ok3"])
   })
 
@@ -129,22 +129,23 @@ describe("resolveHandles", () => {
   })
 
   it("saklanan yön hedefe TERS düşerse hesaplanana düşer (dolanmayı önler)", () => {
-    // Hedef sağda ama ok sol tutamağa sabitlenmiş → kartın etrafından dolanırdı.
+    // Target is on the right but the arrow is pinned to the left handle → it would loop around the card.
     expect(resolveHandles(sol, sag, { from: "l", to: null })).toEqual(["r", "l"])
   })
 
   it("hedef tarafı TERS vektörle değerlendirilir", () => {
-    // Hedef sağda; hedefin 'r' tutamağı okun geldiği yöne sırtını döner → düşer.
+    // Target is on the right; the target's 'r' handle faces away from the direction
+    // the arrow arrives from → it's dropped.
     expect(resolveHandles(sol, sag, { from: null, to: "r" })).toEqual(["r", "l"])
-    // 'l' ise doğru taraf, korunur.
+    // 'l' is the correct side though, so it's kept.
     expect(resolveHandles(sol, sag, { from: null, to: "l" })).toEqual(["r", "l"])
   })
 
   it("kart geri taşınınca saklanan seçim YİNE devreye girer", () => {
     const saklanan = { from: "l" as const, to: null }
-    // Hedef sağdayken yok sayılır…
+    // Ignored while the target is on the right…
     expect(resolveHandles(sol, sag, saklanan)[0]).toBe("r")
-    // …hedef sola geçince tekrar geçerli (değer silinmiyor, o an yok sayılıyordu).
+    // …valid again once the target moves left (the value isn't deleted, just ignored at that moment).
     expect(resolveHandles(sag, sol, saklanan)[0]).toBe("l")
   })
 
@@ -188,17 +189,17 @@ describe("zMoves", () => {
   })
 
   it("en öne: panodaki en üstün ÜSTÜNE çıkarır", () => {
-    // en üst z = 3 → 4
+    // topmost z = 3 → 4
     expect(zMoves([kutular[0]], kutular, "enOne")).toEqual([{ item_key: "a", z: 4 }])
   })
 
   it("en arkaya: panodaki en altın ALTINA indirir", () => {
-    // en alt z = -2 → -3
+    // bottommost z = -2 → -3
     expect(zMoves([kutular[1]], kutular, "enArkaya")).toEqual([{ item_key: "b", z: -3 }])
   })
 
   it("mutlak modlarda seçimin KENDİ İÇİNDEKİ sırası korunur", () => {
-    // c(-2) < a(0) < b(3) → aynı sırayla ardışık z alırlar
+    // c(-2) < a(0) < b(3) → they get consecutive z values in the same order
     expect(zMoves(kutular, kutular, "enOne")).toEqual([
       { item_key: "c", z: 4 },
       { item_key: "a", z: 5 },
@@ -210,7 +211,7 @@ describe("zMoves", () => {
     const moves = zMoves(kutular, kutular, "enArkaya")
     expect(moves.map((m) => m.item_key)).toEqual(["c", "a", "b"])
     expect(moves.every((m) => m.z < -2)).toBe(true)
-    // ardışık: aralarındaki göreli düzen bozulmadı
+    // consecutive: their relative order wasn't disturbed
     expect(moves[0].z).toBeLessThan(moves[1].z)
     expect(moves[1].z).toBeLessThan(moves[2].z)
   })
@@ -220,7 +221,7 @@ describe("zMoves", () => {
   })
 
   it("z alanı NULL/undefined olan eski kayıtları 0 sayar", () => {
-    const eski = oge({ item_key: "x" })   // z yok
+    const eski = oge({ item_key: "x" })   // no z
     expect(zMoves([eski], [eski], "one")).toEqual([{ item_key: "x", z: 1 }])
   })
 })

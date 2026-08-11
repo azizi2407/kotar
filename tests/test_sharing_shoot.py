@@ -1,10 +1,10 @@
-"""Çekim planı (shoot-plan) API — videographer + management scoped."""
+"""Shoot plan API — videographer + management scoped."""
 import pytest
 from conftest import DESIGNER, MANAGER, login_as
 from test_session_csrf import csrf_headers
 
 WK = "2026-W21"
-MON = "2026-05-18"  # 2026-W21 pazartesi
+MON = "2026-05-18"  # 2026-W21 Monday
 TUE = "2026-05-19"
 VG = {"sub": "3", "email": "vg@test.com", "name": "Videografçı", "role": "videographer"}
 
@@ -70,7 +70,7 @@ def test_shoot_plan_get_gunler_ve_havuz(client, env):
     day_mon = next(x for x in d["days"] if x["date"] == MON)
     assert len(day_mon["tasks"]) == 1
     assert day_mon["tasks"][0]["client_name"] == "VG Atanan"
-    # havuz aktif müşterileri içerir
+    # pool includes active clients
     assert any(c["id"] == a for c in d["pool"])
 
 

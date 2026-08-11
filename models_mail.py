@@ -1,17 +1,18 @@
-"""Panel mail modülü modelleri — self-servis çoklu hesaplı webmail.
+"""Panel mail module models — self-service multi-account webmail.
 
-Kimlik SSO'da yaşar; `owner_sub` hesabın sahibinin SSO `sub`'ıdır. Parola
-`secret_enc`'te Fernet-şifreli (mail_crypto), API'de ASLA dönmez. Gelen postalar
-kalıcı: mail_messages (gövde dahil) + mail_attachments (metadata; bayt on-demand
-IMAP'ten). Tablolar db.create_all ile açılır (ALTER yok).
+Identity lives in SSO; `owner_sub` is the account owner's SSO `sub`. The password is
+Fernet-encrypted (mail_crypto) in `secret_enc`, and is NEVER returned by the API.
+Incoming mail is persistent: mail_messages (body included) + mail_attachments
+(metadata; bytes fetched on-demand from IMAP). Tables are created via db.create_all
+(no ALTER).
 """
 from extensions import db
 from models import iso, utcnow
 
 
 class MailAccount(db.Model):
-    """Bir IMAP/SMTP posta hesabı (varsayılan mail sunucusu). owner_sub sahibi; is_shared ise
-    ortak kutu (info@) — yalnız superadmin kurar. Parola Fernet-şifreli."""
+    """An IMAP/SMTP mail account (default mail server). owner_sub is the owner; if is_shared,
+    it's a shared mailbox (info@) — only a superadmin sets it up. Password is Fernet-encrypted."""
     __tablename__ = 'mail_accounts'
     __table_args__ = (db.UniqueConstraint('owner_sub', 'email', name='uq_mail_owner_email'),
                       db.Index('ix_mail_accounts_owner', 'owner_sub'))
@@ -26,7 +27,7 @@ class MailAccount(db.Model):
     smtp_port = db.Column(db.Integer, nullable=False, default=465)
     # 'ssl' (implicit, 465) | 'starttls' (587) | 'none'
     smtp_security = db.Column(db.String(16), nullable=False, default='ssl')
-    secret_enc = db.Column(db.Text, nullable=False)  # Fernet-şifreli parola — API'de dönmez
+    secret_enc = db.Column(db.Text, nullable=False)  # Fernet-encrypted password — not returned by the API
     is_shared = db.Column(db.Boolean, nullable=False, default=False)
     poll_enabled = db.Column(db.Boolean, nullable=False, default=False)
     active = db.Column(db.Boolean, nullable=False, default=True)
@@ -36,7 +37,7 @@ class MailAccount(db.Model):
     last_error = db.Column(db.Text)
 
     def to_dict(self):
-        """Güvenli projeksiyon — secret_enc/parola ASLA dönmez."""
+        """Safe projection — secret_enc/password is NEVER returned."""
         return {
             'id': self.id, 'owner_sub': self.owner_sub, 'email': self.email,
             'display_name': self.display_name,
@@ -51,7 +52,7 @@ class MailAccount(db.Model):
 
 
 class MailFolder(db.Model):
-    """Hesabın IMAP klasörü (LIST'ten). special_use: inbox|sent|drafts|trash|junk|archive|None."""
+    """The account's IMAP folder (from LIST). special_use: inbox|sent|drafts|trash|junk|archive|None."""
     __tablename__ = 'mail_folders'
     __table_args__ = (db.UniqueConstraint('account_id', 'path', name='uq_mail_folder_path'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -69,7 +70,7 @@ class MailFolder(db.Model):
 
 
 class MailMessage(db.Model):
-    """Senkronlanan mesaj (kalıcı; gövde dahil). Ekler metadata; bayt on-demand."""
+    """Synced message (persistent; body included). Attachments are metadata; bytes on-demand."""
     __tablename__ = 'mail_messages'
     __table_args__ = (
         db.UniqueConstraint('account_id', 'uidvalidity', 'folder_id', 'uid',
@@ -121,7 +122,7 @@ class MailMessage(db.Model):
 
 
 class MailAttachment(db.Model):
-    """Ek metadata — bayt on-demand IMAP'ten (part_id ile FETCH)."""
+    """Attachment metadata — bytes on-demand from IMAP (FETCH by part_id)."""
     __tablename__ = 'mail_attachments'
     id = db.Column(db.Integer, primary_key=True)
     message_id = db.Column(db.Integer, db.ForeignKey('mail_messages.id'), nullable=False, index=True)
@@ -139,7 +140,7 @@ class MailAttachment(db.Model):
 
 
 class MailDraft(db.Model):
-    """Panelde yazılan taslak (gönderilmeden). İstenirse IMAP Drafts'a APPEND edilir."""
+    """Draft written in the panel (not yet sent). Optionally APPENDed to IMAP Drafts."""
     __tablename__ = 'mail_drafts'
     id = db.Column(db.Integer, primary_key=True)
     account_id = db.Column(db.Integer, db.ForeignKey('mail_accounts.id'), nullable=False, index=True)

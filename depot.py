@@ -1,32 +1,39 @@
-"""Videograf Deposu — `/api/depot/*` [Blueprint: /api/depot].
+"""Videographer Depot — `/api/depot/*` [Blueprint: /api/depot].
 
-Videograflar + yönetim için ORTAK serbest dosya alanı: müşteriye ve haftaya bağlı
-değil, ekibin çalışma malzemesi (ham çekim, LUT, proje dosyası, referans…) burada
-durur. Drive'da `<içerik kökü>/Videograf Deposu` altında TEK DÜZ klasör.
+A SHARED free-form file space for videographers + management: not tied to a
+client or week, this is where the team's working material lives (raw
+footage, LUTs, project files, references...). A SINGLE flat folder in Drive
+under `<content root>/Videograf Deposu`.
 
-KOTA: ortak **5 GB**, dosya başına **500 MB**. Kota her istekte `SUM(file_size)` ile
-ÖLÇÜLÜR, sayaç kolonu YOK — sayaç, Drive yüklemesi ile DB commit'i arasındaki her
-çökmede kalıcı drift üretir ve mutabakat işi gerektirirdi. Tablo pratikte ≤~100 satır
-(5 GB / ortalama dosya) → agregat sorgu sub-ms.
+QUOTA: shared **5 GB**, **500 MB** per file. Quota is MEASURED via
+`SUM(file_size)` on every request, NO counter column — a counter would drift
+permanently on every crash between the Drive upload and the DB commit, and
+would require a reconciliation job. In practice the table has ≤~100 rows
+(5 GB / average file size) -> the aggregate query is sub-ms.
 
-KONTROL SIRASI (hepsi Drive'a GİTMEDEN önce): boyut ölç → 500 MB aşımı 413 → kota
-aşımı 409 → yasak uzantı 400. Eşzamanlı iki yükleme kotayı bir miktar aşabilir
-(üst sınır ~(eşzamanlı-1)×500 MB); bu bilinçli tolerans — advisory lock 500 MB'lık
-bir upload boyunca tüm depoyu kilitlerdi. Aşım `over_quota` ile görünür kılınır ve
-sonraki yüklemeler otomatik reddedilir (kendini toparlar).
+CHECK ORDER (all BEFORE touching Drive): measure size -> over 500 MB is 413
+-> over quota is 409 -> blocked extension is 400. Two simultaneous uploads
+can push the quota somewhat over (upper bound ~(concurrent-1)x500 MB); this
+is a deliberate tolerance — an advisory lock would lock the whole depot for
+the duration of a 500 MB upload. The overage is made visible via
+`over_quota` and subsequent uploads are automatically rejected (self-heals).
 
-RAM: dosya hiçbir noktada tamamen belleğe alınmaz — werkzeug multipart'ı diske
-spool'lar, `dg.upload_file` resumable + 16 MB chunk ile akıtır (`num_retries=5`,
-kopan chunk kaldığı yerden). `media_store` BİLEREK kullanılmaz: `stage` 500 MB'ı
-disk→disk ikinci kez kopyalar, `commit` 5 GB'ı 21 gün diskte ikinci kez tutar — ve
-depo dosyalarını hiçbir uç lokal servis etmiyor (Drive kanonik, önizleme/stream yok).
+RAM: the file is never fully loaded into memory at any point — werkzeug
+spools the multipart body to disk, `dg.upload_file` streams it resumably in
+16 MB chunks (`num_retries=5`, a dropped chunk resumes where it left off).
+`media_store` is DELIBERATELY not used: `stage` would copy the 500 MB
+disk-to-disk a second time, `commit` would keep the 5 GB on disk a second
+time for 21 days — and no endpoint serves depot files locally anyway (Drive
+is canonical, no preview/stream).
 
-⚠️ Depo dosyalarına yükleme anında 'bağlantıya sahip herkes → okuyabilir' izni
-verilir (kullanıcı kararı, 2026-07-25): aksi halde ajans Google hesabında olmayan
-personel için kopyalanan link işe yaramaz. Sonuç: **linki bilen herkes indirebilir**
-— panelde kalıcı uyarı şeridi var, gizli belge konmamalı.
+WARNING: depot files get 'anyone with the link -> can view' permission at
+upload time (user's decision, 2026-07-25): otherwise the copied link is
+useless to staff without an agency Google account. Consequence: **anyone who
+knows the link can download it** — there's a permanent warning banner in the
+panel, no confidential documents should be put here.
 
-CSRF `api.csrf_protect` ile paylaşılır (ads.py/client_tracking.py/planning.py deseni).
+CSRF is shared via `api.csrf_protect` (same pattern as
+ads.py/client_tracking.py/planning.py).
 """
 import logging
 import mimetypes
@@ -46,36 +53,36 @@ from sso_client import current_user
 log = logging.getLogger(__name__)
 
 bp = Blueprint('depot', __name__)
-bp.before_request(csrf_protect)  # api ile aynı CSRF (session token)
+bp.before_request(csrf_protect)  # same CSRF as api (session token)
 
 DEPOT_ROLES = ('management', 'videographer')
 DEPOT_FOLDER_NAME = 'Videograf Deposu'
 
-QUOTA_BYTES = 5 * 1024 * 1024 * 1024      # ortak 5 GB
-MAX_FILE_BYTES = 500 * 1024 * 1024        # dosya başına 500 MB (sharing.MAX_UPLOAD_BYTES ile AYNI)
+QUOTA_BYTES = 5 * 1024 * 1024 * 1024      # shared 5 GB
+MAX_FILE_BYTES = 500 * 1024 * 1024        # 500 MB per file (SAME as sharing.MAX_UPLOAD_BYTES)
 NOTE_MAX = 300
 
-# Dosya türü SERBEST, ama çalıştırılabilirler yasak: depo dosyaları bağlantıyla
-# herkese açık olduğu için konan bir .exe doğrudan kimlik avı aracına dönüşür.
-# Allow-list DEĞİL — gereksinim "serbest dosya".
+# File type is UNRESTRICTED, but executables are blocked: since depot files
+# are publicly link-accessible, a planted .exe turns directly into a
+# phishing tool. NOT an allow-list — the requirement is "free-form files".
 BLOCKED_EXT = {'exe', 'msi', 'bat', 'cmd', 'com', 'scr', 'pif', 'ps1', 'sh', 'bash',
                'apk', 'jar', 'vbs', 'wsf', 'lnk', 'dll', 'deb', 'rpm'}
 
 
 def _require_depot():
-    """(user, err) — depo yalnız videograf ekibine ve yönetime açık."""
+    """(user, err) — the depot is open only to the videographer team and management."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='not authenticated'), 401)
     if u.get('role') not in DEPOT_ROLES:
-        return None, (jsonify(error='bu bölüm videograf ekibine açıktır'), 403)
+        return None, (jsonify(error='this section is only open to the videographer team'), 403)
     return u, None
 
 
-# --- kota ----------------------------------------------------------------
+# --- quota ----------------------------------------------------------------
 
 def _used_bytes():
-    """Silinmemiş dosyaların toplam boyutu — kotanın TEK gerçek kaynağı."""
+    """Total size of non-deleted files — the ONE source of truth for quota."""
     return int(db.session.query(
         db.func.coalesce(db.func.sum(DepotFile.file_size), 0)
     ).filter(DepotFile.deleted_at.is_(None)).scalar() or 0)
@@ -89,20 +96,21 @@ def _quota():
 
 
 def _mb(n):
-    """İnsan-okur boyut (hata mesajlarında)."""
+    """Human-readable size (used in error messages)."""
     if n >= 1024 ** 3:
         return f'{n / 1024 ** 3:.1f} GB'.replace('.', ',')
     return f'{n / 1024 ** 2:.0f} MB'
 
 
-# --- dosya adı / tür -----------------------------------------------------
+# --- file name / type -----------------------------------------------------
 
 def _clean_name(raw):
-    """Yol ayırıcı ve kontrol karakterlerini temizler; TÜRKÇE harfleri ve kesme
-    işaretini KORUR. `werkzeug.secure_filename` kullanılmaz — Türkçe karakterleri
-    kırpar, oysa repo başka yerlerde (vg_photo_rename, indirme adı) Türkçe adları
-    koruyor. Kesme işareti güvenli: dosya adı Drive'a JSON gövdede gider, `q`
-    sorgusunda değil (klasör adımız sabit ve kesme işareti içermiyor)."""
+    """Strips path separators and control characters; KEEPS Turkish letters
+    and the apostrophe. `werkzeug.secure_filename` is not used — it strips
+    Turkish characters, whereas the repo preserves Turkish names elsewhere
+    (vg_photo_rename, download name). The apostrophe is safe: the file name
+    travels to Drive in the JSON body, not in the `q` query (our folder name
+    is fixed and contains no apostrophe)."""
     name = re.sub(r'[\\/\x00-\x1f]', '_', raw or '').strip().strip('.')
     if len(name) > 200:
         stem, dot, ext = name.rpartition('.')
@@ -111,18 +119,21 @@ def _clean_name(raw):
 
 
 def _blocked_ext(name):
-    """Son uzantıya bakar → 'rapor.pdf.exe' de yakalanır."""
+    """Checks the final extension -> 'rapor.pdf.exe' gets caught too."""
     ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
     return ext in BLOCKED_EXT
 
 
 def _depot_folder_id():
-    """İçerik kökü altındaki tek düz depo klasörü; yoksa oluşturur (idempotent).
+    """The single flat depot folder under the content root; creates it if
+    missing (idempotent).
 
-    Klasör id'si cache'lenmez (ne tablo ne AppSetting): TEK klasör var, `ensure_subfolder`
-    bul-veya-oluştur ve ~200 ms — saniyeler süren bir upload'ın yanında ölçülemez.
-    Cache = bayatlama hatası + global ayar tablosunda gereksiz anahtar.
-    (`_resolve_week_folder` tabloda tutuyor çünkü müşteri × 52 klasör var.)"""
+    The folder id is NOT cached (neither a table nor AppSetting): there's a
+    SINGLE folder, `ensure_subfolder`'s find-or-create takes ~200 ms —
+    negligible next to an upload that takes seconds. Caching would mean
+    staleness risk + an unnecessary key in the global settings table.
+    (`_resolve_week_folder` does keep it in a table because there's a
+    client x 52 matrix of folders.)"""
     root = (os.environ.get('DRIVE_CONTENT_ROOT_ID') or '').strip()
     if not root:
         return None
@@ -130,17 +141,17 @@ def _depot_folder_id():
 
 
 def _uploader_names():
-    """{sub: ad} — TEK sorgu. Dosya başına lazy erişim YASAK (N+1)."""
+    """{sub: name} — A SINGLE query. Lazy per-file access is FORBIDDEN (N+1)."""
     return {u.sub: (u.name or u.email)
             for u in db.session.query(UserRef.sub, UserRef.name, UserRef.email).all()}
 
 
-# --- uçlar ---------------------------------------------------------------
+# --- endpoints ---------------------------------------------------------------
 
 @bp.get('/files')
 @bp.get('/files/')
 def depot_files():
-    """Depo listesi + kota (tek istekte ikisi — panel iki tur atmasın)."""
+    """Depot list + quota (both in a single request — spare the panel a second round trip)."""
     _, err = _require_depot()
     if err:
         return err
@@ -156,7 +167,7 @@ def depot_files():
 
 @bp.get('/quota')
 def depot_quota():
-    """Ucuz kota yoklaması — yükleme diyaloğu listeyi çekmeden tazeler."""
+    """Cheap quota poll — the upload dialog refreshes without fetching the whole list."""
     _, err = _require_depot()
     if err:
         return err
@@ -165,52 +176,55 @@ def depot_quota():
 
 @bp.post('/upload')
 def depot_upload():
-    """Tek dosya yükle. Çoklu seçim istemcide SIRALI ayrı isteklerle yapılır —
-    parti tek gövdede nginx 512 MB tavanına çarpıp 413 alıyordu (47 fotoluk vaka)."""
+    """Upload a single file. Multi-select is done client-side as SEQUENTIAL
+    separate requests — batching into a single body was hitting nginx's
+    512 MB cap and getting a 413 (the 47-photo case)."""
     u, err = _require_depot()
     if err:
         return err
     f = request.files.get('file')
     if not f or not f.filename:
-        return jsonify(error='dosya yok'), 400
+        return jsonify(error='no file provided'), 400
     name = _clean_name(f.filename)
     if _blocked_ext(name):
-        return jsonify(error='Bu dosya türü depoya yüklenemez (çalıştırılabilir dosya).'), 400
+        return jsonify(error='This file type cannot be uploaded to the depot (executable file).'), 400
 
-    # Boyutu akışı RAM'e almadan ölç (werkzeug büyük gövdeyi diske spool'lar).
+    # Measure size without loading the stream into RAM (werkzeug spools large bodies to disk).
     f.stream.seek(0, 2)
     size = f.stream.tell()
     f.stream.seek(0)
     if size > MAX_FILE_BYTES:
-        return jsonify(error='Dosya 500 MB sınırını aşıyor.'), 413
+        return jsonify(error='File exceeds the 500 MB limit.'), 413
     q = _quota()
     if size > q['remaining']:
-        # 409, 413 DEĞİL: 413 "bu isteğin gövdesi büyük" demek (Flask'ın kendi
-        # handler'ı o mesajı üretiyor); kota bir DURUM çakışması ve panel iki vakayı
-        # ayırt edip doğru metni göstermeli.
-        return jsonify(error=f'Depo dolu — kalan alan {_mb(q["remaining"])}, '
-                             f'dosya {_mb(size)}.', quota=q), 409
+        # 409, NOT 413: 413 means "this request's body is too large" (Flask's
+        # own handler produces that message); quota is a STATE conflict, and
+        # the panel needs to tell the two cases apart and show the right text.
+        return jsonify(error=f'Storage is full — {_mb(q["remaining"])} remaining, '
+                             f'file is {_mb(size)}.', quota=q), 409
 
     try:
         folder_id = _depot_folder_id()
     except dg.DriveError as e:
-        return jsonify(error=f'Depo klasörü oluşturulamadı: {e}'), 502
+        return jsonify(error=f'Could not create the depot folder: {e}'), 502
     if not folder_id:
-        # best-effort DEĞİL: client_provision'da Drive hatası müşteri oluşturmayı
-        # bloklamaz çünkü müşteri DB'de yaşar; BURADA Drive dosyası ürünün kendisi.
-        return jsonify(error='Videograf Deposu için Drive kökü tanımlı değil '
+        # NOT best-effort: in client_provision a Drive error doesn't block
+        # client creation because the client lives in the DB; HERE the Drive
+        # file is the product itself.
+        return jsonify(error='No Drive root defined for the Videographer Depot '
                              '(DRIVE_CONTENT_ROOT_ID).'), 400
 
     mime = f.mimetype or mimetypes.guess_type(name)[0] or 'application/octet-stream'
     try:
-        # AKIŞTAN yükle — media_store kullanılmaz (modül docstring'indeki gerekçe).
+        # Upload FROM THE STREAM — media_store is not used (rationale in the
+        # module docstring).
         meta = dg.upload_file(folder_id, name, f.stream, mime)
     except dg.DriveError as e:
         log.exception('depo yüklemesi başarısız (dosya=%s boyut=%s)', name, size)
-        return jsonify(error=f'Drive yükleme başarısız: {e}'), 502
+        return jsonify(error=f'Drive upload failed: {e}'), 502
     try:
         dg.grant_anyone_reader(meta.get('id'))
-    except Exception as e:  # noqa: BLE001 — izin en-iyi-çaba, yükleme kritik
+    except Exception as e:  # noqa: BLE001 — permission is best-effort, the upload is critical
         log.warning('depo dosyasına izin verilemedi (%s): %s', meta.get('id'), e)
 
     row = DepotFile(
@@ -224,16 +238,18 @@ def depot_upload():
     db.session.commit()
     names = _uploader_names()
     q = _quota()
-    # Kota eşiği uyarısı (2026-08-05). Bu 5 GB müşteri içerikleriyle AYNI Drive
-    # kotasından yeniyor — tavanda müşteri yüklemeleri de durur, sessiz kalmamalı.
-    # Eşik yalnız yükleme anında bakılır (ayrı timer'a gerek yok: depo ancak
-    # yükleme ile dolar) ve bildirim tarafında coalesce YOK — `depot_quota` zaten
-    # okunmamış bir uyarı varsa tekrar üretilmemeli, o kontrolü eşik yapıyor.
+    # Quota threshold warning (2026-08-05). This 5 GB eats into the SAME
+    # Drive quota as client content — at the cap, client uploads stop too,
+    # so this shouldn't stay silent. The threshold is only checked at upload
+    # time (no separate timer needed: the depot only fills up via uploads),
+    # and there's NO coalescing on the notification side — `depot_quota`
+    # shouldn't be regenerated if there's already an unread warning; the
+    # threshold itself provides that check.
     try:
         if q['pct'] >= 80:
             notifications.notify_depot_quota(q['used'] / 1024 ** 3,
                                              q['limit'] / 1024 ** 3, int(q['pct']))
-    except Exception:  # noqa: BLE001 — bildirim en-iyi-çaba, yükleme kritik
+    except Exception:  # noqa: BLE001 — notification is best-effort, the upload is critical
         log.exception('depo kota bildirimi başarısız')
     return jsonify(file=row.to_dict(uploader_name=names.get(row.uploaded_by)),
                    quota=q), 201
@@ -241,25 +257,26 @@ def depot_upload():
 
 @bp.delete('/files/<int:row_id>')
 def depot_delete(row_id):
-    """Dosyayı kaldır: DB'de soft-delete + Drive'da çöp kutusu.
+    """Remove a file: soft-delete in the DB + move to trash in Drive.
 
-    Depo ORTAK olduğu için silme de ortak — herkes her dosyayı silebilir; kim
-    yüklediği ve kim sildiği kayıtta durur.
+    Since the depot is SHARED, deletion is shared too — anyone can delete
+    any file; who uploaded and who deleted it stays on record.
 
-    Drive silme hata verse bile DB satırı soft-delete EDİLİR (kullanıcının niyeti +
-    kota boşalması), yanıt `drive_ok:false` döner. Aksi halde tek bir Drive hıçkırığı
-    dosyayı silinemez yapıp kotayı kalıcı meşgul ederdi; `file_id` satırda durduğu
-    için elle temizlenebilir."""
+    The DB row is soft-deleted EVEN IF the Drive deletion errors (the
+    user's intent + freeing up quota), the response returns `drive_ok:false`.
+    Otherwise a single Drive hiccup would make a file permanently
+    undeletable and keep the quota occupied forever; since `file_id` stays
+    on the row it can be cleaned up manually."""
     u, err = _require_depot()
     if err:
         return err
     row = DepotFile.query.filter_by(id=row_id, deleted_at=None).first()
     if row is None:
-        return jsonify(error='dosya bulunamadı'), 404
+        return jsonify(error='file not found'), 404
     drive_ok = True
     try:
         dg.trash_file(row.file_id)
-    except Exception as e:  # noqa: BLE001 — panelden kaldırma her hâlükârda geçerli
+    except Exception as e:  # noqa: BLE001 — removal from the panel is valid either way
         drive_ok = False
         log.exception('depo dosyası Drive çöpüne taşınamadı (%s): %s', row.file_id, e)
     row.deleted_at = utcnow()

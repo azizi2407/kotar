@@ -1,33 +1,24 @@
-// Kısayol yardımı — `?` ile açılır.
+// Shortcuts help — opened with `?`.
 //
-// NEDEN VAR: tuvalde Ctrl+C/V/D/G/A, Space+sürükle, Delete, V/H gibi bir düzine
-// kısayol var ve HİÇBİRİ ekranda yazmıyordu. Kullanıcı bunları ancak tesadüfen
-// keşfedebilirdi; pratikte hiç kullanılmıyorlardı.
+// WHY THIS EXISTS: the canvas has a dozen shortcuts like Ctrl+C/V/D/G/A,
+// Space+drag, Delete, V/H, and NONE of them were shown on screen. Users could
+// only discover them by accident; in practice they were never used.
 import { Keyboard, X } from "lucide-react"
 
-const KISAYOLLAR: { tus: string; ne: string }[] = [
-  { tus: "Çift tık", ne: "Kart/not metnini düzenle" },
-  { tus: "Sağ tık", ne: "Ekleme ve öğe menüsü" },
-  { tus: "Sürükle", ne: "Kutu ile çoklu seçim (Seç modu)" },
-  { tus: "Space + sürükle", ne: "Tuvali kaydır" },
-  { tus: "Orta tuş", ne: "Tuvali kaydır" },
-  { tus: "V / H", ne: "Seç modu / Kaydır modu" },
-  { tus: "Shift + tık", ne: "Seçime ekle" },
-  { tus: "Ctrl + A", ne: "Tümünü seç" },
-  { tus: "Ctrl + C / V", ne: "Kopyala / yapıştır" },
-  { tus: "Ctrl + D", ne: "Çoğalt" },
-  { tus: "Ctrl + G", ne: "Seçimi grupla" },
-  { tus: "Ctrl + Z", ne: "Geri al" },
-  { tus: "Ctrl + Shift + Z", ne: "İleri al" },
-  { tus: "Delete", ne: "Seçimi sil" },
-  { tus: "Ok tuşları", ne: "Seçili öğeyi kaydır" },
-  { tus: "Tutamaktan boşluğa çek", ne: "Bağlı yeni kart oluştur" },
-  { tus: "Okun ucundan çek", ne: "Oku başka bir öğeye bağla" },
-  { tus: "Ctrl/Cmd + V (görsel)", ne: "Panodaki görseli yapıştır" },
-  { tus: "?", ne: "Bu listeyi aç/kapat" },
-]
+import { useI18n } from "@/lib/i18n"
+
+const KISAYOL_ANAHTARLARI = [
+  "doubleClick", "rightClick", "dragSelect", "spacePan", "middleButton", "modeToggle",
+  "shiftClick", "selectAll", "copyPaste", "duplicate", "groupSel", "undo", "redo",
+  "deleteSel", "arrowMove", "dragHandle", "dragTip", "pasteImage", "toggleHelp",
+] as const
 
 export function ShortcutsHelp({ onClose }: { onClose: () => void }) {
+  const { t } = useI18n()
+  const kisayollar = KISAYOL_ANAHTARLARI.map((k) => ({
+    tus: t(`components.planlama.shortcutsHelp.${k}.key`),
+    ne: t(`components.planlama.shortcutsHelp.${k}.desc`),
+  }))
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/30 p-4"
       onClick={onClose}>
@@ -35,16 +26,16 @@ export function ShortcutsHelp({ onClose }: { onClose: () => void }) {
         onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="flex items-center gap-2 text-sm font-semibold">
-            <Keyboard className="h-4 w-4" /> Klavye ve fare kısayolları
+            <Keyboard className="h-4 w-4" /> {t("components.planlama.shortcutsHelp.title")}
           </h2>
-          <button type="button" onClick={onClose} title="Kapat"
+          <button type="button" onClick={onClose} title={t("components.planlama.shortcutsHelp.close")}
             className="text-muted-foreground hover:text-foreground">
             <X className="h-4 w-4" />
           </button>
         </div>
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
-          {KISAYOLLAR.map((k) => (
-            <div key={k.tus} className="contents">
+          {kisayollar.map((k, i) => (
+            <div key={KISAYOL_ANAHTARLARI[i]} className="contents">
               <dt className="text-right">
                 <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono text-[10px]">{k.tus}</kbd>
               </dt>

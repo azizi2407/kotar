@@ -1,4 +1,4 @@
-// Mail modülü API istemcisi — /api/mail/*. Erişim backend'de owner_sub ile sınırlı.
+// Mail module API client — /api/mail/*. Access is restricted by owner_sub on the backend.
 import { apiGet, apiJson } from "@/lib/api"
 
 export interface MailAccount {
@@ -53,7 +53,7 @@ export interface MailMessage {
   flagged: boolean
   answered: boolean
   has_attachments: boolean
-  // full mod
+  // full mode
   body_text?: string
   body_html?: string
   in_reply_to?: string
@@ -88,10 +88,10 @@ export interface TestResult {
   smtp_ok: boolean
   imap_error: string | null
   smtp_error: string | null
-  // Hatanın SINIFI (2026-07-31): 'auth' = parola yanlış (kullanıcı düzeltebilir),
-  // 'connect' = sunucuya ulaşılamıyor (ağ/sunucu tarafı). İkisi farklı iş; tek
-  // metne bakınca ayırt edilemiyordu ve düzeltilebilir bir parola sorunu
-  // "sunucu engeli" sanılıp aylarca öyle kalabiliyordu.
+  // The error's CLASS (2026-07-31): 'auth' = wrong password (user can fix it),
+  // 'connect' = server unreachable (network/server-side). These are two different
+  // problems; looking at a single message alone couldn't distinguish them, and a
+  // fixable password issue could be mistaken for a "server block" for months.
   imap_error_kind: "auth" | "connect" | null
   smtp_error_kind: "auth" | "connect" | null
 }

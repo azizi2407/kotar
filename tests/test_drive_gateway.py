@@ -1,4 +1,4 @@
-"""Drive Gateway — ağ gerektirmeyen birimler (env parse, hata eşleme)."""
+"""Drive Gateway — units that don't require network (env parsing, error mapping)."""
 import json
 
 import pytest
@@ -22,7 +22,7 @@ def test_sa_json_yoksa_auth_error(monkeypatch):
 
 
 def test_sa_info_newline_duzeltme(monkeypatch):
-    # env round-trip'inde private_key literal \n içerebilir → gerçek satır sonu olmalı
+    # private_key may contain literal \n in env round-trip → should become an actual newline
     monkeypatch.setenv("GOOGLE_SA_JSON", json.dumps({
         "type": "service_account",
         "private_key": "-----BEGIN PRIVATE KEY-----\\nABC\\n-----END PRIVATE KEY-----\\n",
@@ -65,7 +65,7 @@ def test_count_files_bos_folder_none():
 
 
 def test_trash_file_trashed_true_gonderir(monkeypatch):
-    """Kalıcı silme DEĞİL çöp kutusu — yanlış tıklamanın 30 gün geri dönüşü olsun."""
+    """Trash, NOT permanent delete — a wrong click gets a 30-day undo window."""
     seen = {}
 
     class _Files:

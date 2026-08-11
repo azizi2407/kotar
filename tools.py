@@ -1,5 +1,5 @@
-"""Araç uçları (/api/tools) — image_splitter vb. Ekip araçları (yazma değil,
-işlem). CSRF api ile paylaşımlı. Görsel işleme image_tools.py'de (test edilebilir).
+"""Tool endpoints (/api/tools) — image_splitter etc. Team tools (processing, not
+writes). CSRF is shared with api. Image processing lives in image_tools.py (testable).
 """
 import base64
 import io
@@ -21,9 +21,9 @@ TOOL_ROLES = {'management', 'designer', 'content_creator', 'videographer'}
 def _require_management():
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='not signed in'), 401)
     if u.get('role') != 'management':
-        return None, (jsonify(error='yetkiniz yok'), 403)
+        return None, (jsonify(error='not authorized'), 403)
     return u, None
 
 
@@ -31,12 +31,12 @@ def _require_management():
 def image_split():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in TOOL_ROLES:
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     f = request.files.get('image')
     if not f or not f.filename:
-        return jsonify(error='görsel yok'), 400
+        return jsonify(error='no image'), 400
     reels = request.form.get('mode') == 'reels'
     ext = f.filename.rsplit('.', 1)[-1].lower() if '.' in f.filename else 'jpg'
     try:
@@ -45,10 +45,10 @@ def image_split():
         return jsonify(error=str(e)), 400
     pieces = [{
         'name': name,
-        'is_cover': reels and i == 1,  # orta parça = video kapağı
+        'is_cover': reels and i == 1,  # middle piece = video cover
         'data_url': f'data:{mime};base64,' + base64.b64encode(data).decode(),
     } for i, (name, data, mime) in enumerate(parts)]
-    # Tek tıkla hepsi: parçaları zip'le (STORED — görseller zaten sıkışık).
+    # All in one click: zip the pieces (STORED — images are already compressed).
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as zf:
         for name, data, _ in parts:
@@ -60,7 +60,7 @@ def image_split():
         zip_data_url='data:application/zip;base64,' + base64.b64encode(buf.getvalue()).decode())
 
 
-# --- img-bucket (yönetici resim deposu, management-only) ---
+# --- img-bucket (admin image store, management-only) ---
 
 @bp.get('/img-bucket/list')
 def bucket_list():

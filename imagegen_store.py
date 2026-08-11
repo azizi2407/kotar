@@ -1,15 +1,15 @@
-"""Codex çıktısının doğrulanması ve kalıcı lokal deposu.
+"""Validation and persistent local storage of Codex output.
 
-Neden Drive değil: bu hattın çıktısı panel içi bir taslaktır, ekip indirip kullanır;
-her üretimde Drive OAuth turu gecikme ve kota demek (kota zaten %85 dolu — bkz.
-planning_images.py'deki aynı gerekçe). Neden `img_bucket` değil: orası `/img/<ad>`
-ile PUBLIC servis eder; müşteri marka görselleri public URL'e konamaz. Neden
-`media_store` değil: orası 21 günlük önbellek (Drive kanonik), burada kanonik kopya
-bu dosyanın kendisidir.
+Why not Drive: this pipeline's output is an in-panel draft that the team downloads and
+uses; a Drive OAuth round trip on every generation means latency and quota (quota is
+already 85% full — see the same rationale in planning_images.py). Why not `img_bucket`:
+that serves PUBLICLY via `/img/<name>`; client brand images can't be placed at a public
+URL. Why not `media_store`: that's a 21-day cache (Drive is canonical), here the
+canonical copy is this file itself.
 
-Yerleşim: `data/codex-images/<client_id>/<uuid>.png` — dizinin müşteri başına
-ayrılması yetkilendirmeyi bedavaya getirir (servis ucu rol kapısından geçer,
-dosya adı tahmin edilse bile yol müşteri kimliğini taşır).
+Layout: `data/codex-images/<client_id>/<uuid>.png` — splitting the directory per
+client gets authorization for free (the serving endpoint goes through the role gate,
+and even if the filename is guessed, the path still carries the client identity).
 """
 import hashlib
 import io
@@ -19,13 +19,13 @@ import uuid
 from flask import current_app
 from PIL import Image, UnidentifiedImageError
 
-MIN_BYTES = 1024                    # 1 KB altı: yarım/boş dosya
-MAX_BYTES = 25 * 1024 * 1024        # 25 MB üstü: üretim değil, kaza
+MIN_BYTES = 1024                    # under 1 KB: half-written/empty file
+MAX_BYTES = 25 * 1024 * 1024        # over 25 MB: not a real generation, an accident
 NAME_LEN = 32                       # uuid4().hex
 
 
 class OutputError(Exception):
-    """Çıktı doğrulama hatası — iş `error_code='invalid_output'` ile kapanır."""
+    """Output validation error — the job closes with `error_code='invalid_output'`."""
 
 
 def root_dir(create=False):
@@ -37,11 +37,11 @@ def root_dir(create=False):
 
 
 def validate(path, workdir):
-    """Codex'in ürettiği dosyayı doğrula → `{width, height, bytes, sha256, mime}`.
+    """Validate the file Codex produced → `{width, height, bytes, sha256, mime}`.
 
-    Codex'in "başarılı" demesine GÜVENİLMEZ (spec §7). Sıra önemli: yol → varlık →
-    boyut → içerik. Yol kontrolü `realpath` ile yapılır; iş dizini içinde duran ama
-    dışarıyı gösteren bir symlink aksi halde /etc/passwd'i "çıktı" diye geçirirdi."""
+    Codex saying "success" is NOT TRUSTED (spec §7). Order matters: path → existence →
+    size → content. The path check uses `realpath`; otherwise a symlink that sits inside
+    the work directory but points outside it would let /etc/passwd pass as "output"."""
     real = os.path.realpath(path)
     root = os.path.realpath(workdir)
     if not (real == root or real.startswith(root + os.sep)):
@@ -67,10 +67,10 @@ def validate(path, workdir):
 
 
 def store(client_id, src_path):
-    """Doğrulanmış dosyayı kalıcı depoya taşı → depoya GÖRELİ yol.
+    """Move the validated file into permanent storage → path RELATIVE to the store.
 
-    PIL ile yeniden kaydedilir: metadata (EXIF/yorum/tEXt) taşınmaz. Maliyeti düşük,
-    garantisi net — üretim aracının gömdüğü hiçbir alan diske geçmez."""
+    Re-saved with PIL: metadata (EXIF/comment/tEXt) is not carried over. Cost is low,
+    the guarantee is clear — nothing the generation tool embedded reaches disk."""
     d = os.path.join(root_dir(create=True), str(client_id))
     os.makedirs(d, exist_ok=True)
     name = uuid.uuid4().hex + '.png'
@@ -78,29 +78,29 @@ def store(client_id, src_path):
     tmp = os.path.join(d, '.tmp-' + name)
     with Image.open(src_path) as img:
         img.load()
-        # Yeni bir tuvale kopyalamak `info` sözlüğünü (EXIF/tEXt/yorum) arkada bırakır;
-        # `img.copy()` onları taşırdı. `getdata` KULLANILMAZ — Pillow 14'te kalkıyor.
+        # Copying onto a fresh canvas leaves the `info` dict (EXIF/tEXt/comment) behind;
+        # `img.copy()` would have carried them over. `getdata` is NOT used — removed in Pillow 14.
         temiz = Image.new(img.mode, img.size)
         temiz.paste(img)
         temiz.save(tmp, format='PNG')
-    # Önce geçici ada yaz, sonra rename: yarım dosya asla kalıcı adı almasın.
+    # Write to a temp name first, then rename: a half-written file must never get the final name.
     os.replace(tmp, final)
-    # GRUP YAZILABİLİR: dosyayı worker (proje sahibi) yazar, Flask (svc-agency) okur/siler;
-    # ikisi de `appdev` grubunda ama varsayılan umask (022) grubu salt-okur bırakır.
+    # GROUP WRITABLE: the worker (project owner) writes the file, Flask (svc-agency) reads/deletes it;
+    # both are in the `appdev` group but the default umask (022) leaves the group read-only.
     try:
         os.chmod(final, 0o664)
         os.chmod(d, 0o775)
     except OSError:
-        pass                        # izin ayarı en-iyi-çaba; dosya yine geçerli
-    os.remove(src_path)             # efemer kopya bırakma
+        pass                        # permission tweak is best-effort; the file is still valid
+    os.remove(src_path)             # don't leave the ephemeral copy behind
     return f'{client_id}/{name}'
 
 
 def abs_path(rel):
-    """Göreli yolu servis edilecek mutlak yola çevir; geçersiz/yoksa None.
+    """Convert the relative path into an absolute path to serve; None if invalid/missing.
 
-    `rel` DB'den gelir, ama yine de doğrulanır: bozuk ya da elle düzenlenmiş bir
-    satır dosya sistemi gezintisine dönüşmemeli."""
+    `rel` comes from the DB, but is still validated: a corrupted or hand-edited
+    row must not turn into filesystem traversal."""
     if not isinstance(rel, str) or '..' in rel or rel.startswith('/'):
         return None
     parts = rel.split('/')

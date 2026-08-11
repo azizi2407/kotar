@@ -1,11 +1,11 @@
-// Planlama Panosu kaydetme kuyruğu — SAF fonksiyonlar (React/DOM yok).
+// Planning Board save queue — PURE functions (no React/DOM).
 //
-// Neden ayrı dosya: bu mantık `usePlanningStore`'un içinde yaşarken test
-// edilemiyordu ve buradaki bir hata SESSİZ: zombi kart (silinen öğe geri doğar),
-// yutulan silme, yanlış geri alma. Kullanıcı hatayı ancak işini kaybettikten
-// sonra fark eder. Saf hale getirildi ki `planlama-queue.test.ts` kilitleyebilsin.
+// Why a separate file: this logic used to live inside `usePlanningStore` and
+// couldn't be tested, and a bug here is SILENT: a zombie card (a deleted item
+// comes back to life), a swallowed delete, a wrong undo. The user only notices
+// the bug after already losing their work. Made pure so `planlama-queue.test.ts` can pin it down.
 //
-// Sözleşme: bir anahtar ASLA aynı anda hem `upsert`te hem `delete`te olamaz.
+// Contract: a key can NEVER be in both `upsert` and `delete` at the same time.
 import type { PlanningItem } from "@/lib/planlama"
 
 export type ItemPatch = Partial<PlanningItem> & { item_key: string }
@@ -19,9 +19,9 @@ export function emptyDelta(): Delta {
   return { upsert: [], delete: [] }
 }
 
-/** Silme niyetini kuyruğa al: aynı anahtarın bekleyen upsert'ü DÜŞER.
- *  (Silinecek öğeye ait konum yaması göndermenin anlamı yok ve sunucu sırasına
- *  göre öğeyi diriltebilir.) */
+/** Queue a delete intent: the pending upsert for the same key gets DROPPED.
+ *  (There's no point sending a position patch for an item that's about to be
+ *  deleted, and depending on server ordering it could revive the item.) */
 export function mergeDelete(queue: Delta, keys: string[]): Delta {
   if (!keys.length) return queue
   const gelen = new Set(keys)
@@ -30,8 +30,9 @@ export function mergeDelete(queue: Delta, keys: string[]): Delta {
   return { upsert: queue.upsert.filter((u) => !gelen.has(u.item_key)), delete: del }
 }
 
-/** Upsert niyetini kuyruğa al: aynı anahtara ikinci yama BİRLEŞİR (üzerine yazmaz,
- *  alan alan merge) — ayrı satır eklemek son yazanın öncekini kaybetmesine yol açar. */
+/** Queue an upsert intent: a second patch to the same key gets MERGED (not
+ *  overwritten, merged field by field) — adding a separate row would let the
+ *  last write lose the previous one's data. */
 export function mergeUpsert(queue: Delta, patches: ItemPatch[]): Delta {
   if (!patches.length) return queue
   const upsert = [...queue.upsert]
@@ -43,12 +44,13 @@ export function mergeUpsert(queue: Delta, patches: ItemPatch[]): Delta {
   return { upsert, delete: queue.delete }
 }
 
-/** Başarısız batch'i kuyruğun BAŞINA geri koy.
+/** Put a failed batch back at the FRONT of the queue.
  *
- *  Başarısız batch daha ESKİ niyettir: aynı anahtara bu arada yeni bir niyet
- *  geldiyse YENİ olan kazanır, eski satır düşer. Ham `concat` bu kuralı atlıyordu
- *  ve uçuşta silinen bir öğenin eski upsert'i geri gelip aynı PATCH'te ikisi
- *  birden gidiyordu → sunucu sırasına göre öğe DİRİLİYOR ya da silme yutuluyor. */
+ *  A failed batch is an OLDER intent: if a new intent for the same key arrived
+ *  in the meantime, the NEW one wins and the old row is dropped. A raw
+ *  `concat` skipped this rule, and an item's old upsert — deleted in flight —
+ *  would come back and both would go out in the same PATCH → depending on
+ *  server ordering the item gets REVIVED or the delete gets swallowed. */
 export function requeueFailed(failed: Delta, current: Delta): Delta {
   const yeni = new Set<string>([
     ...current.upsert.map((u) => u.item_key),
@@ -56,17 +58,18 @@ export function requeueFailed(failed: Delta, current: Delta): Delta {
   ])
   const upsert = [...failed.upsert.filter((u) => !yeni.has(u.item_key)), ...current.upsert]
   const del = [...failed.delete.filter((k) => !yeni.has(k)), ...current.delete]
-  // Savunma amaçlı son süzgeç: buraya çakışma düşmemeli, düşerse SİLME kazanır
-  // (veri diriltmek, fazladan silmekten daha kötü bir hata sınıfı).
+  // Final defensive filter: no conflict should reach here, but if one does,
+  // DELETE wins (reviving data is a worse class of bug than over-deleting).
   const delSet = new Set(del)
   return { upsert: upsert.filter((u) => !delSet.has(u.item_key)), delete: del }
 }
 
-/** Bir yamanın tersi — geri alma kaydı için.
+/** The inverse of a patch — for the undo record.
  *
- *  YALNIZ yamada geçen alanlar ters çevrilir. Eskiden `{...before}` gönderiliyordu;
- *  bu `rev`/`updated_at`/`assignee_name` gibi SUNUCU TÜREVİ alanları da geri yazıyor
- *  ve sunucunun rev tabanlı çakışma tespitini yanlış tetikliyordu. */
+ *  ONLY the fields present in the patch are reversed. It used to send
+ *  `{...before}`, which also wrote back SERVER-DERIVED fields like
+ *  `rev`/`updated_at`/`assignee_name` and incorrectly triggered the server's
+ *  revision-based conflict detection. */
 export function inverseOf(before: PlanningItem, patch: ItemPatch): ItemPatch {
   const ters: ItemPatch = { item_key: patch.item_key }
   for (const k of Object.keys(patch) as (keyof PlanningItem)[]) {

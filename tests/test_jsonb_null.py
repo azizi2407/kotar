@@ -1,7 +1,7 @@
-"""JSONB kolonlar: Python None → SQL NULL olmalı (JSON 'null' skaleri değil).
+"""JSONB columns: Python None must become SQL NULL (not a JSON 'null' scalar).
 
-none_as_null olmadan SQLAlchemy None'ı JSON null olarak yazar; bu da
-`IS NULL` sorgularının kaçırmasına yol açar (kozmetik ama tutarsız).
+Without none_as_null, SQLAlchemy writes None as JSON null; this causes
+`IS NULL` queries to miss it (cosmetic but inconsistent).
 """
 from conftest import MANAGER, login_as
 from test_session_csrf import csrf_headers
@@ -23,7 +23,7 @@ def test_jsonb_none_sql_null_olur(client):
 
     from extensions import db
     from models_sharing import Share
-    # önce gerçek değer ata (SQL NULL değil), sonra None'a çevir → UPDATE tetiklenir
+    # first assign a real value (not SQL NULL), then set to None → triggers UPDATE
     sh = db.session.get(Share, sid)
     sh.client_review = {"status": "approved"}
     sh.platforms = {"instagram": {"url": "x"}}
@@ -32,7 +32,7 @@ def test_jsonb_none_sql_null_olur(client):
     sh.platforms = None
     db.session.commit()
 
-    # SQL NULL olmalı → is_(None) eşleşir (JSON null olsaydı eşleşmezdi)
+    # must be SQL NULL → is_(None) matches (wouldn't match if it were JSON null)
     hit = db.session.query(Share).filter(
         Share.id == sid, Share.client_review.is_(None)).count()
     assert hit == 1

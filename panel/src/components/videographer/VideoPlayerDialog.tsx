@@ -1,20 +1,21 @@
-// Video oynatıcı (2026-07-30) — videograf yüklediği videoyu panelde izler.
+// Video player (2026-07-30) — lets the videographer watch their uploaded video in the panel.
 //
-// İKİ KAYNAK, tek arayüz:
-//   * `local` → sunucudaki 21 günlük orijinal, `<video controls>` ile (Range
-//     destekli uç sayesinde ileri sarma çalışır).
-//   * `local` DEĞİL → Drive'ın gömülü oynatıcısı (iframe). Lokal kopyanın süresi
-//     dolduğunda videoyu sunucudan proxy'lemek bant genişliği + Drive API kotası
-//     harcardı; Drive kendi oynatıcısını bedavaya veriyor ve videoya "bağlantıya
-//     sahip herkes" izni yükleme anında zaten verilmiş oluyor.
+// TWO SOURCES, one interface:
+//   * `local` → the server's 21-day original, played via `<video controls>` (seeking
+//     works thanks to the Range-capable endpoint).
+//   * NOT `local` → Drive's embedded player (iframe). Once the local copy's 21 days
+//     expire, proxying the video through the server would cost bandwidth + Drive API
+//     quota; Drive gives its own player for free, and "anyone with the link" permission
+//     on the video is already granted at upload time.
 //
-// Listedeki videolar arasında ←/→ ile geçilir, Esc kapatır.
+// Navigate between videos in the list with ←/→, Esc closes.
 import { useCallback, useEffect } from "react"
 import {
   ChevronLeft, ChevronRight, Copy, Download, ExternalLink, Link2, X,
 } from "lucide-react"
 import { toast } from "sonner"
 
+import { useI18n } from "@/lib/i18n"
 import {
   downloadMediaUrl, driveFileUrl, drivePreviewUrl, mediaUrl, publicMediaUrl,
   type VideoUpload,
@@ -33,6 +34,7 @@ export function VideoPlayerDialog({ videos, index, onIndex, onClose }: {
   onIndex: (i: number) => void
   onClose: () => void
 }) {
+  const { t } = useI18n()
   const v = videos[index]
   const go = useCallback((delta: number) => {
     const next = index + delta
@@ -55,66 +57,69 @@ export function VideoPlayerDialog({ videos, index, onIndex, onClose }: {
   async function copyLink() {
     try {
       await navigator.clipboard.writeText(driveFileUrl(fid))
-      toast.success("Drive bağlantısı kopyalandı")
+      toast.success(t("components.videographer.videoPlayerDialog.driveLinkCopied"))
     } catch {
-      toast.error("Kopyalanamadı — tarayıcı izin vermedi")
+      toast.error(t("components.videographer.videoPlayerDialog.copyFailedPermission"))
     }
   }
 
-  // Doğrudan bağlantı — oynatıcı + "İndir" düğmeli kalıcı sayfa (public_media.py);
-  // oturum gerektirmez, süresi dolunca Drive gömülü oynatıcısına düşer.
+  // Direct link — a persistent page with a player + "Download" button (public_media.py);
+  // doesn't require a session, falls back to Drive's embedded player once it expires.
   async function copyDirect() {
     try {
       await navigator.clipboard.writeText(publicMediaUrl(fid))
-      toast.success("Doğrudan bağlantı kopyalandı")
+      toast.success(t("components.videographer.videoPlayerDialog.directLinkCopied"))
     } catch {
-      toast.error("Kopyalanamadı — tarayıcı izin vermedi")
+      toast.error(t("components.videographer.videoPlayerDialog.copyFailedPermission"))
     }
   }
 
   return (
-    // Dialog bileşeni yerine düz overlay: base-ui Dialog içinde `<video>`
-    // odak tuzağı yüzünden klavye kontrollerini (boşluk/oklar) yutuyor.
+    // Plain overlay instead of the Dialog component: inside base-ui Dialog, `<video>`'s
+    // focus trap was swallowing keyboard controls (space/arrows).
     <div className="fixed inset-0 z-50 flex flex-col bg-black/90 p-3 sm:p-6"
       onClick={onClose}>
-      {/* min-h-0: flex item'ın varsayılan `min-height:auto`'su içeriğin doğal
-          boyutunu taban yapar → uzun (dikey) video kutuyu viewport'un dışına
-          taşırıyordu. Zincirdeki HER flex kutusuna gerekli. */}
+      {/* min-h-0: a flex item's default `min-height:auto` uses the content's natural
+          size as a floor → a tall (portrait) video was pushing the box outside the
+          viewport. Needed on EVERY flex box in the chain. */}
       <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col gap-2"
         onClick={(e) => e.stopPropagation()}>
         <div className="flex shrink-0 items-center gap-2 text-white">
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-medium">{v.file_name || "video"}</div>
+            <div className="truncate text-sm font-medium">
+              {v.file_name || t("components.videographer.videoPlayerDialog.videoFallback")}
+            </div>
             <div className="text-xs text-white/60">
               {fmtWhen(v.uploaded_at)}
               {videos.length > 1 && ` · ${index + 1}/${videos.length}`}
-              {v.shared && " · paylaşıldı"}
-              {!v.local && " · Drive üzerinden"}
+              {v.shared && ` · ${t("components.videographer.videoPlayerDialog.sharedSuffix")}`}
+              {!v.local && ` · ${t("components.videographer.videoPlayerDialog.viaDriveSuffix")}`}
             </div>
           </div>
-          {/* `variant="outline"` koyu overlay üzerinde beyaz zemin + beyaz metin
-              veriyordu (okunmuyordu) → koyu zemine uygun elle stil. */}
-          {/* İndirme oturumlu uçtan: `v.local` false olsa (21 gün doldu) bile
-              backend orijinali Drive'dan çekip verir — düğme hep çalışır. */}
+          {/* `variant="outline"` produced white background + white text on the dark
+              overlay (unreadable) → manually styled to fit the dark background. */}
+          {/* Download goes through a session-backed endpoint: even if `v.local` is
+              false (21 days elapsed), the backend fetches the original from Drive
+              and serves it — the button always works. */}
           <a href={downloadMediaUrl(fid, v.file_name ?? undefined)} download
-            title="Videoyu bilgisayara indir (tam boyut)"
+            title={t("components.videographer.videoPlayerDialog.downloadTitle")}
             className="inline-flex shrink-0 items-center gap-1 rounded-md border border-white/30 bg-white/10 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-white/20">
-            <Download className="h-3.5 w-3.5" /> İndir
+            <Download className="h-3.5 w-3.5" /> {t("components.videographer.videoPlayerDialog.downloadBtn")}
           </a>
           <button type="button" onClick={copyDirect}
-            title="Kalıcı izleme/indirme sayfasının bağlantısı (oturum gerekmez; süresi dolarsa Drive'a düşer)"
+            title={t("components.videographer.videoPlayerDialog.directLinkTitle")}
             className="inline-flex shrink-0 items-center gap-1 rounded-md border border-white/30 bg-white/10 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-white/20">
-            <Link2 className="h-3.5 w-3.5" /> Doğrudan
+            <Link2 className="h-3.5 w-3.5" /> {t("components.videographer.videoPlayerDialog.directBtn")}
           </button>
-          <button type="button" onClick={copyLink} title="Drive dosya sayfasının bağlantısı"
+          <button type="button" onClick={copyLink} title={t("components.videographer.videoPlayerDialog.driveLinkTitle")}
             className="inline-flex shrink-0 items-center gap-1 rounded-md border border-white/30 bg-white/10 px-2.5 py-1.5 text-xs font-medium text-white hover:bg-white/20">
             <Copy className="h-3.5 w-3.5" /> Drive
           </button>
-          <a href={driveFileUrl(fid)} target="_blank" rel="noreferrer" title="Drive'da aç"
+          <a href={driveFileUrl(fid)} target="_blank" rel="noreferrer" title={t("components.videographer.videoPlayerDialog.openInDriveTitle")}
             className="rounded p-2 text-white/70 hover:bg-white/10 hover:text-white">
             <ExternalLink className="h-4 w-4" />
           </a>
-          <button type="button" onClick={onClose} title="Kapat (Esc)"
+          <button type="button" onClick={onClose} title={t("components.videographer.videoPlayerDialog.closeTitle")}
             className="rounded p-2 text-white/70 hover:bg-white/10 hover:text-white">
             <X className="h-5 w-5" />
           </button>
@@ -122,8 +127,8 @@ export function VideoPlayerDialog({ videos, index, onIndex, onClose }: {
 
         <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg bg-black">
           {v.local ? (
-            // `key`: kaynak değişince tarayıcı aynı <video>'yu yeniden kullanıp
-            // eski videoyu oynatmaya devam ediyordu.
+            // `key`: when the source changed, the browser was reusing the same <video>
+            // and kept playing the old video.
             <video key={fid} src={mediaUrl(fid)} controls autoPlay playsInline
               className="max-h-full max-w-full object-contain" />
           ) : (
@@ -134,12 +139,12 @@ export function VideoPlayerDialog({ videos, index, onIndex, onClose }: {
           {videos.length > 1 && (
             <>
               <button type="button" onClick={() => go(-1)} disabled={index === 0}
-                title="Önceki (←)"
+                title={t("components.videographer.videoPlayerDialog.prevTitle")}
                 className="absolute left-1 rounded-full bg-black/50 p-2 text-white disabled:opacity-25">
                 <ChevronLeft className="h-6 w-6" />
               </button>
               <button type="button" onClick={() => go(1)} disabled={index === videos.length - 1}
-                title="Sonraki (→)"
+                title={t("components.videographer.videoPlayerDialog.nextTitle")}
                 className="absolute right-1 rounded-full bg-black/50 p-2 text-white disabled:opacity-25">
                 <ChevronRight className="h-6 w-6" />
               </button>

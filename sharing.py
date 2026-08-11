@@ -1,8 +1,9 @@
-"""Sharing Board API (/api/sharing) — Faz 2a çekirdeği.
+"""Sharing Board API (/api/sharing) — Phase 2a core.
 
-Yönetim board'ı: haftalık kart matrisi (müşteri satırı + paylaşım kartları + özel
-gün kartları + öncelik). shares yetkili model. Yazma yalnız management; CSRF api
-blueprint'iyle paylaşılır. Drive thumbnail/sayımları Faz 2b'de bağlanır.
+Management board: weekly card matrix (client row + sharing cards + special
+day cards + priority). shares is the authoritative model. Writes are
+management-only; CSRF is shared with the api blueprint. Drive thumbnails/
+counts are wired up in Phase 2b.
 """
 import io
 import logging
@@ -39,13 +40,13 @@ from models_sharing import (CardUpload, ClientApprovalLink, ClientPriority,
 from sso_client import current_user, is_superadmin
 
 bp = Blueprint('sharing', __name__)
-bp.before_request(csrf_protect)  # api ile aynı CSRF (session token)
+bp.before_request(csrf_protect)  # same CSRF as api (session token)
 
 log = logging.getLogger(__name__)
 
-# Drive dosya-sayımı in-memory cache. TTL 60s.
-_count_cache = {}       # (client_id, week_iso) -> (count, ts)  [tekil uç]
-_counts_cache = {}      # week_iso -> ({client_id: count}, ts)  [batch uç]
+# Drive file-count in-memory cache. TTL 60s.
+_count_cache = {}       # (client_id, week_iso) -> (count, ts)  [single endpoint]
+_counts_cache = {}      # week_iso -> ({client_id: count}, ts)  [batch endpoint]
 _COUNT_TTL = 60
 
 
@@ -55,49 +56,51 @@ def _week_number(week_iso):
     except (IndexError, ValueError, AttributeError):
         return None
 
-# TR gün adları (published_day_name için) — pazartesi=0
+# TR day names (for published_day_name) — Monday=0
 TR_DAYS = ['PAZARTESİ', 'SALI', 'ÇARŞAMBA', 'PERŞEMBE', 'CUMA', 'CUMARTESİ', 'PAZAR']
 
 
 def _require_management():
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='not signed in'), 401)
     if u.get('role') != 'management':
-        return None, (jsonify(error='bu işlem için yetkiniz yok'), 403)
+        return None, (jsonify(error='not authorized for this action'), 403)
     return u, None
 
 
 def _require_designer_or_management():
-    """`_require_management`'ın gevşek ikizi: tasarımcı da geçer.
+    """The relaxed twin of `_require_management`: designer also passes.
 
-    Tasarımcı board'da zaten TÜM müşterilerin kartlarını görüyor ve tam aksiyona
-    sahip; müşteri medya sayfası da aynı yüzeyin devamı."""
+    The designer already sees ALL clients' cards on the board and has full
+    action rights there; the client media page is a continuation of the same
+    surface."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='not signed in'), 401)
     if u.get('role') not in ('management', 'designer'):
-        return None, (jsonify(error='bu işlem için yetkiniz yok'), 403)
+        return None, (jsonify(error='not authorized for this action'), 403)
     return u, None
 
 
 def _get_share_or_404(share_id):
     s = db.session.get(Share, share_id)
     if s is None or s.deleted_at is not None:
-        return None, (jsonify(error='paylaşım bulunamadı'), 404)
+        return None, (jsonify(error='share not found'), 404)
     return s, None
 
 
 def _client_or_404(client_id):
     c = db.session.get(Client, client_id)
     if c is None:
-        return None, (jsonify(error='müşteri bulunamadı'), 404)
+        return None, (jsonify(error='client not found'), 404)
     return c, None
 
 
 def _hidden_client_ids(sub, scope):
-    """Kullanıcının bu sayfada gizlediği müşteri id'leri (2026-07-25) — TEK sorgu.
-    Tercih KİŞİSEL: `owner_sub` her zaman etkin kimlik, başkasının tercihi okunamaz."""
+    """Client ids the user has hidden on this page (2026-07-25) — SINGLE query.
+    Preference is PERSONAL: `owner_sub` is always the active identity, another
+    user's preference can never be read."""
     from models import UserHiddenClient
     return {cid for (cid,) in db.session.query(UserHiddenClient.client_id).filter_by(
         owner_sub=str(sub), scope=scope).all()}
@@ -117,32 +120,36 @@ def _is_assigned(sub, client_id, *slots):
         ClientTeamAssignment.role_slot.in_(slots)).first() is not None
 
 
-# Yönetici board'unda "Müşterilerim / Diğer Müşteriler" ayrımı: müşteriler tek bir
-# yönetici (OWNER_EMAIL) tarafından checkbox ile işaretlenir. İşaretli müşteriler
-# 'manager' slotunda tutulur; işaretleme yalnız OWNER_EMAIL'e açık olduğundan slot
-# doluluğu = "sahibin müşterisi" demektir (user_id'ye bakmaya gerek yok). Sahip için
-# işaretlediği müşteriler "Müşterilerim"; diğer yöneticiler için tam tersi (kompleman).
+# The "My Clients / Other Clients" split on the management board: clients are
+# checked off by a single manager (OWNER_EMAIL). Checked clients are kept in
+# the 'manager' slot; since checking is only open to OWNER_EMAIL, slot
+# occupancy means "owner's client" (no need to look at user_id). For the
+# owner, the clients they've checked are "My Clients"; for other managers
+# it's the opposite (the complement).
 OWNER_EMAIL = os.getenv('AGENCY_OWNER_EMAIL', '')
 MANAGER_SLOT = 'manager'
 
 
 def _manager_owned_ids():
-    """'manager' slotu dolu (sahip tarafından işaretlenmiş) müşteri id kümesi."""
+    """Set of client ids with the 'manager' slot filled (checked by the owner)."""
     from models import ClientTeamAssignment
     return {a.client_id for a in ClientTeamAssignment.query.filter_by(
         role_slot=MANAGER_SLOT).all()}
 
 
-# Yükleme üst sınırı: 500 MB/dosya. app MAX_CONTENT_LENGTH taşımada 512 MB pay bırakır;
-# burada ürün limiti (500 MB) anlamlı 413 ile zorlanır (foto + video + içerik hepsi).
+# Upload ceiling: 500 MB/file. The app's MAX_CONTENT_LENGTH leaves 512 MB of
+# headroom for overflow; here the product limit (500 MB) is enforced with a
+# meaningful 413 (covers photo + video + content uploads alike).
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 
 
 def _can_upload(user, client_id, category):
-    """management her yere; designer HER müşteriye HER kategoriye (2026-08-05: video
-    kısıtı kalktı — tasarımcı da kurgu/animasyon videosu yüklüyor, dosya videografın
-    yüklediğiyle aynı yoldan geçiyor); videographer HER müşteriye yalnız video
-    (2026-07-21: designer paritesi — atama şartı kaldırıldı, tam aksiyon kararı)."""
+    """management can upload anywhere; designer to EVERY client and EVERY category
+    (2026-08-05: the video restriction was lifted — designers also upload
+    editing/animation videos, the file goes through the same path as what the
+    videographer uploads); videographer to EVERY client but only video
+    (2026-07-21: parity with designer — the assignment requirement was dropped,
+    a full-action decision)."""
     role = user.get('role')
     if role == 'management':
         return True
@@ -154,12 +161,13 @@ def _can_upload(user, client_id, category):
 
 
 def _visible_shares(shares):
-    """Video'da yalnız en yüksek revizyondaki taslaklar görünür (eski görünürlük kuralı).
+    """For video, only drafts at the highest revision are visible (legacy visibility rule).
 
-    Yayınlanmış videolar her zaman korunur. Taslaklarda kural revizyon-eşiğidir,
-    "tek kazanan" DEĞİL: revizyonu haftanın en yükseğine EŞİT olan tüm taslaklar
-    kalır — o hafta 3 ayrı video varsa (hepsi revision=0) üçü de görünür; yalnız
-    eski revizyonda kalmış taslaklar gizlenir.
+    Published videos are always kept. For drafts the rule is a revision
+    threshold, NOT a "single winner": all drafts whose revision EQUALS the
+    week's highest one are kept — if there are 3 separate videos that week
+    (all revision=0), all three are visible; only drafts stuck at an older
+    revision are hidden.
     """
     videos = [s for s in shares if s.kind == 'video']
     others = [s for s in shares if s.kind != 'video']
@@ -180,20 +188,22 @@ SCALAR = ('file_id', 'file_name', 'original_name', 'caption_text', 'hashtag_text
 
 
 
-# Onay sayfasında gösterilen yükleme kategorileri (proje sahibi 2026-07-24): story/linkedin gizli.
+# Upload categories shown on the approval page (project owner, 2026-07-24): story/linkedin are hidden.
 REVIEW_CATEGORIES = ('post', 'video')
 
 
 def review_visible_uploads(client_id, week_iso, include_excluded=False):
-    """Onay linkinin gösterdiği YÜKLEMELER — TEK KAYNAK.
+    """The UPLOADS shown by the approval link — SINGLE SOURCE OF TRUTH.
 
-    Kaynak `card_uploads`: tasarımcının o hafta yüklediği post/video dosyaları
-    (sharing board'da "paylaşıldı" işaretlenenler DEĞİL — proje sahibi 2026-07-24).
-    Silinenler ve personelin sayfadan kaldırdıkları (`ReviewExcludedUpload`) hariç.
+    Source is `card_uploads`: post/video files the designer uploaded that week
+    (NOT the ones marked "shared" on the sharing board — project owner,
+    2026-07-24). Excludes deleted ones and those staff removed from the page
+    (`ReviewExcludedUpload`).
 
-    Hem public onay sayfası (`review._review_uploads`) hem de link üretimindeki
-    `share_count` buradan okur → tasarımcının kopyaladığı mesajın tekil/çoğul
-    kararı sayfada görünen içerik sayısıyla her zaman tutarlı olur.
+    Both the public approval page (`review._review_uploads`) and the
+    `share_count` in link generation read from here → the singular/plural
+    decision in the message the designer copies always stays consistent with
+    the content count shown on the page.
     """
     rows = (CardUpload.query
             .filter(CardUpload.client_id == client_id,
@@ -212,7 +222,7 @@ def review_visible_uploads(client_id, week_iso, include_excluded=False):
 
 
 def pre_approval_map(upload_ids):
-    """Yukleme id -> UploadPreApproval (yalniz karar verilmis olanlar)."""
+    """Upload id -> UploadPreApproval (only those a decision has been made on)."""
     if not upload_ids:
         return {}
     return {p.upload_id: p for p in UploadPreApproval.query
@@ -220,9 +230,10 @@ def pre_approval_map(upload_ids):
 
 
 def _apply_pre_approval_gate(rows):
-    """KADEMELI KAPI (proje sahibi 2026-07-24): bu (musteri, hafta) icin EN AZ BIR on-onay
-    karari verilmisse musteri yalniz `approved` olanlari gorur. Hic karar yoksa kapi
-    devrede DEGILDIR - on-onay akisini kullanmayan haftalar eskisi gibi calisir."""
+    """GRADUAL GATE (project owner, 2026-07-24): if AT LEAST ONE pre-approval
+    decision has been made for this (client, week), the client only sees the
+    `approved` ones. If no decision exists at all, the gate is NOT active —
+    weeks that don't use the pre-approval flow work as before."""
     decided = pre_approval_map([r.id for r in rows])
     if not decided:
         return rows
@@ -247,7 +258,7 @@ _TR_AY = ['', 'Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran',
 
 
 def _special_date_label(ev):
-    """Özel günün TR tarih etiketi: tekil '23 Temmuz' / aralık '21–25 Temmuz'."""
+    """TR date label for a special day: single '23 Temmuz' / range '21–25 Temmuz'."""
     m = _TR_AY[ev.month] if ev.month and 1 <= ev.month <= 12 else ''
     if ev.date_num:
         return f"{ev.date_num} {m}".strip()
@@ -257,7 +268,7 @@ def _special_date_label(ev):
 
 
 def _event_in_week(ev, week_dates):
-    """Etkinlik haftanın herhangi bir gününe düşüyor mu (tekil gün VEYA aralık)?"""
+    """Does the event fall on any day of the week (single day OR range)?"""
     for d in week_dates:
         if d.year != ev.year or d.month != ev.month:
             continue
@@ -269,10 +280,11 @@ def _event_in_week(ev, week_dates):
 
 
 def _week_special_days(ids, week_dates):
-    """Müşterilerin bu haftaya düşen SEÇİLİ özel günleri: {client_id: [kart,...]}.
+    """Clients' SELECTED special days that fall in this week: {client_id: [card,...]}.
 
-    Yalnız müşterinin kendi seçtiği (SpecialDaySelection) + aktif + approved event'ler;
-    tarihi haftaya düşenler. Board kart-şeridinde bilgilendirme kartı olarak gösterilir."""
+    Only events the client themselves selected (SpecialDaySelection) that are
+    also active + approved, and whose date falls in the week. Shown as an
+    informational card in the board's card strip."""
     if not ids or not week_dates:
         return {}
     months = {d.month for d in week_dates}
@@ -310,11 +322,12 @@ def _week_special_days(ids, week_dates):
 
 
 def _build_rows(clients, week_iso, assigned_ids=None):
-    """Verilen müşteri listesi için haftalık board satırlarını kur (paylaşımlı).
+    """Build weekly board rows (shared) for the given client list.
 
-    assigned_ids None ise her satır assigned=True (management görünümü); bir küme
-    verilirse (designer görünümü) satır c.id kümede mi ona göre işaretlenir —
-    designer board bunu "Müşterilerim" / "Diğer Müşteriler" ayrımında kullanır."""
+    If assigned_ids is None, every row gets assigned=True (management view);
+    if a set is given (designer view), each row is flagged by whether c.id is
+    in the set — the designer board uses this for the "My Clients" / "Other
+    Clients" split."""
     ids = [c.id for c in clients]
     if not ids:
         return []
@@ -337,8 +350,8 @@ def _build_rows(clients, week_iso, assigned_ids=None):
         .filter(CardUpload.week_iso == week_iso, CardUpload.deleted_at.is_(None),
                 CardUpload.client_id.in_(ids))
         .group_by(CardUpload.client_id).all())
-    # Müşterinin onay sayfasındaki YÜKLEME bazlı kararları (2026-07-24) — board'da
-    # rozet olarak gösterilir. Tek JOIN'li sorgu (müşteri başına ayrı sorgu YOK).
+    # The client's UPLOAD-level decisions on the approval page (2026-07-24) —
+    # shown on the board as a badge. Single JOIN query (NO per-client query).
     review_counts = {}
     for cid_, status_, n in (
             db.session.query(CardUpload.client_id, UploadReview.status,
@@ -352,7 +365,7 @@ def _build_rows(clients, week_iso, assigned_ids=None):
         if status_ in entry:
             entry[status_] = n
 
-    # Ön-onay kararları (yönetim iç kapısı, 2026-07-24) — board rozetleri.
+    # Pre-approval decisions (internal management gate, 2026-07-24) — board badges.
     pre_counts = {}
     for cid_, status_, n in (
             db.session.query(CardUpload.client_id, UploadPreApproval.status,
@@ -366,15 +379,17 @@ def _build_rows(clients, week_iso, assigned_ids=None):
         if status_ in entry:
             entry[status_] = n
 
-    # Bu haftanın video yüklemeleri — yönetim board'unda kart şeridinde (özel gün
-    # kartları gibi) bilgi kartı olarak gösterilir (2026-07-21, videografçı akışı).
+    # This week's video uploads — shown on the management board's card strip
+    # (like special day cards) as an info card (2026-07-21, videographer flow).
     video_uploads = {}
     all_video_fids = []
-    # Silme yetkisi öğeye İŞLENİR (2026-07-31): kural (management ayrımsız /
-    # videographer yalnız kendi yüklediği) tek yerde yaşasın — panelin `uploaded_by`
-    # karşılaştırmasını yeniden kurması, kural değişince sessizce ayrışırdı.
-    # `has_request_context` şart: `_build_rows` istek dışından da çağrılabiliyor
-    # (script/test); `current_user()` orada session'a uzanıp patlar.
+    # Delete permission is BAKED INTO the item (2026-07-31): the rule
+    # (management unrestricted / videographer only their own uploads) should
+    # live in a single place — having the panel rebuild the `uploaded_by`
+    # comparison would silently drift when the rule changes.
+    # `has_request_context` is required: `_build_rows` can also be called
+    # outside a request (script/test); `current_user()` would reach into the
+    # session there and blow up.
     _u = (current_user() or {}) if has_request_context() else {}
     _yonetim = _u.get('role') == 'management'
     for vu in (CardUpload.query.filter(CardUpload.week_iso == week_iso,
@@ -389,28 +404,30 @@ def _build_rows(clients, week_iso, assigned_ids=None):
             'can_delete': _yonetim or (vu.uploaded_by == _u.get('sub'))})
         if vu.file_id:
             all_video_fids.append(vu.file_id)
-    # "Paylaşılmış" = video dosyası bir Share satırında geçiyor (2026-07-25). Videograf
-    # sayfası PAYLAŞILMAMIŞ olanları "bekleyen kuyruk" olarak listeler. TEK TOPLU SORGU —
-    # döngü içinde sorgu YASAK (bu fonksiyon 31 müşteri için koşuyor).
+    # "Shared" = the video file appears in a Share row (2026-07-25). The
+    # videographer page lists the UNSHARED ones as a "pending queue". A SINGLE
+    # BATCHED QUERY — querying inside the loop is FORBIDDEN (this function runs
+    # for 31 clients).
     shared_video_fids = set()
     if all_video_fids:
         shared_video_fids = {fid for (fid,) in db.session.query(Share.file_id).filter(
             Share.file_id.in_(all_video_fids), Share.deleted_at.is_(None)).all() if fid}
-    # Bayrağı öğelere işle (2026-07-29): videograf sayfası artık haftanın TÜM
-    # videolarını listeliyor ve paylaşılmış olanları rozetle ayırıyor — eskiden
-    # onları hiç göstermiyordu, videograf kendi yüklediği videoyu paylaşıldıktan
-    # sonra izleyemiyordu. Tek geçiş; `video_pending` aynı nesneleri paylaşır.
+    # Bake the flag into the items (2026-07-29): the videographer page now
+    # lists ALL of the week's videos and marks the shared ones with a badge —
+    # it used to not show them at all, so the videographer couldn't watch
+    # their own uploaded video once it was shared. Single pass; `video_pending`
+    # shares the same objects.
     for _lst in video_uploads.values():
         for d in _lst:
             d['shared'] = bool(d['file_id']) and d['file_id'] in shared_video_fids
-    # Videografçı fotoğraf klasörü — designer'a kaynak linki (varsa, hafta bağımsız)
+    # Videographer photo folder — source link for the designer (if any, week-independent)
     photo_folders = {}
     for pcid, fid in (db.session.query(VideographerPhoto.client_id, VideographerPhoto.folder_id)
                       .filter(VideographerPhoto.client_id.in_(ids),
                               VideographerPhoto.deleted_at.is_(None),
                               VideographerPhoto.folder_id.isnot(None)).all()):
         photo_folders.setdefault(pcid, fid)
-    # Bu haftanın Drive klasörü — "Klasörü Aç" linki (Drive çağrısı yok, sadece DB)
+    # This week's Drive folder — "Open Folder" link (no Drive call, DB only)
     week_folders = {}
     wn = _week_number(week_iso)
     if wn:
@@ -420,14 +437,14 @@ def _build_rows(clients, week_iso, assigned_ids=None):
                                   ClientWeekFolder.folder_id.isnot(None)).all()):
             week_folders.setdefault(fcid, fid)
 
-    # Bu haftaya düşen seçili özel günler (müşteri × hafta) — board kart şeridinde gösterilir.
+    # Selected special days falling in this week (client × week) — shown in the board's card strip.
     special_days = _week_special_days(ids, _week_dates(week_iso))
 
     rows = []
     for c in clients:
         vis = sorted(_visible_shares(by_client.get(c.id, [])), key=lambda s: s.id)
         crevs = revs_by_client.get(c.id, [])
-        # `local`: dosyanın 21 günlük sunucu kopyası var mı (frontend kaynak seçimi)
+        # `local`: does the file have a 21-day server copy (frontend source selection)
         share_dicts = []
         for s in vis:
             d = s.to_dict()
@@ -443,24 +460,25 @@ def _build_rows(clients, week_iso, assigned_ids=None):
             'published_count': sum(1 for s in vis if s.status == 'published'),
             'total_count': len(vis),
             'upload_count': upload_counts.get(c.id, 0),
-            # Ön-onay (yönetim iç kapısı) kararları
+            # Pre-approval (internal management gate) decisions
             'pre_approved_count': pre_counts.get(c.id, {}).get('approved', 0),
             'pre_revision_count': pre_counts.get(c.id, {}).get('revision_requested', 0),
-            # Onay sayfasındaki müşteri kararları (yükleme bazında)
+            # Client decisions on the approval page (per upload)
             'upload_approved_count': review_counts.get(c.id, {}).get('approved', 0),
             'upload_revision_count': review_counts.get(c.id, {}).get('revision_requested', 0),
             'open_revision_count': len(crevs),
             'revision_share_ids': [r.share_id for r in crevs if r.share_id],
-            # `video_uploads` haftanın TÜM videoları — yönetim/designer board kart
-            # şeridi buna bakar, semantiği DEĞİŞMEDİ. Videograf sayfası aşağıdaki
-            # türetilmiş alanları kullanır (paylaşılmamış = bekleyen kuyruk).
+            # `video_uploads` is ALL of the week's videos — the management/designer
+            # board card strip looks at this, its semantics are UNCHANGED. The
+            # videographer page uses the derived fields below (unshared =
+            # pending queue).
             'video_uploads': video_uploads.get(c.id, []),
             'video_total_count': len(video_uploads.get(c.id, [])),
-            # GERÇEK bekleyen sayısı (5 ile kırpılmaz — "…7 bekliyor" metni buna bakar)
+            # ACTUAL pending count (not clipped to 5 — the "…7 pending" text reads this)
             'video_pending_count': sum(
                 1 for d in video_uploads.get(c.id, [])
                 if d['file_id'] and d['file_id'] not in shared_video_fids),
-            # Gösterilen: en yeni 5 bekleyen
+            # Shown: the 5 most recent pending
             'video_pending': sorted(
                 (d for d in video_uploads.get(c.id, [])
                  if d['file_id'] and d['file_id'] not in shared_video_fids),
@@ -480,8 +498,9 @@ def cards():
         return err
     week_iso = request.args.get('week_iso', '')
     clients = Client.query.filter_by(status='active').order_by(Client.name).all()
-    # "Müşterilerim / Diğer Müşteriler" ayrımı: sahip (OWNER_EMAIL) işaretlediklerini,
-    # diğer yöneticiler ise sahibin işaretlemediklerini (kompleman) "Müşterilerim"de görür.
+    # The "My Clients / Other Clients" split: the owner (OWNER_EMAIL) sees the
+    # ones they've checked; other managers see the ones the owner hasn't
+    # checked (the complement) as "My Clients".
     owned = _manager_owned_ids()
     if u.get('email') == OWNER_EMAIL:
         assigned_ids = owned
@@ -492,12 +511,12 @@ def cards():
 
 @bp.post('/manager-clients')
 def set_manager_client():
-    """Sahip (OWNER_EMAIL) bir müşteriyi "benim" işaretler/kaldırır (manager slotu)."""
+    """The owner (OWNER_EMAIL) marks/unmarks a client as "mine" (manager slot)."""
     u, err = _require_management()
     if err:
         return err
     if u.get('email') != OWNER_EMAIL:
-        return jsonify(error='bu işlem için yetkiniz yok'), 403
+        return jsonify(error='not authorized for this action'), 403
     from models import ClientTeamAssignment
     data = request.get_json(silent=True) or {}
     c, cerr = _client_or_404(data.get('client_id'))
@@ -519,14 +538,14 @@ def set_manager_client():
 def designer_cards():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     week_iso = request.args.get('week_iso', '')
     clients = Client.query.filter_by(status='active').order_by(Client.name).all()
-    # Designer tüm müşterileri görür; atanmışlar "Müşterilerim", diğerleri
-    # "Diğer Müşteriler" grubuna ayrılsın diye satırlara assigned bayrağı işlenir.
-    # Aksiyon yetkisi grup fark etmeksizin açık (tam aksiyon kararı).
+    # The designer sees all clients; the assigned flag is baked into rows so
+    # assigned ones split into "My Clients" and the rest into "Other Clients".
+    # Action rights are open regardless of group (full-action decision).
     assigned_ids = None
     if u['role'] == 'designer':
         assigned_ids = _assigned_client_ids(u['sub'], 'designer')
@@ -535,20 +554,22 @@ def designer_cards():
 
 @bp.get('/videographer/cards')
 def videographer_cards():
-    """Videografçı video-yükleme board'u (2026-07-21). Designer board deseniyle birebir:
-    TÜM aktif müşteriler döner; atanmışlar (videographer_shoot|edit) `assigned` bayrağıyla
-    işaretlenir ("Müşterilerim"/"Diğer Müşteriler" grubu). Yükleme yetkisi grup fark
-    etmeksizin açık (video kategorisi, tam aksiyon kararı)."""
+    """Videographer video-upload board (2026-07-21). Identical to the designer
+    board's pattern: returns ALL active clients; assigned ones
+    (videographer_shoot|edit) are flagged with `assigned` ("My Clients"/"Other
+    Clients" grouping). Upload rights are open regardless of group (video
+    category, full-action decision)."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'videographer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     week_iso = request.args.get('week_iso', '')
     clients = Client.query.filter_by(status='active').order_by(Client.name).all()
-    # Kişisel gizleme (2026-07-25): süzme _build_rows'tan ÖNCE yapılır — o fonksiyon
-    # müşteri kümesi için birkaç toplu sorgu koşuyor, gizleneni hiç sormamak daha ucuz.
-    # Frontend süzgeci gizlenen müşterinin tüm shares/upload verisini yine taşırdı.
+    # Personal hiding (2026-07-25): filtering happens BEFORE _build_rows — that
+    # function runs several batched queries for the client set, so not
+    # querying hidden ones at all is cheaper. A frontend-side filter would
+    # still transfer all of the hidden client's shares/upload data.
     hidden = _hidden_client_ids(u['sub'], 'videographer_upload')
     visible = [c for c in clients if c.id not in hidden]
     assigned_ids = None
@@ -568,9 +589,9 @@ def share_create():
     data = request.get_json(silent=True) or {}
     kind = data.get('kind')
     if kind not in SHARE_KINDS:
-        return jsonify(error=f'geçersiz kind (post/story/video/linkedin)'), 400
+        return jsonify(error=f'invalid kind (post/story/video/linkedin)'), 400
     if not data.get('week_iso'):
-        return jsonify(error='week_iso zorunlu'), 400
+        return jsonify(error='week_iso is required'), 400
     _, cerr = _client_or_404(data.get('client_id'))
     if cerr:
         return cerr
@@ -630,7 +651,7 @@ def share_publish(share_id):
     if e404:
         return e404
     if not s.file_id and not (s.note or '').strip():
-        return jsonify(error='dosyasız paylaşımda not zorunlu'), 400
+        return jsonify(error='a note is required for a share with no file'), 400
     now = utcnow()
     s.status = 'published'
     s.published_at = now
@@ -666,7 +687,7 @@ def share_platform_mark(share_id):
         return e404
     platform = (request.get_json(silent=True) or {}).get('platform')
     if platform not in ('instagram', 'story', 'linkedin', 'facebook'):
-        return jsonify(error='geçersiz platform'), 400
+        return jsonify(error='invalid platform'), 400
     platforms = dict(s.platforms or {})
     if platform in platforms:
         del platforms[platform]
@@ -678,7 +699,7 @@ def share_platform_mark(share_id):
 
 
 def _shift_week(week_iso, delta):
-    """'2026-W21' → delta hafta kaydırılmış ISO hafta stringi ('2026-W20')."""
+    """'2026-W21' → ISO week string shifted by delta weeks ('2026-W20')."""
     m = re.match(r'(\d{4})-W(\d{2})', week_iso or '')
     if not m:
         return None
@@ -688,7 +709,7 @@ def _shift_week(week_iso, delta):
 
 
 def _extract_folder_id(drive_meta):
-    """clients.drive_meta kök klasör linkinden Drive folder id çıkar."""
+    """Extract the Drive folder id from clients.drive_meta's root folder link."""
     if not isinstance(drive_meta, dict):
         return None
     for k in ('client_folder_link', 'content_root_folder_link', 'video_root'):
@@ -701,7 +722,7 @@ def _extract_folder_id(drive_meta):
 
 
 def _resolve_week_folder(client, week_iso, create=False):
-    """Müşterinin o haftaki Drive klasör id'si; yoksa create=True ile kök altında oluştur."""
+    """The client's Drive folder id for that week; if missing, create it under the root with create=True."""
     wn = _week_number(week_iso)
     if not wn:
         return None
@@ -727,30 +748,31 @@ def _resolve_week_folder(client, week_iso, create=False):
 def upload():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     client_id = request.form.get('client_id', type=int)
     week_iso = request.form.get('week_iso', '')
     category = request.form.get('category') or 'post'
     f = request.files.get('file')
     if not f or not f.filename:
-        return jsonify(error='dosya yok'), 400
+        return jsonify(error='no file'), 400
     c, cerr = _client_or_404(client_id)
     if cerr:
         return cerr
     if not _can_upload(u, client_id, category):
-        return jsonify(error='bu müşteriye yükleme yetkiniz yok'), 403
+        return jsonify(error='not authorized to upload for this client'), 403
     folder_id = _resolve_week_folder(c, week_iso, create=True)
     if not folder_id:
-        return jsonify(error='bu hafta için Drive klasörü yok ve oluşturulamadı'), 400
-    # Boyutu akışı RAM'e almadan ölç (werkzeug büyük parçaları diske spool'lar).
+        return jsonify(error='no Drive folder exists for this week and it could not be created'), 400
+    # Measure the size without pulling the stream into RAM (werkzeug spools large chunks to disk).
     f.stream.seek(0, 2)
     size = f.stream.tell()
     f.stream.seek(0)
     if size > MAX_UPLOAD_BYTES:
-        return jsonify(error='Dosya 500 MB sınırını aşıyor.'), 413
+        return jsonify(error='File exceeds the 500 MB limit.'), 413
     mime = f.mimetype or 'application/octet-stream'
-    # Önce lokal geçici kopya (21 günlük depo adayı); Drive yüklemesi bu dosyadan
-    # akar — RAM chunk boyutuyla sınırlı kalır. Geçici yazılamazsa akıştan devam.
+    # First a local temp copy (candidate for the 21-day store); the Drive
+    # upload streams from this file — stays bounded by the RAM chunk size. If
+    # the temp file can't be written, fall back to streaming.
     tmp = media_store.stage(f.stream)
     try:
         if tmp:
@@ -763,29 +785,32 @@ def upload():
         media_store.discard(tmp)
         log.exception('Drive yükleme başarısız (client=%s week=%s dosya=%s boyut=%s)',
                       client_id, week_iso, f.filename, size)
-        return jsonify(error=f'Drive yükleme başarısız: {e}'), 502
-    # Lokal kopya (21 gün) — board + onay sayfası bu sürede sunucudan servis eder.
-    # Best-effort: kalıcılaştırılamazsa yükleme yine geçerli (Drive kanonik).
+        return jsonify(error=f'Drive upload failed: {e}'), 502
+    # Local copy (21 days) — the board + approval page serve from the server
+    # during this window. Best-effort: if it can't be persisted, the upload is
+    # still valid (Drive is canonical).
     media_store.commit(tmp, meta.get('id'), meta.get('mimeType') or mime, f.filename)
-    # Videoya YÜKLEME ANINDA 'bağlantıya sahip herkes → okuyabilir' izni (2026-07-25):
-    # videografçı sayfasındaki "Kopyala" düğmesi Drive linkini panoya alıyor; izin
-    # olmadan o link ajans dışında izin duvarına toslardı. Yalnız VİDEO — görseller
-    # proxy'den (`/api/sharing/media/<id>`) gidiyor, onları açmaya gerek yok.
-    # Best-effort: başarısız olursa yükleme yine geçerli (vg_photo_upload deseni).
+    # Grant video 'anyone with the link → can view' permission AT UPLOAD TIME
+    # (2026-07-25): the "Copy" button on the videographer page puts the Drive
+    # link on the clipboard; without the permission that link would hit a
+    # permission wall outside the agency. VIDEO ONLY — images go through the
+    # proxy (`/api/sharing/media/<id>`), no need to open those up.
+    # Best-effort: if it fails, the upload is still valid (same pattern as vg_photo_upload).
     if category == 'video':
         try:
             dg.grant_anyone_reader(meta.get('id'))
-        except Exception as e:  # noqa: BLE001 — izin en-iyi-çaba, yükleme kritik
+        except Exception as e:  # noqa: BLE001 — permission is best-effort, upload is critical
             log.warning('video izni verilemedi (%s): %s', meta.get('id'), e)
-        # Tarayıcı uyumlu türev (2026-08-01) — telefon videoları 4K/HEVC geliyor ve
-        # Android Chrome onları açamıyor; `/m/<file_id>` sayfası türevi oynatır,
-        # "İndir" orijinali verir. Transkod ~1 dk CPU → isteğin içinde DEĞİL,
-        # media_worker'da. `dedup_key` aynı dosya için ikinci işi engeller
-        # (yükleme yeniden denenirse iki kez transkod etmeyelim).
+        # Browser-compatible derivative (2026-08-01) — phone videos come in as
+        # 4K/HEVC and Android Chrome can't open them; the `/m/<file_id>` page
+        # plays the derivative, "Download" serves the original. Transcoding
+        # takes ~1 min of CPU → NOT inside the request, done in media_worker.
+        # `dedup_key` prevents a second job for the same file (don't transcode
+        # twice if the upload is retried).
         try:
             jobqueue.enqueue('web_variant', {'file_id': meta.get('id')},
                              dedup_key=meta.get('id'))
-        except Exception as e:  # noqa: BLE001 — kuyruk en-iyi-çaba
+        except Exception as e:  # noqa: BLE001 — queueing is best-effort
             log.warning('web türevi kuyruğa alınamadı (%s): %s', meta.get('id'), e)
     cu = CardUpload(
         client_id=client_id, week_iso=week_iso, category=category,
@@ -795,38 +820,40 @@ def upload():
         uploaded_by=u['sub'], uploaded_at=utcnow(),
         upload_uuid=request.form.get('upload_uuid') or uuid.uuid4().hex)
     db.session.add(cu)
-    _auto_resolve(client_id, week_iso, category)  # açık revizyonu kapat
+    _auto_resolve(client_id, week_iso, category)  # close the open revision
     db.session.commit()
     payload = cu.to_dict()
-    # Revize tespiti (2026-08-01): ad kalıbı eski bir sürümü işaret ediyorsa o
-    # sürüm silinir. Yüklemeden SONRA ve ayrı try içinde: buradaki bir hata
-    # (kural/Drive/bildirim) yüklemeyi geçersiz kılmamalı — dosya Drive'da ve
-    # DB'de zaten duruyor.
+    # Revision detection (2026-08-01): if the name pattern points to an older
+    # version, that version is deleted. AFTER the upload and in a separate
+    # try: an error here (rule/Drive/notification) must not invalidate the
+    # upload — the file is already on Drive and in the DB.
     if category == 'video':
         try:
             _supersede_previous_videos(cu)
-        except Exception:  # noqa: BLE001 — silme en-iyi-çaba, yükleme kritik
+        except Exception:  # noqa: BLE001 — deletion is best-effort, upload is critical
             log.exception('revize taraması başarısız (upload=%s)', cu.id)
-    # Yönetim yüklemeyi görmeli: onay/paylaşım akışını o başlatıyor (2026-08-05).
-    # Video ve içerik AYRI tür — yönetim ikisini farklı akıtıyor (video kartı vs
-    # paylaşım kartı). Parti yüklemesi 30 dk coalesce'a takılır (notifications).
+    # Management needs to see the upload: they're the ones who kick off the
+    # approval/sharing flow (2026-08-05). Video and content are SEPARATE types
+    # — management routes them differently (video card vs. sharing card).
+    # Batch uploads hit the 30-min coalesce (notifications).
     try:
         if category == 'video':
             notifications.notify_video_uploaded(client_id, week_iso, u.get('role'))
         else:
             notifications.notify_content_uploaded(client_id, week_iso, category)
-    except Exception:  # noqa: BLE001 — bildirim en-iyi-çaba, yükleme kritik
+    except Exception:  # noqa: BLE001 — notification is best-effort, upload is critical
         log.exception('yükleme bildirimi başarısız (upload=%s)', cu.id)
     return jsonify(upload=payload), 201
 
 
 def _video_korumali_mi(up):
-    """Bu video otomatik silmeden korunmalı mı? Korunmalıysa gerekçe metni.
+    """Should this video be protected from automatic deletion? If so, the reason text.
 
-    Paylaşılmış videoyu silmek müşteri onay sayfasındaki öğeyi SESSİZCE kırar
-    (`Share.file_id` düz metin, FK yok) — o yüzden otomatik silme buraya
-    dokunmaz, insana bırakır. Müşteri onay/ön-onay kaydı olan da aynı sınıf:
-    müşteri o dosyayı görmüş, arkasından silmek izi bozar."""
+    Deleting a shared video SILENTLY breaks the item on the client approval
+    page (`Share.file_id` is plain text, no FK) — so automatic deletion
+    doesn't touch it, it's left to a human. One with a client approval/
+    pre-approval record is in the same class: the client has already seen
+    that file, deleting it behind their back breaks the audit trail."""
     if not up.file_id:
         return None
     paylasim = (Share.query
@@ -842,15 +869,16 @@ def _video_korumali_mi(up):
 
 
 def _supersede_previous_videos(cu):
-    """Yeni video bir revize ise, geçersiz kıldığı eski sürümleri sil.
+    """If the new video is a revision, delete the older versions it supersedes.
 
-    Kural `revision_match`'te (saf, ayrı test edilir); burada yalnız DB
-    süzgeci, güvenlik kapıları ve silme var. Best-effort: burada patlayan
-    hiçbir şey yüklemeyi geçersiz kılmamalı — çağıran try/except ile sarar.
+    The rule lives in `revision_match` (pure, tested separately); here there's
+    only the DB filter, safety gates, and deletion. Best-effort: nothing that
+    blows up here should invalidate the upload — the caller wraps it in
+    try/except.
 
-    Kapsam yalnız AYNI MÜŞTERİ. Hafta şartı BİLEREK yok: gerçek veride revize
-    çiftlerinin bir kısmı hafta sınırını aşıyor (`KIDS HOME - 24` W24 →
-    `- 24 - 2` W25); hafta koşulu onları kaçırırdı."""
+    Scope is SAME CLIENT only. The week constraint is DELIBERATELY absent: in
+    real data, some revision pairs cross the week boundary (`KIDS HOME - 24`
+    W24 → `- 24 - 2` W25); a week condition would miss those."""
     if not cu.file_name:
         return
     onceki = (CardUpload.query
@@ -885,7 +913,7 @@ def _supersede_previous_videos(cu):
 
 
 def _auto_resolve(client_id, week_iso, category):
-    """Yeni yükleme açık revizyonu kapatır: video→video kind, diğer→design kind."""
+    """A new upload closes the open revision: video→video kind, other→design kind."""
     kind = 'video' if category == 'video' else 'design'
     open_reqs = RevisionRequest.query.filter_by(
         client_id=client_id, week_iso=week_iso, kind=kind, status='open').all()
@@ -897,8 +925,8 @@ def _auto_resolve(client_id, week_iso, category):
 
 
 def _week_folder_files(client, week_iso, published_ids):
-    """Bir haftanın Drive klasöründeki paylaşılmamış dosyalar (yayınlanmış file_id'ler
-    elenir). Klasör yoksa boş liste."""
+    """Unshared files in a week's Drive folder (published file_ids are excluded).
+    Empty list if the folder doesn't exist."""
     fid = _resolve_week_folder(client, week_iso, create=False)
     if not fid:
         return {'week_iso': week_iso, 'folder_id': None, 'files': []}
@@ -913,8 +941,8 @@ def _week_folder_files(client, week_iso, published_ids):
 
 @bp.get('/movable-files')
 def movable_files():
-    """Önceki + sonraki hafta klasörlerindeki paylaşılmamış içerik (bu haftaya
-    taşınabilir). Paylaşılmış = yayınlanmış Share.file_id."""
+    """Unshared content in the previous + next week folders (movable to this
+    week). Shared = a published Share.file_id."""
     u, err = _require_management()
     if err:
         return err
@@ -924,7 +952,7 @@ def movable_files():
     if cerr:
         return cerr
     if not dg.available():
-        return jsonify(error='Drive kullanılamıyor'), 503
+        return jsonify(error='Drive is unavailable'), 503
     published_ids = {s.file_id for s in Share.query.filter(
         Share.client_id == client_id, Share.status == 'published',
         Share.file_id.isnot(None)).all()}
@@ -937,7 +965,7 @@ def movable_files():
 
 @bp.post('/move-files')
 def move_files():
-    """Seçili dosyaları kaynak hafta klasöründen hedef (bu) hafta klasörüne taşı."""
+    """Move selected files from the source week folder to the target (this) week folder."""
     u, err = _require_management()
     if err:
         return err
@@ -950,13 +978,13 @@ def move_files():
     to_iso = data.get('to_week_iso')
     file_ids = [fid for fid in (data.get('file_ids') or []) if fid]
     if not from_iso or not to_iso or not file_ids:
-        return jsonify(error='from_week_iso, to_week_iso ve file_ids zorunlu'), 400
+        return jsonify(error='from_week_iso, to_week_iso and file_ids are required'), 400
     if not dg.available():
-        return jsonify(error='Drive kullanılamıyor'), 503
+        return jsonify(error='Drive is unavailable'), 503
     from_folder = _resolve_week_folder(c, from_iso, create=False)
     to_folder = _resolve_week_folder(c, to_iso, create=True)
     if not from_folder or not to_folder:
-        return jsonify(error='kaynak veya hedef hafta klasörü yok'), 400
+        return jsonify(error='source or target week folder not found'), 400
     moved, errors = 0, []
     for fid in file_ids:
         try:
@@ -967,15 +995,16 @@ def move_files():
         ups = CardUpload.query.filter_by(client_id=client_id, file_id=fid,
                                          deleted_at=None).all()
         if ups:
-            # eşleşen CardUpload kaydını hedef haftaya taşı (izlenebilirlik)
+            # move the matching CardUpload record to the target week (traceability)
             for up in ups:
                 up.moved_from_week_iso = up.week_iso
                 up.week_iso = to_iso
                 up.moved_at = utcnow()
         else:
-            # Panel kaydı olmayan (doğrudan Drive'a konmuş) dosya: hedef haftada
-            # CardUpload üret ki içerik havuzunda/board'da görünsün. Aksi halde dosya
-            # Drive'da taşınır ama panelde hiçbir yerde görünmez.
+            # A file with no panel record (placed directly on Drive): generate a
+            # CardUpload for the target week so it shows up in the content
+            # pool/board. Otherwise the file moves on Drive but is invisible
+            # anywhere in the panel.
             size = meta.get('size')
             db.session.add(CardUpload(
                 client_id=client_id, week_iso=to_iso, file_id=fid,
@@ -989,7 +1018,7 @@ def move_files():
     return jsonify(moved=moved, errors=errors)
 
 
-# --- çekim planı (shoot plan) ---
+# --- shoot plan ---
 
 def _week_dates(week_iso):
     m = re.match(r'(\d{4})-W(\d{2})', week_iso or '')
@@ -1000,7 +1029,7 @@ def _week_dates(week_iso):
 
 
 def _can_shoot(user, client_id):
-    """management her yere; videographer atandığı müşteriye ya da ad-hoc (client_id yok)."""
+    """management anywhere; videographer to their assigned client, or ad-hoc (no client_id)."""
     if user.get('role') == 'management':
         return True
     if user.get('role') == 'videographer':
@@ -1010,9 +1039,10 @@ def _can_shoot(user, client_id):
 
 
 def _can_view_photos(user, client_id):
-    """Çekim fotoğrafı görüntüle/indir yetkisi. management ve designer her müşteride
-    (designer tam aksiyon kararı); videographer yalnız _can_shoot olduğu müşteride.
-    Yükleme/silme/adlandırma bu kapsamda DEĞİL — onlar _can_shoot'la sınırlı kalır."""
+    """Right to view/download shoot photos. management and designer for every
+    client (designer full-action decision); videographer only for clients
+    where _can_shoot applies. Upload/delete/rename are NOT in this scope —
+    those stay restricted to _can_shoot."""
     role = user.get('role')
     if role in ('management', 'designer'):
         return True
@@ -1025,12 +1055,12 @@ def _can_view_photos(user, client_id):
 def shoot_plan():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'videographer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     dates = _week_dates(request.args.get('week_iso', ''))
     if not dates:
-        return jsonify(error='geçersiz week_iso'), 400
+        return jsonify(error='invalid week_iso'), 400
 
     clients = Client.query.filter_by(status='active').order_by(Client.name).all()
     if u['role'] == 'videographer':
@@ -1061,15 +1091,15 @@ def shoot_plan():
 def shoot_create():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     data = request.get_json(silent=True) or {}
     client_id = data.get('client_id')
     if not _can_shoot(u, client_id):
-        return jsonify(error='bu müşteri için çekim planı yetkiniz yok'), 403
+        return jsonify(error='not authorized to plan shoots for this client'), 403
     try:
         sched = date.fromisoformat(data['scheduled_date']) if data.get('scheduled_date') else None
     except (ValueError, TypeError):
-        return jsonify(error='geçersiz tarih'), 400
+        return jsonify(error='invalid date'), 400
     maxpos = db.session.query(db.func.max(ShootTask.position)).filter_by(
         scheduled_date=sched).scalar()
     t = ShootTask(
@@ -1087,9 +1117,9 @@ def shoot_create():
 def _shoot_or_err(u, task_id):
     t = db.session.get(ShootTask, task_id)
     if t is None:
-        return None, (jsonify(error='görev bulunamadı'), 404)
+        return None, (jsonify(error='task not found'), 404)
     if not _can_shoot(u, t.client_id):
-        return None, (jsonify(error='yetkiniz yok'), 403)
+        return None, (jsonify(error='not authorized'), 403)
     return t, None
 
 
@@ -1097,7 +1127,7 @@ def _shoot_or_err(u, task_id):
 def shoot_reorder():
     u = current_user()
     if not u or u.get('role') not in ('management', 'videographer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     ids = (request.get_json(silent=True) or {}).get('task_ids', [])
     for pos, tid in enumerate(ids):
         t = db.session.get(ShootTask, tid)
@@ -1111,7 +1141,7 @@ def shoot_reorder():
 def shoot_update(task_id):
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     t, err = _shoot_or_err(u, task_id)
     if err:
         return err
@@ -1120,7 +1150,7 @@ def shoot_update(task_id):
         try:
             t.scheduled_date = date.fromisoformat(data['scheduled_date']) if data['scheduled_date'] else None
         except (ValueError, TypeError):
-            return jsonify(error='geçersiz tarih'), 400
+            return jsonify(error='invalid date'), 400
     for f in ('start_time', 'end_time', 'priority', 'location_note', 'content_type'):
         if f in data:
             setattr(t, f, data[f])
@@ -1136,7 +1166,7 @@ def shoot_update(task_id):
 def shoot_done(task_id):
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     t, err = _shoot_or_err(u, task_id)
     if err:
         return err
@@ -1155,7 +1185,7 @@ def shoot_done(task_id):
 def shoot_delete(task_id):
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     t, err = _shoot_or_err(u, task_id)
     if err:
         return err
@@ -1164,25 +1194,25 @@ def shoot_delete(task_id):
     return jsonify(ok=True)
 
 
-# --- videographer: işletmeler + fotoğraflar ---
+# --- videographer: businesses + photos ---
 
 def _require_vg():
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='not signed in'), 401)
     if u.get('role') not in ('management', 'videographer'):
-        return None, (jsonify(error='yetkiniz yok'), 403)
+        return None, (jsonify(error='not authorized'), 403)
     return u, None
 
 
 def _require_photo_access():
-    """Çekim fotoğrafı görüntüle/indir uçları için: management, designer veya
-    videographer. Per-müşteri yetki ayrıca _can_view_photos ile denetlenir."""
+    """For shoot photo view/download endpoints: management, designer, or
+    videographer. Per-client permission is checked separately via _can_view_photos."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='not signed in'), 401)
     if u.get('role') not in ('management', 'designer', 'videographer'):
-        return None, (jsonify(error='yetkiniz yok'), 403)
+        return None, (jsonify(error='not authorized'), 403)
     return u, None
 
 
@@ -1224,7 +1254,7 @@ def vg_business_mark():
 
 @bp.get('/videographer/photos')
 def vg_photos():
-    # Designer da görür (çekim fotoğraflarını kullanmak için) — management + videographer yanında.
+    # Designer also has access (to use shoot photos) — alongside management + videographer.
     _, err = _require_photo_access()
     if err:
         return err
@@ -1247,8 +1277,8 @@ IMAGE_EXT = {'jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'tif', 'tiff'}
 
 @bp.post('/videographer/photos/upload')
 def vg_photo_upload():
-    """Videografçı çektiği fotoğrafları müşterinin Drive kökü altındaki
-    "Çekim Fotoğrafları" klasörüne yükler; designer'lara kaynak olur."""
+    """Uploads the photos the videographer shot into the "Çekim Fotoğrafları"
+    folder under the client's Drive root; serves as a source for designers."""
     u, err = _require_vg()
     if err:
         return err
@@ -1257,38 +1287,40 @@ def vg_photo_upload():
     if cerr:
         return cerr
     if not _can_shoot(u, client_id):
-        return jsonify(error='bu müşteriye fotoğraf yükleme yetkiniz yok'), 403
+        return jsonify(error='not authorized to upload photos for this client'), 403
     files = [f for f in request.files.getlist('files') if f and f.filename]
     if not files:
-        return jsonify(error='dosya yok'), 400
+        return jsonify(error='no file'), 400
     root = _extract_folder_id(c.drive_meta)
     if not root:
-        return jsonify(error='müşterinin Drive kök klasörü tanımlı değil'), 400
+        return jsonify(error="client's Drive root folder is not set"), 400
     try:
         folder_id = dg.ensure_subfolder(root, PHOTOS_SUBFOLDER)
     except dg.DriveError as e:
-        return jsonify(error=f'klasör oluşturulamadı: {e}'), 502
+        return jsonify(error=f'folder could not be created: {e}'), 502
     shoot_date = request.form.get('shoot_date') or None
     saved, errors = [], []
     for f in files:
         ext = f.filename.rsplit('.', 1)[-1].lower() if '.' in f.filename else ''
         if ext not in IMAGE_EXT:
-            errors.append(f'{f.filename}: fotoğraf değil')
+            errors.append(f'{f.filename}: not a photo')
             continue
-        # Akıştan boyut ölç + Drive'a akışla yükle (RAM'e tüm dosya girmez).
+        # Measure size from the stream + stream the upload to Drive (the whole file never enters RAM).
         f.stream.seek(0, 2)
         size = f.stream.tell()
         f.stream.seek(0)
         if size > MAX_UPLOAD_BYTES:
-            errors.append(f'{f.filename}: 500 MB sınırını aşıyor')
+            errors.append(f'{f.filename}: exceeds the 500 MB limit')
             continue
         mime = f.mimetype or 'image/jpeg'
-        # Lokal geçici kopya (21 günlük depo adayı) — Drive yüklemesi bu dosyadan akar,
-        # böylece RAM chunk boyutuyla sınırlı kalır (`upload()` deseni). Geçici
-        # yazılamazsa akıştan devam edilir. **2026-07-30'da eklendi**: fotoğrafların da
-        # `/m/<file_id>` kalıcı linkinden sunucudan servis edilebilmesi için lokal kopya
-        # şart; öncesinde foto yüklemesi doğrudan Drive'a akıtılıyordu ve `media_store`'a
-        # hiç girmiyordu (link ilk günden Drive'a düşerdi).
+        # Local temp copy (candidate for the 21-day store) — the Drive upload
+        # streams from this file, staying bounded by the RAM chunk size (same
+        # pattern as `upload()`). If the temp file can't be written, fall back
+        # to streaming. **Added 2026-07-30**: the local copy is required so
+        # photos too can be served from the server via the `/m/<file_id>`
+        # permanent link; before this, photo uploads streamed straight to
+        # Drive and never entered `media_store` (the link would fall through
+        # to Drive from day one).
         tmp = media_store.stage(f.stream)
         try:
             if tmp:
@@ -1303,12 +1335,12 @@ def vg_photo_upload():
                           client_id, f.filename, size)
             errors.append(f'{f.filename}: {e}')
             continue
-        # Best-effort: kalıcılaştırılamazsa yükleme yine geçerli (Drive kanonik).
+        # Best-effort: if it can't be persisted, the upload is still valid (Drive is canonical).
         media_store.commit(tmp, meta.get('id'), meta.get('mimeType') or mime, f.filename)
         try:
             dg.grant_anyone_reader(meta.get('id'))
         except dg.DriveError:
-            pass  # public izin en-iyi-çaba; başarısızsa yükleme yine de geçerli
+            pass  # public permission is best-effort; upload is still valid if it fails
         p = VideographerPhoto(
             client_id=client_id, shoot_date=shoot_date, folder_id=folder_id,
             file_id=meta.get('id'), file_name=meta.get('name') or f.filename,
@@ -1320,13 +1352,14 @@ def vg_photo_upload():
         saved.append({'id': p.id, 'file_id': p.file_id, 'file_name': p.file_name,
                       'shoot_date': p.shoot_date})
     db.session.commit()
-    # Tasarımcı/içerikçi bu fotoğrafları bekliyor (2026-08-05). Bildirim yalnız o
-    # müşterinin slotlarına gider — yönetim akışın içinde değil. Parti hâlinde
-    # yükleniyor (47 fotoluk çekim görüldü) → 30 dk coalesce, notifications'ta.
+    # Designers/content creators are waiting on these photos (2026-08-05). The
+    # notification goes only to that client's slots — management is not in
+    # this flow. Uploaded in batches (a 47-photo shoot has been observed) →
+    # 30-min coalesce, in notifications.
     if saved:
         try:
             notifications.notify_photos_uploaded(client_id, len(saved))
-        except Exception:  # noqa: BLE001 — bildirim en-iyi-çaba, yükleme kritik
+        except Exception:  # noqa: BLE001 — notification is best-effort, upload is critical
             log.exception('çekim fotoğrafı bildirimi başarısız (client=%s)', client_id)
     return jsonify(saved=saved, errors=errors), (201 if saved else 400)
 
@@ -1338,9 +1371,9 @@ def vg_photo_delete(photo_id):
         return err
     p = db.session.get(VideographerPhoto, photo_id)
     if p is None or p.deleted_at is not None:
-        return jsonify(error='fotoğraf bulunamadı'), 404
+        return jsonify(error='photo not found'), 404
     if not _can_shoot(u, p.client_id):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     p.deleted_at = utcnow()
     db.session.commit()
     return jsonify(ok=True)
@@ -1348,49 +1381,55 @@ def vg_photo_delete(photo_id):
 
 @bp.delete('/videographer/uploads/<int:upload_id>')
 def vg_upload_hard_delete(upload_id):
-    """Videograf VİDEO yüklemesini **KALICI** sil (proje sahibi kararı 2026-07-31).
+    """PERMANENTLY delete a videographer's VIDEO upload (project owner decision, 2026-07-31).
 
-    Mevcut `DELETE /uploads/<id>` ucunun ikizi DEĞİL: o superadmin'e özel ve
-    soft-delete (`deleted_at`), bu ise gerçekten siler. Sırasıyla:
-      1. FK ile bağlı onay kayıtları (`upload_review`, `upload_pre_approval`,
-         `review_excluded_upload`) — temizlenmezse DELETE FK hatası verir.
-      2. `card_uploads` satırı.
-      3. Sunucudaki lokal kopya (`media_store.remove`) — kalsaydı silinen video
-         `/m/<file_id>` üzerinden 21 gün daha erişilebilir olurdu.
-      4. Drive dosyası **çöp kutusuna** (kalıcı silme değil; yanlış tıklamanın
-         30 günlük geri dönüşü olsun). En-iyi-çaba: Drive patlarsa panel kaydı
-         yine silinir ve yanıt `drive_ok:false` der (depot.py deseni).
+    NOT a twin of the existing `DELETE /uploads/<id>` endpoint: that one is
+    superadmin-only and soft-deletes (`deleted_at`), this one actually
+    deletes. In order:
+      1. Approval records linked by FK (`upload_review`, `upload_pre_approval`,
+         `review_excluded_upload`) — if not cleaned up, DELETE raises an FK error.
+      2. The `card_uploads` row.
+      3. The local copy on the server (`media_store.remove`) — if left in
+         place, the deleted video would still be reachable for another 21
+         days via `/m/<file_id>`.
+      4. The Drive file, into the **trash** (not permanent deletion; gives a
+         wrong click a 30-day recovery window). Best-effort: if Drive fails,
+         the panel record is still deleted and the response says
+         `drive_ok:false` (same pattern as depot.py).
 
-    Yetki: videographer ve **designer** (2026-08-05, tasarımcı da video yükler)
-    YALNIZ kendi yüklediğini (`uploaded_by`), management ayrımsız. Rol listesi
-    `_require_vg` DEĞİL bu uca özel: `_require_vg`'ye designer eklemek çekim planı
-    ve fotoğraf uçlarını da açardı. Kapsam yalnız `category='video'` — bu uç
-    tasarımcının POST/story yüklemesine dokunamaz (onun yolu superadmin'e özel
-    soft-delete ucu). Board'daki `can_delete` bayrağı (`_build_rows`) bu kuralla
-    aynı: management ayrımsız / diğerleri kendi yüklediği.
-    Paylaşılmış video ENGELLENMEZ (proje sahibi kararı: panelde uyar, yine de sil)."""
+    Permissions: videographer and **designer** (2026-08-05, designers also
+    upload video) can delete ONLY their own uploads (`uploaded_by`);
+    management is unrestricted. The role list is specific to this endpoint,
+    NOT `_require_vg`: adding designer to `_require_vg` would also open up the
+    shoot plan and photo endpoints. Scope is `category='video'` only — this
+    endpoint can't touch a designer's POST/story upload (that goes through
+    the superadmin-only soft-delete endpoint). The `can_delete` flag on the
+    board (`_build_rows`) follows the same rule: management unrestricted /
+    others only their own upload.
+    A shared video is NOT blocked (project owner decision: warn in the panel, still delete)."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'videographer', 'designer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     up = CardUpload.query.filter_by(id=upload_id, category='video',
                                     deleted_at=None).first()
     if up is None:
-        return jsonify(error='video bulunamadı'), 404
+        return jsonify(error='video not found'), 404
     if u.get('role') != 'management' and up.uploaded_by != u.get('sub'):
-        return jsonify(error='yalnız kendi yüklediğiniz videoyu silebilirsiniz'), 403
+        return jsonify(error='you can only delete videos you uploaded yourself'), 403
 
     return jsonify(ok=True, drive_ok=_hard_delete_video(up))
 
 
 def _hard_delete_video(up):
-    """Bir video yüklemesini KALICI sil; Drive başarılıysa True döner.
+    """PERMANENTLY delete a video upload; returns True if Drive succeeded.
 
-    İki çağıranı var — elle "Sil" düğmesi (`vg_upload_hard_delete`) ve revize
-    gelince otomatik silme (`_supersede_previous_videos`). Ortak tutulması
-    kasıtlı: ayrı yazılsalardı biri (ör. web türevi temizliği) sessizce geride
-    kalırdı. Yetki denetimi çağıranın işi, burada YOK."""
+    Has two callers — the manual "Delete" button (`vg_upload_hard_delete`) and
+    automatic deletion when a revision arrives (`_supersede_previous_videos`).
+    Kept shared on purpose: if written separately, one of them (e.g. web
+    derivative cleanup) would silently fall behind. Permission checking is the
+    caller's job, NOT done here."""
     file_id = up.file_id
     UploadReview.query.filter_by(upload_id=up.id).delete(synchronize_session=False)
     UploadPreApproval.query.filter_by(upload_id=up.id).delete(synchronize_session=False)
@@ -1399,7 +1438,7 @@ def _hard_delete_video(up):
     db.session.commit()
 
     if file_id:
-        media_store.remove(file_id)      # orijinal + önizleme + web türevi
+        media_store.remove(file_id)      # original + preview + web derivative
     drive_ok = True
     if file_id and dg.available():
         try:
@@ -1412,35 +1451,35 @@ def _hard_delete_video(up):
 
 @bp.post('/videographer/photos/bulk-delete')
 def vg_photos_bulk_delete():
-    """Seçili fotoğrafları toplu soft-delete. Yalnız _can_shoot yetkili olunanlar
-    silinir; yetkisiz/bulunamayan id'ler errors'a yazılır."""
+    """Bulk soft-delete of selected photos. Only ones with _can_shoot permission
+    are deleted; unauthorized/not-found ids are written to errors."""
     u, err = _require_vg()
     if err:
         return err
     ids = [int(i) for i in (request.get_json(silent=True) or {}).get('ids', [])
            if str(i).lstrip('-').isdigit()]
     if not ids:
-        return jsonify(error='ids zorunlu'), 400
+        return jsonify(error='ids are required'), 400
     deleted, errors = 0, []
     photos = VideographerPhoto.query.filter(
         VideographerPhoto.id.in_(ids), VideographerPhoto.deleted_at.is_(None)).all()
     found = {p.id for p in photos}
     for p in photos:
         if not _can_shoot(u, p.client_id):
-            errors.append(f'{p.id}: yetkiniz yok')
+            errors.append(f'{p.id}: not authorized')
             continue
         p.deleted_at = utcnow()
         deleted += 1
     for missing in [i for i in ids if i not in found]:
-        errors.append(f'{missing}: bulunamadı')
+        errors.append(f'{missing}: not found')
     db.session.commit()
     return jsonify(deleted=deleted, errors=errors)
 
 
 @bp.post('/videographer/photos/download-zip')
 def vg_photos_download_zip():
-    """Seçili fotoğrafları tek bir zip olarak indir. Drive'dan byte çekilir; ad
-    çakışmasında -1/-2 sonek. Yalnız _can_shoot yetkili olunanlar dahil edilir."""
+    """Download selected photos as a single zip. Bytes are pulled from Drive;
+    name collisions get a -1/-2 suffix. Only ones with _can_shoot permission are included."""
     import io
     import zipfile
     u, err = _require_photo_access()
@@ -1449,14 +1488,14 @@ def vg_photos_download_zip():
     ids = [int(i) for i in (request.get_json(silent=True) or {}).get('ids', [])
            if str(i).lstrip('-').isdigit()]
     if not ids:
-        return jsonify(error='ids zorunlu'), 400
+        return jsonify(error='ids are required'), 400
     if not dg.available():
-        return jsonify(error='Drive kullanılamıyor'), 503
+        return jsonify(error='Drive is unavailable'), 503
     photos = VideographerPhoto.query.filter(
         VideographerPhoto.id.in_(ids), VideographerPhoto.deleted_at.is_(None)).all()
     photos = [p for p in photos if p.file_id and _can_view_photos(u, p.client_id)]
     if not photos:
-        return jsonify(error='indirilecek fotoğraf yok'), 404
+        return jsonify(error='no photos to download'), 404
     buf = io.BytesIO()
     used_names = set()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -1476,7 +1515,7 @@ def vg_photos_download_zip():
             used_names.add(name)
             zf.writestr(name, data)
     if not used_names:
-        return jsonify(error='dosyalar indirilemedi'), 502
+        return jsonify(error='files could not be downloaded'), 502
     buf.seek(0)
     return Response(buf.getvalue(), mimetype='application/zip', headers={
         'Content-Disposition': 'attachment; filename="fotograflar.zip"'})
@@ -1484,16 +1523,16 @@ def vg_photos_download_zip():
 
 @bp.post('/videographer/photos/<int:photo_id>/used')
 def vg_photo_mark_used(photo_id):
-    """Fotoğrafı 'designer kullandı' olarak işaretle/kaldır. Yetki: management veya
-    designer (designer board'daki tetikleme sonraki işte bu ucu çağıracak)."""
+    """Mark/unmark a photo as 'used by designer'. Permission: management or
+    designer (the trigger on the designer board will call this endpoint in a follow-up task)."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     p = db.session.get(VideographerPhoto, photo_id)
     if p is None or p.deleted_at is not None:
-        return jsonify(error='fotoğraf bulunamadı'), 404
+        return jsonify(error='photo not found'), 404
     used = bool((request.get_json(silent=True) or {}).get('used', True))
     p.used_at = utcnow() if used else None
     p.used_by = u['sub'] if used else None
@@ -1504,21 +1543,21 @@ def vg_photo_mark_used(photo_id):
 
 @bp.post('/videographer/photos/<int:photo_id>/rename')
 def vg_photo_rename(photo_id):
-    """Fotoğrafı yeniden adlandır (Drive + DB). Uzantı korunur; yetki: _can_shoot."""
+    """Rename a photo (Drive + DB). Extension is preserved; permission: _can_shoot."""
     u, err = _require_vg()
     if err:
         return err
     p = db.session.get(VideographerPhoto, photo_id)
     if p is None or p.deleted_at is not None:
-        return jsonify(error='fotoğraf bulunamadı'), 404
+        return jsonify(error='photo not found'), 404
     if not _can_shoot(u, p.client_id):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     raw = ((request.get_json(silent=True) or {}).get('name') or '').strip()
-    # yol ayıracı / kontrol karakteri temizle, uzunluk sınırla
+    # strip path separators / control characters, cap the length
     raw = re.sub(r'[\\/\x00-\x1f]', '', raw)[:200].strip()
     if not raw:
-        return jsonify(error='ad boş olamaz'), 400
-    # kullanıcı uzantı vermediyse orijinal uzantıyı koru
+        return jsonify(error='name cannot be empty'), 400
+    # if the user didn't give an extension, keep the original one
     old_ext = (p.file_name or '').rsplit('.', 1)[-1] if '.' in (p.file_name or '') else ''
     if old_ext and '.' not in raw:
         raw = f'{raw}.{old_ext}'
@@ -1526,7 +1565,7 @@ def vg_photo_rename(photo_id):
         try:
             dg.rename_file(p.file_id, raw)
         except dg.DriveError as e:
-            return jsonify(error=f'Drive yeniden adlandıramadı: {e}'), 502
+            return jsonify(error=f'Drive rename failed: {e}'), 502
     p.file_name = raw
     db.session.commit()
     return jsonify(id=p.id, file_name=p.file_name)
@@ -1534,22 +1573,22 @@ def vg_photo_rename(photo_id):
 
 @bp.get('/videographer/photos/<int:photo_id>/download')
 def vg_photo_download(photo_id):
-    """Tek fotoğrafı orijinal adıyla indir (Drive'dan byte akışı). GET → CSRF gerekmez."""
+    """Download a single photo under its original name (byte stream from Drive). GET → no CSRF needed."""
     from urllib.parse import quote
     u, err = _require_photo_access()
     if err:
         return err
     p = db.session.get(VideographerPhoto, photo_id)
     if p is None or p.deleted_at is not None:
-        return jsonify(error='fotoğraf bulunamadı'), 404
+        return jsonify(error='photo not found'), 404
     if not _can_view_photos(u, p.client_id):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     if not p.file_id or not dg.available():
-        return jsonify(error='Drive kullanılamıyor'), 503
+        return jsonify(error='Drive is unavailable'), 503
     try:
         data = dg.download_file(p.file_id)
     except dg.DriveError as e:
-        return jsonify(error=f'indirilemedi: {e}'), 502
+        return jsonify(error=f'download failed: {e}'), 502
     name = p.file_name or f'{p.file_id}.jpg'
     ascii_fallback = re.sub(r'[^A-Za-z0-9._-]', '_', name) or 'foto.jpg'
     return Response(data, mimetype=p.mime_type or 'application/octet-stream', headers={
@@ -1557,18 +1596,18 @@ def vg_photo_download(photo_id):
                                 f"filename*=UTF-8''{quote(name)}")})
 
 
-# --- videographer öneri botu (Faz 5, step 17) ---
+# --- videographer suggestion bot (Phase 5, step 17) ---
 
 @bp.get('/videographer/ideas')
 def vg_ideas():
-    """Müşterinin AI trend-önerileri (varsayılan yalnız 'new'; ?status= ile filtre).
-    En yeni önce. management + videographer görür."""
+    """The client's AI trend suggestions (default only 'new'; filter with ?status=).
+    Newest first. Visible to management + videographer."""
     _, err = _require_vg()
     if err:
         return err
     client_id = request.args.get('client_id', type=int)
     if not client_id:
-        return jsonify(error='client_id zorunlu'), 400
+        return jsonify(error='client_id is required'), 400
     status = request.args.get('status', 'new')
     q = VideographerIdea.query.filter_by(client_id=client_id)
     if status:
@@ -1580,9 +1619,10 @@ def vg_ideas():
 
 @bp.post('/videographer/ideas/generate')
 def vg_ideas_generate():
-    """Öneri botunu elle tetikle (müşteri-tetikli — GATE 16 §5.2). Düşük priority (batch)
-    + dedup (aynı müşteri için aktif job varsa yenisini atmaz). Trend tarama + üretim
-    kuyruktan `ai_worker.videographer_ideas_handler` ile yapılır."""
+    """Manually trigger the suggestion bot (client-triggered — GATE 16 §5.2). Low
+    priority (batch) + dedup (won't queue a new job if one is already active
+    for the same client). Trend scanning + generation is done from the queue
+    via `ai_worker.videographer_ideas_handler`."""
     u, err = _require_vg()
     if err:
         return err
@@ -1599,21 +1639,22 @@ def vg_ideas_generate():
 def _idea_or_err(u, idea_id):
     idea = db.session.get(VideographerIdea, idea_id)
     if idea is None:
-        return None, (jsonify(error='öneri bulunamadı'), 404)
+        return None, (jsonify(error='suggestion not found'), 404)
     if not _can_shoot(u, idea.client_id):
-        return None, (jsonify(error='yetkiniz yok'), 403)
+        return None, (jsonify(error='not authorized'), 403)
     return idea, None
 
 
 @bp.post('/videographer/ideas/<int:idea_id>/like')
 def vg_idea_like(idea_id):
-    """"Beğen → çekim listesine ekle": öneriden bir ÇEKİM PLANI görevi (ShootTask)
-    oluşturur (çekim fikri → başlık, neden → not) ve öneriyi status='accepted' işaretler.
-    scheduled_date opsiyonel (verilmezse havuzda/tarihsiz). Çekim planı domain'ine yazar
-    (useShootMutations ile aynı ShootTask kaydı)."""
+    """"Like → add to shoot list": creates a SHOOT PLAN task (ShootTask) from the
+    suggestion (shoot idea → title, reason → note) and marks the suggestion
+    status='accepted'. scheduled_date is optional (if omitted, sits in the
+    pool/dateless). Writes to the shoot plan domain (same ShootTask record as
+    useShootMutations)."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     idea, err = _idea_or_err(u, idea_id)
     if err:
         return err
@@ -1621,12 +1662,12 @@ def vg_idea_like(idea_id):
     try:
         sched = date.fromisoformat(data['scheduled_date']) if data.get('scheduled_date') else None
     except (ValueError, TypeError):
-        return jsonify(error='geçersiz tarih'), 400
+        return jsonify(error='invalid date'), 400
     maxpos = db.session.query(db.func.max(ShootTask.position)).filter_by(
         scheduled_date=sched).scalar()
     task = ShootTask(
         client_id=idea.client_id, scheduled_date=sched,
-        title=idea.shoot_idea or 'AI öneri', content_type='öneri',
+        title=idea.shoot_idea or 'AI suggestion', content_type='suggestion',
         location_note=idea.reason,
         assigned_to=(u['sub'] if u.get('role') == 'videographer' else None),
         assigned_by=u['sub'], position=(maxpos or 0) + 1, created_by=u['sub'])
@@ -1638,10 +1679,10 @@ def vg_idea_like(idea_id):
 
 @bp.post('/videographer/ideas/<int:idea_id>/skip')
 def vg_idea_skip(idea_id):
-    """"Atla": öneriyi status='skipped' işaretler (listeden düşer)."""
+    """"Skip": marks the suggestion status='skipped' (drops off the list)."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     idea, err = _idea_or_err(u, idea_id)
     if err:
         return err
@@ -1660,7 +1701,7 @@ def revision_create():
     data = request.get_json(silent=True) or {}
     kind = data.get('kind')
     if kind not in REVISION_KINDS:
-        return jsonify(error='geçersiz kind (design/video)'), 400
+        return jsonify(error='invalid kind (design/video)'), 400
     _, cerr = _client_or_404(data.get('client_id'))
     if cerr:
         return cerr
@@ -1677,7 +1718,7 @@ def revision_create():
 @bp.get('/revisions')
 def revisions_list():
     if not current_user():
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     q = RevisionRequest.query
     if request.args.get('status'):
         q = q.filter_by(status=request.args['status'])
@@ -1693,12 +1734,12 @@ def revisions_list():
 def revision_resolve(rev_id):
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer', 'videographer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     rev = db.session.get(RevisionRequest, rev_id)
     if rev is None:
-        return jsonify(error='revizyon bulunamadı'), 404
+        return jsonify(error='revision not found'), 404
     rev.status = 'resolved'
     rev.resolved_by = u['sub']
     rev.resolved_at = utcnow()
@@ -1708,12 +1749,13 @@ def revision_resolve(rev_id):
 
 
 def _used_file_ids(file_ids):
-    """Bu dosyalar için ZATEN bir paylaşım kartı var mı — taslak olsa bile.
+    """Does a sharing card ALREADY exist for these files — even as a draft.
 
-    ShareModal'ın dosya seçicisi kullanılmışları gizler, böylece aynı dosyaya
-    ikinci kart açılıp çift içerik üretilmiyor. HAFTA BAĞIMSIZ sorgulanır: dosya
-    başka haftaya taşınmış olabilir, kartı orada durur ama yine kullanılmıştır.
-    TEK toplu sorgu — yükleme başına `Share.query` N+1 doğururdu."""
+    ShareModal's file picker hides ones already in use, so a second card
+    doesn't get opened on the same file and produce duplicate content. Queried
+    WEEK-INDEPENDENTLY: the file may have been moved to another week, its card
+    stays there but it's still "used". A SINGLE batched query — a
+    `Share.query` per upload would cause N+1."""
     if not file_ids:
         return set()
     return {fid for (fid,) in db.session.query(Share.file_id)
@@ -1742,8 +1784,8 @@ def uploads():
     return jsonify(uploads=out)
 
 
-# Müşteri medya sayfasında dosyası olmayan haftalar için de blok render edilir
-# (sürükleyecek hedef bulunsun) — içinde bulunulan haftanın ± bu kadar komşusu.
+# On the client media page, a block is rendered even for weeks with no files
+# (so there's a drop target) — this many neighboring weeks around the current one.
 MEDIA_WEEK_WINDOW = 4
 
 
@@ -1754,15 +1796,16 @@ def _current_week_iso():
 
 @bp.get('/clients/<int:client_id>/media')
 def client_media(client_id):
-    """Müşterinin TÜM yüklemeleri, hafta hafta gruplu — müşteri medya sayfası.
+    """ALL of a client's uploads, grouped by week — the client media page.
 
-    `GET /uploads`'un ikizi DEĞİL: o management-only ve ShareModal'ın dosya
-    seçici havuzu (tek hafta, düz liste). Bu uç tasarımcıya da açık, TÜM
-    haftaları döner ve sürükle-bırak hedefi olsun diye dosyası olmayan komşu
-    haftaları da listeler.
+    NOT a twin of `GET /uploads`: that one is management-only and is
+    ShareModal's file-picker pool (single week, flat list). This endpoint is
+    also open to the designer, returns ALL weeks, and also lists file-less
+    neighboring weeks so there's a drag-and-drop target.
 
-    Çekim fotoğrafları buraya GİRMEZ: `VideographerPhoto`'nun hafta kavramı yok
-    (`shoot_date` ekseninde) → taşınamaz, panel onları ayrı uçtan çeker.
+    Shoot photos do NOT appear here: `VideographerPhoto` has no concept of a
+    week (it's on the `shoot_date` axis) → can't be moved, the panel fetches
+    those from a separate endpoint.
     """
     _, err = _require_designer_or_management()
     if err:
@@ -1787,7 +1830,7 @@ def client_media(client_id):
         wk = _shift_week(cur, delta)
         if wk:
             by_week.setdefault(wk, [])
-    # "YYYY-Www" sıfır dolgulu olduğu için düz string sıralaması kronolojiktir.
+    # "YYYY-Www" is zero-padded, so plain string sorting is chronological.
     weeks = [{'week_iso': w, 'uploads': by_week[w]}
              for w in sorted(by_week, reverse=True)]
     return jsonify(client_id=client_id, weeks=weeks)
@@ -1795,16 +1838,17 @@ def client_media(client_id):
 
 @bp.post('/uploads/move-week')
 def uploads_move_week():
-    """Seçili yüklemeleri hedef haftaya taşı — Drive klasöründe de.
+    """Move selected uploads to the target week — including in the Drive folder.
 
-    `POST /move-files`'ın ikizi DEĞİL: o Drive `file_id`'leri + TEK kaynak hafta
-    alır ve panel kaydı OLMAYAN dosyayı adopte eder. Bu uç panel kaydı
-    (`upload_ids`) üzerinden çalışır → kaynak hafta her kaydın kendisinden
-    okunur, yani KARIŞIK haftalardan seçim tek istekte taşınır. Tasarımcıya açık.
+    NOT a twin of `POST /move-files`: that one takes Drive `file_id`s + a
+    SINGLE source week and adopts files with NO panel record. This endpoint
+    works via panel records (`upload_ids`) → the source week is read from each
+    record itself, so a selection spanning MIXED weeks moves in a single
+    request. Open to the designer.
 
-    Kısmi başarı sözleşmesi: Drive hatası veren dosya atlanır ve `errors`'a
-    yazılır, kalanlar taşınmaya devam eder — tek dosya patlayınca toplu taşıma
-    çökmemeli.
+    Partial-success contract: a file that errors on Drive is skipped and
+    written to `errors`, the rest keep moving — one file blowing up must not
+    crash the whole batch move.
     """
     _, err = _require_designer_or_management()
     if err:
@@ -1813,29 +1857,29 @@ def uploads_move_week():
     to_iso = data.get('to_week_iso')
     ids = [i for i in (data.get('upload_ids') or []) if isinstance(i, int)]
     if not ids or not to_iso or not _week_number(to_iso):
-        return jsonify(error='upload_ids ve geçerli to_week_iso zorunlu'), 400
+        return jsonify(error='upload_ids and a valid to_week_iso are required'), 400
     ups = CardUpload.query.filter(CardUpload.id.in_(ids),
                                   CardUpload.deleted_at.is_(None)).all()
     if not ups:
-        return jsonify(error='taşınacak yükleme bulunamadı'), 404
+        return jsonify(error='no uploads found to move'), 404
     client_ids = {up.client_id for up in ups}
     if len(client_ids) > 1:
-        return jsonify(error='tek istekte yalnız bir müşterinin yüklemeleri taşınabilir'), 400
+        return jsonify(error="only one client's uploads can be moved per request"), 400
     c, cerr = _client_or_404(client_ids.pop())
     if cerr:
         return cerr
     if not dg.available():
-        return jsonify(error='Drive kullanılamıyor'), 503
+        return jsonify(error='Drive is unavailable'), 503
     to_folder = _resolve_week_folder(c, to_iso, create=True)
     if not to_folder:
-        return jsonify(error='hedef hafta klasörü yok ve oluşturulamadı'), 400
+        return jsonify(error='target week folder not found and could not be created'), 400
     moved, errors = 0, []
     for up in ups:
         if up.week_iso == to_iso:
             continue
         if up.file_id:
-            # Kaynak klasör kaydı yoksa None geçilir: `dg.move_file` o durumda
-            # dosyanın mevcut parent'larını okuyup çıkarır.
+            # If there's no source folder record, None is passed: in that case
+            # `dg.move_file` reads and derives the file's current parents.
             from_folder = _resolve_week_folder(c, up.week_iso, create=False)
             try:
                 dg.move_file(up.file_id, to_folder, from_folder)
@@ -1852,17 +1896,18 @@ def uploads_move_week():
 
 @bp.delete('/uploads/<int:upload_id>')
 def upload_delete(upload_id):
-    """Yüklenmiş bir kartı (CardUpload) sil — YALNIZ superadmin. Soft-delete
-    (deleted_at); board/seçiciden kalkar, geri alınabilir. Drive'daki dosyaya
-    dokunulmaz. Yetki gerçek kimlik üzerinden (impersonation-korumalı)."""
+    """Delete an uploaded card (CardUpload) — superadmin ONLY. Soft-delete
+    (deleted_at); it disappears from the board/picker and can be restored.
+    The Drive file is not touched. Permission is checked via the real identity
+    (impersonation-protected)."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if not is_superadmin():
-        return jsonify(error='yalnız superadmin yüklemeleri silebilir'), 403
+        return jsonify(error='only a superadmin can delete uploads'), 403
     up = CardUpload.query.filter_by(id=upload_id, deleted_at=None).first()
     if up is None:
-        return jsonify(error='yükleme bulunamadı'), 404
+        return jsonify(error='upload not found'), 404
     up.deleted_at = utcnow()
     db.session.commit()
     return jsonify(ok=True)
@@ -1885,7 +1930,7 @@ def priority_toggle():
         p = ClientPriority(client_id=data['client_id'], week_iso=week_iso)
         db.session.add(p)
     if p.cleared_at is None and p.set_at is not None and p.id is not None:
-        # aktifti → kapat
+        # was active → clear it
         p.cleared_at = utcnow()
         active = False
     else:
@@ -1895,12 +1940,13 @@ def priority_toggle():
         p.cleared_reason = None
         active = True
     db.session.commit()
-    # Öncelik işareti "bunu öne al" demek — üretim ekibi görmezse işaret hiçbir şeyi
-    # değiştirmez (2026-08-05). Yalnız işaret KONULURKEN bildirilir, kaldırılırken değil.
+    # A priority flag means "bump this up" — if the production team never sees
+    # it, the flag changes nothing (2026-08-05). Only notified WHEN THE FLAG IS
+    # SET, not when it's cleared.
     if active:
         try:
             notifications.notify_priority_marked(data['client_id'], week_iso, u.get('name'))
-        except Exception:  # noqa: BLE001 — bildirim en-iyi-çaba
+        except Exception:  # noqa: BLE001 — notification is best-effort
             log.exception('öncelik bildirimi başarısız (client=%s)', data.get('client_id'))
     return jsonify(active=active)
 
@@ -1908,18 +1954,20 @@ def priority_toggle():
 # --- review link ---
 
 def _grant_video_perms(file_ids):
-    """Onay sayfasındaki 'Drive'da aç' linki oturumsuz/yabancı Google hesabıyla
-    açılabilsin diye video dosyalarına 'anyone with link → reader' ver.
+    """Grant video files 'anyone with link → reader' so the "open in Drive"
+    link on the approval page can be opened without a session/with a foreign
+    Google account.
 
-    Yalnız VIDEO: görseller proxy'den gidiyor, onları herkese açmaya gerek yok.
-    Best-effort — başarısız olursa link yine çalışır (müşteri poster'ı görür,
-    Drive'da izin duvarına toslar). Idempotent. Arka planda: Drive API çağrısı
-    dosya başına ~200-500ms, yönetici butonu beklemesin.
+    VIDEO ONLY: images go through the proxy, no need to open those to
+    everyone. Best-effort — if it fails, the link still works (the client sees
+    the poster, hits a permission wall on Drive). Idempotent. Runs in the
+    background: the Drive API call takes ~200-500ms per file, the manager's
+    button shouldn't wait on it.
     """
     for fid in file_ids:
         try:
             dg.grant_anyone_reader(fid)
-        except Exception as e:  # noqa: BLE001 — izin en-iyi-çaba, link kritik değil
+        except Exception as e:  # noqa: BLE001 — permission is best-effort, link is not critical
             log.warning('review-link izin verilemedi (%s): %s', fid, e)
 
 
@@ -1934,12 +1982,12 @@ def _spawn_video_perm_grant(client_id, week_iso):
 
 @bp.post('/review-link')
 def review_link():
-    # Designer da onay linki üretir (kendi board'undan, her müşteri için — tam aksiyon).
+    # The designer also generates approval links (from their own board, for any client — full action).
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     data = request.get_json(silent=True) or {}
     _, cerr = _client_or_404(data.get('client_id'))
     if cerr:
@@ -1947,7 +1995,7 @@ def review_link():
     week_iso = data.get('week_iso')
     existing = ReviewLink.query.filter_by(
         client_id=data['client_id'], week_iso=week_iso, revoked=False).first()
-    # İzinler her çağrıda tazelenir: link üretildikten sonra eklenen videolar da kapsansın.
+    # Permissions are refreshed on every call: videos added after the link was created should also be covered.
     _spawn_video_perm_grant(data['client_id'], week_iso)
     count = len(review_visible_uploads(data['client_id'], week_iso))
     if existing:
@@ -1961,15 +2009,16 @@ def review_link():
 
 @bp.post('/pre-approval-link')
 def pre_approval_link():
-    """On-onay linki uret (tasarimci veya yonetim) - yoneticiye gonderilir.
+    """Generate a pre-approval link (designer or management) - sent to the manager.
 
-    Musteri linkinden AYRI token; sayfayi yalniz personel acabilir, karari yalniz
-    yonetim verir. Ayni (client, week) icin mevcut link tekrar kullanilir."""
+    A token SEPARATE from the client link; only staff can open the page,
+    only management can decide. The existing link is reused for the same
+    (client, week)."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     data = request.get_json(silent=True) or {}
     _, cerr = _client_or_404(data.get('client_id'))
     if cerr:
@@ -1995,27 +2044,30 @@ def review_link_revoke():
     token = (request.get_json(silent=True) or {}).get('token')
     link = ReviewLink.query.filter_by(token=token).one_or_none()
     if link is None:
-        return jsonify(error='link bulunamadı'), 404
+        return jsonify(error='link not found'), 404
     link.revoked = True
     db.session.commit()
     return jsonify(ok=True)
 
 
-# --- müşteri onay linki (elle seçim, 2026-08-06) ---
+# --- client approval link (manual selection, 2026-08-06) ---
 
-# Modalda gösterilen hafta penceresi: board'un haftası ± bu kadar (proje sahibi: "bulunduğumuz
-# hafta, önceki hafta ve sonraki hafta").
+# Week window shown in the modal: the board's week ± this many (project owner:
+# "the current week, the previous week and the next week").
 APPROVAL_WEEK_WINDOW = 1
 
 
 def _published_file_ids(file_ids):
-    """Bu dosyalardan hangileri YAYINDA işaretli bir paylaşım kartında kullanılmış.
+    """Which of these files are used in a card marked PUBLISHED.
 
-    `_used_file_ids`'in ikizi DEĞİL: o kart açılmış olmayı sorar (taslak dahil,
-    ShareModal'ın seçicisi çift kart açılmasın diye kullanır), bu ise gerçekten
-    yayınlanmış olmayı. Müşteri onay linkinde ölçüt yayındır (proje sahibi 2026-08-06):
-    taslak kartı olan bir tasarım hâlâ onaya gönderilebilir olmalı.
-    HAFTA BAĞIMSIZ: dosya başka haftaya taşınmış olsa da kartı orada yayında olabilir.
+    NOT a twin of `_used_file_ids`: that one asks whether a card has been
+    opened (including drafts, used by ShareModal's picker so a second card
+    doesn't get opened), this one asks whether it's actually published. On the
+    client approval link the criterion is published (project owner,
+    2026-08-06): a design that only has a draft card should still be
+    submittable for approval.
+    WEEK-INDEPENDENT: even if the file was moved to another week, its card may
+    be published there.
     """
     if not file_ids:
         return set()
@@ -2026,12 +2078,13 @@ def _published_file_ids(file_ids):
 
 
 def _sent_upload_ids(client_id):
-    """Bu müşteri için daha önce üretilmiş onay linklerinde geçen yükleme id'leri.
+    """Upload ids that appear in previously generated approval links for this client.
 
-    Süzmez, yalnız işaretler ("daha önce gönderildi" rozeti): aynı tasarımı ikinci
-    kez göndermek meşru (revize sonrası tekrar onaya sunmak), ama farkında olunmalı.
-    Müşteri başına link sayısı küçük olduğundan JSONB içi sorgu yerine Python'da
-    birleştirilir — sqlite testlerinde de aynı kod yolu çalışsın diye."""
+    Doesn't filter, only flags ("sent before" badge): sending the same design
+    a second time is legitimate (resubmitting for approval after a revision),
+    but should be visible. Since the number of links per client is small, this
+    is merged in Python rather than an inside-JSONB query — so the same code
+    path also runs under the sqlite tests."""
     ids = set()
     for (uids,) in db.session.query(ClientApprovalLink.upload_ids).filter_by(
             client_id=client_id).all():
@@ -2041,22 +2094,23 @@ def _sent_upload_ids(client_id):
 
 @bp.get('/approval-candidates')
 def approval_candidates():
-    """Müşteri onay linki modalının listesi: hafta ± APPROVAL_WEEK_WINDOW içindeki,
-    HENÜZ YAYINLANMAMIŞ post/video yüklemeleri (proje sahibi 2026-08-06).
+    """List for the client approval link modal: post/video uploads within week ±
+    APPROVAL_WEEK_WINDOW that are NOT YET PUBLISHED (project owner, 2026-08-06).
 
-    `review_visible_uploads` ile bilerek AYRI: orada kapsam (müşteri, hafta) ve
-    kademeli ön-onay kapısı var; burada seçimi insan yapıyor, o yüzden süzgeç
-    minimum — yalnız "zaten yayınlananı tekrar onaya sunma" kuralı uygulanır.
+    Deliberately SEPARATE from `review_visible_uploads`: that one has a scope
+    of (client, week) and the gradual pre-approval gate; here a human makes
+    the selection, so the filter is minimal — only the rule "don't resubmit
+    something already published" is applied.
     """
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     try:
         client_id = int(request.args.get('client_id', ''))
     except ValueError:
-        return jsonify(error='client_id zorunlu'), 400
+        return jsonify(error='client_id is required'), 400
     _, cerr = _client_or_404(client_id)
     if cerr:
         return cerr
@@ -2065,7 +2119,7 @@ def approval_candidates():
                          for d in range(-APPROVAL_WEEK_WINDOW, APPROVAL_WEEK_WINDOW + 1))
              if w]
     if not weeks:
-        return jsonify(error='geçersiz week_iso'), 400
+        return jsonify(error='invalid week_iso'), 400
     ups = (CardUpload.query
            .filter(CardUpload.client_id == client_id,
                    CardUpload.week_iso.in_(weeks),
@@ -2092,18 +2146,19 @@ def approval_candidates():
 
 @bp.post('/approval-link')
 def approval_link():
-    """Seçilen yüklemeler için müşteri onay linki üret → `/onay/<token>`.
+    """Generate a client approval link for the selected uploads → `/onay/<token>`.
 
-    Aynı müşteri + AYNI seçim için mevcut link tekrar kullanılır (aynı seçimi iki
-    kez kopyalayan kişi iki farklı link almasın). Seçim değişirse YENİ link üretilir:
-    linkin içeriği dondurulmuştur, müşteriye gönderilmiş bir linkin altını
-    değiştirmek "onayladığı şey" ile "gördüğü şey"i ayırırdı.
+    The existing link is reused for the same client + the SAME selection
+    (someone copying the same selection twice shouldn't get two different
+    links). If the selection changes, a NEW link is generated: a link's
+    content is frozen — changing what's behind a link already sent to a
+    client would split "what they approved" from "what they saw".
     """
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     data = request.get_json(silent=True) or {}
     _, cerr = _client_or_404(data.get('client_id'))
     if cerr:
@@ -2111,7 +2166,7 @@ def approval_link():
     client_id = data['client_id']
     ids = [i for i in (data.get('upload_ids') or []) if isinstance(i, int)]
     if not ids:
-        return jsonify(error='en az bir içerik seçin'), 400
+        return jsonify(error='select at least one item'), 400
     ups = (CardUpload.query
            .filter(CardUpload.id.in_(ids),
                    CardUpload.client_id == client_id,
@@ -2119,8 +2174,8 @@ def approval_link():
                    CardUpload.category.in_(REVIEW_CATEGORIES))
            .all())
     if len(ups) != len(set(ids)):
-        return jsonify(error='seçimde geçersiz içerik var'), 400
-    # Sıra korunur: müşteri sayfada tasarımcının seçtiği sırayla görür.
+        return jsonify(error='selection contains invalid items'), 400
+    # Order is preserved: the client sees things on the page in the order the designer selected them.
     valid = {u_.id for u_ in ups}
     ordered = [i for i in dict.fromkeys(ids) if i in valid]
     _spawn_upload_perm_grant(ups)
@@ -2137,12 +2192,13 @@ def approval_link():
 
 
 def _spawn_upload_perm_grant(uploads):
-    """Seçilen videolara "bağlantıya sahip herkes" izni ver (arka planda).
+    """Grant "anyone with the link" permission to the selected videos (in the background).
 
-    `_spawn_video_perm_grant` Share kayıtlarından okur; bu akışta paylaşım kartı
-    yok, kaynak doğrudan yüklemeler. Sayfa lokal kopya varken videoyu kendi
-    üzerinden akıtır, ama 21 günlük pencere dolduysa Drive'a düşer — izin
-    verilmezse müşteri o videoyu açamaz."""
+    `_spawn_video_perm_grant` reads from Share records; in this flow there's
+    no sharing card, the source is uploads directly. The page streams the
+    video through itself while a local copy exists, but once the 21-day
+    window expires it falls through to Drive — if the permission isn't
+    granted, the client can't open that video."""
     fids = [u.file_id for u in uploads if u.file_id and u.category == 'video']
     if not fids:
         return
@@ -2157,7 +2213,7 @@ def approval_link_revoke():
     token = (request.get_json(silent=True) or {}).get('token')
     link = ClientApprovalLink.query.filter_by(token=token).one_or_none()
     if link is None:
-        return jsonify(error='link bulunamadı'), 404
+        return jsonify(error='link not found'), 404
     link.revoked = True
     db.session.commit()
     return jsonify(ok=True)
@@ -2165,23 +2221,23 @@ def approval_link_revoke():
 
 @bp.get('/approval-links')
 def approval_links():
-    """Müşterinin üretilmiş onay linkleri — modalın "önceki gönderimler" listesi.
-    Müşterinin yazdığı not da buradan okunur (panelde okumanın tek yolu)."""
+    """The client's generated approval links — the modal's "previous submissions" list.
+    The note the client wrote is also read from here (the only way to read it in the panel)."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     try:
         client_id = int(request.args.get('client_id', ''))
     except ValueError:
-        return jsonify(error='client_id zorunlu'), 400
+        return jsonify(error='client_id is required'), 400
     rows = (ClientApprovalLink.query.filter_by(client_id=client_id)
             .order_by(ClientApprovalLink.id.desc()).limit(20).all())
     return jsonify(links=[dict(r.to_dict(), count=len(r.upload_ids or [])) for r in rows])
 
 
-# --- özel gün kartı ---
+# --- special day card ---
 
 @bp.post('/special-card/publish')
 def special_publish():
@@ -2193,7 +2249,7 @@ def special_publish():
     if cerr:
         return cerr
     if db.session.get(SpecialDayEvent, data.get('event_id')) is None:
-        return jsonify(error='özel gün bulunamadı'), 404
+        return jsonify(error='special day not found'), 404
     week_iso = data.get('week_iso')
     sp = SpecialCardStatus.query.filter_by(
         client_id=data['client_id'], week_iso=week_iso, event_id=data['event_id']).one_or_none()
@@ -2207,7 +2263,7 @@ def special_publish():
     return jsonify(special_card=sp.to_dict())
 
 
-# --- special days (özel günler) ---
+# --- special days ---
 
 SD_EVENT_FIELDS = ('day_name', 'description', 'active', 'month', 'year', 'type',
                    'date_num', 'date_start', 'date_end', 'client_id')
@@ -2217,9 +2273,9 @@ SD_EVENT_FIELDS = ('day_name', 'description', 'active', 'month', 'year', 'type',
 def sd_events():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer', 'content_creator', 'videographer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     q = SpecialDayEvent.query.filter_by(active=True)
     if request.args.get('month'):
         q = q.filter_by(month=request.args.get('month', type=int))
@@ -2233,37 +2289,41 @@ def sd_events():
 
 @bp.get('/special-days/overview')
 def sd_overview():
-    """Takvim görünümü: ayın **müşteri tarafından SEÇİLMİŞ** özel günleri + her birini
-    hangi markaların seçtiği. Roller sd_events ile aynı.
+    """Calendar view: the month's special days **SELECTED BY CLIENTS** + which
+    brands selected each one. Same roles as sd_events.
 
-    **KURAL (2026-07-31, proje sahibi): seçilmeyen gün takvimde GÖRÜNMEZ.** Takvim
-    "önerilen günler panosu" değil, "müşterilerin bu ay içerik istediği günler"
-    panosudur. Önceki davranış ayın TÜM kataloğunu döndürüyordu; seçimi olmayanlar
-    takvimde gri çip olarak çıkıyor ve ızgarayı öneriyle doldurup gerçek taahhütleri
-    görünmez hale getiriyordu.
+    **RULE (2026-07-31, project owner): an unselected day does NOT appear on
+    the calendar.** The calendar is not a "board of suggested days", it's a
+    board of "days clients wanted content for this month". The previous
+    behavior returned the month's ENTIRE catalog; ones with no selection
+    showed up as gray chips on the calendar, filling the grid with
+    suggestions and making real commitments invisible.
 
-    Marka eşlemesi ARTIK TEK KAYNAKTAN: `SpecialDaySelection` (müşterinin seçim
-    linkinden işaretledikleri). Etkinliğin `client_id`'si (müşteriye özel gün)
-    **kendiliğinden seçim SAYILMAZ** — seçim sayfası (`special_days._events_for`)
-    genel günlerin yanında o müşteriye özel günleri de sunuyor, yani müşteriye özel
-    bir gün de işaretlenebilir; işaretlenmediyse o da "sunuldu ama seçilmedi"dir ve
-    genel günlerden farklı davranmasının bir nedeni yok.
+    Brand mapping is NOW FROM A SINGLE SOURCE: `SpecialDaySelection` (what the
+    client checked off from their selection link). An event's `client_id`
+    (a client-specific day) does **NOT automatically count as selected** —
+    the selection page (`special_days._events_for`) also offers
+    client-specific days alongside general ones, meaning a client-specific
+    day can also be checked; if it wasn't checked, it's also "offered but not
+    selected" and there's no reason for it to behave differently from general
+    days.
 
-    Yan sonuç (istenen): seçim sayfası yalnız `status='approved'` günleri sunduğu için
-    taslak (`draft`) bir gün hiç seçilemez → taklimde de çıkmaz. Katalog yönetimi
-    (taslaklar, seçilmemişler, silinmişler) LİSTE görünümünde `sd_events` ile
-    olduğu gibi duruyor — bu uç yalnız takvimi besler."""
+    Side effect (intended): since the selection page only offers
+    `status='approved'` days, a draft (`draft`) day can never be selected at
+    all → so it never appears on the calendar either. Catalog management
+    (drafts, unselected, deleted) still lives in the LIST view via
+    `sd_events` as before — this endpoint only feeds the calendar."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer', 'content_creator', 'videographer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     month = request.args.get('month', type=int)
     year = request.args.get('year', type=int)
     evs = (SpecialDayEvent.query.filter_by(active=True, month=month, year=year)
            .order_by(SpecialDayEvent.date_num, SpecialDayEvent.day_name).all())
     names = {c.id: c.name for c in Client.query.filter_by(status='active').all()}
-    # event_id -> seçen müşteri adları (seçim linkinden)
+    # event_id -> names of clients who selected it (from the selection link)
     selected = {}
     for s in SpecialDaySelection.query.filter_by(month=month, year=year).all():
         cname = names.get(s.client_id)
@@ -2275,7 +2335,7 @@ def sd_overview():
     for e in evs:
         cl = selected.get(e.id)
         if not cl:
-            continue        # seçilmeyen gün takvime GİRMEZ (bkz. docstring)
+            continue        # an unselected day does NOT enter the calendar (see docstring)
         items.append({**e.to_dict(), 'client_names': sorted(cl)})
     return jsonify(items=items)
 
@@ -2287,8 +2347,8 @@ def sd_event_create():
         return err
     data = request.get_json(silent=True) or {}
     if not (data.get('day_name') or '').strip():
-        return jsonify(error='day_name zorunlu'), 400
-    # elle-girme (management) → approved/manual kalır; AI insert'leri ORM default'la draft/ai.
+        return jsonify(error='day_name is required'), 400
+    # manual entry (management) → stays approved/manual; AI inserts stay draft/ai via the ORM default.
     e = SpecialDayEvent(active=True, status='approved', generated_by='manual')
     for f in SD_EVENT_FIELDS:
         if f in data:
@@ -2305,7 +2365,7 @@ def sd_event_update(event_id):
         return err
     e = db.session.get(SpecialDayEvent, event_id)
     if e is None:
-        return jsonify(error='özel gün bulunamadı'), 404
+        return jsonify(error='special day not found'), 404
     for f in SD_EVENT_FIELDS:
         if f in (request.get_json(silent=True) or {}):
             setattr(e, f, request.get_json()[f])
@@ -2350,13 +2410,13 @@ def sd_selection_link():
 
 @bp.post('/special-day-events/<int:event_id>/approve')
 def sd_event_approve(event_id):
-    """Taslak (AI üretimi) özel günü onayla → status='approved'."""
+    """Approve a draft (AI-generated) special day → status='approved'."""
     _, err = _require_management()
     if err:
         return err
     e = db.session.get(SpecialDayEvent, event_id)
     if e is None:
-        return jsonify(error='özel gün bulunamadı'), 404
+        return jsonify(error='special day not found'), 404
     e.status = 'approved'
     db.session.commit()
     return jsonify(event=e.to_dict())
@@ -2364,29 +2424,30 @@ def sd_event_approve(event_id):
 
 @bp.post('/special-day-events/<int:event_id>/reject')
 def sd_event_reject(event_id):
-    """Reddet → taslakta bırak (status='draft'); okuma yüzeylerinden gizli kalır."""
+    """Reject → leave it as a draft (status='draft'); stays hidden from read surfaces."""
     _, err = _require_management()
     if err:
         return err
     e = db.session.get(SpecialDayEvent, event_id)
     if e is None:
-        return jsonify(error='özel gün bulunamadı'), 404
+        return jsonify(error='special day not found'), 404
     e.status = 'draft'
     db.session.commit()
     return jsonify(event=e.to_dict())
 
 
 def _next_month_year():
-    """Bugüne göre sonraki takvim ayı (month, year) — Aralık → gelecek yıl Ocak.
-    (ai_worker._next_month ile aynı; sharing→ai_worker import döngüsel olacağından burada.)"""
+    """The next calendar month (month, year) relative to today — December → next year's January.
+    (Same as ai_worker._next_month; duplicated here since sharing→ai_worker would be a circular import.)"""
     d = date.today()
     return (1, d.year + 1) if d.month == 12 else (d.month + 1, d.year)
 
 
 @bp.post('/special-day-events/generate')
 def sd_event_generate():
-    """Özel gün botunu elle tetikle (çizim 5→3, "prompt ile ek araştırma"). Ay verilmezse
-    sonraki ay. Düşük priority (batch) + dedup (aynı ay için aktif job varsa yenisini atmaz)."""
+    """Manually trigger the special day bot (spec 5→3, "extra research via prompt"). If no
+    month is given, uses next month. Low priority (batch) + dedup (won't queue a new job
+    if one is already active for the same month)."""
     u, err = _require_management()
     if err:
         return err
@@ -2404,11 +2465,11 @@ def sd_event_generate():
     return jsonify(job=job.to_dict()), 202
 
 
-# --- müşteri caption ayarları (Faz 1b — müşteri-varsayılanı okuma/yazma) ---
+# --- client caption settings (Phase 1b — read/write client defaults) ---
 
 @bp.get('/clients/<int:client_id>/caption-settings')
 def client_caption_settings_get(client_id):
-    """Müşterinin caption üretim varsayılanlarını döner (yoksa boş obje)."""
+    """Returns the client's caption generation defaults (empty object if none)."""
     _, err = _require_management()
     if err:
         return err
@@ -2420,8 +2481,8 @@ def client_caption_settings_get(client_id):
 
 @bp.put('/clients/<int:client_id>/caption-settings')
 def client_caption_settings_put(client_id):
-    """Müşterinin caption üretim varsayılanlarını kaydeder. Yalnız bilinen şema
-    anahtarları (ai_context.CAPTION_SETTINGS_DEFAULTS) kabul edilir, gerisi düşer."""
+    """Saves the client's caption generation defaults. Only known schema keys
+    (ai_context.CAPTION_SETTINGS_DEFAULTS) are accepted, the rest are dropped."""
     _, err = _require_management()
     if err:
         return err
@@ -2435,7 +2496,7 @@ def client_caption_settings_put(client_id):
     return jsonify(caption_settings=c.caption_settings)
 
 
-# --- caption üretimi (async job → ai_worker caption handler) ---
+# --- caption generation (async job → ai_worker caption handler) ---
 
 @bp.post('/shares/<int:share_id>/caption')
 def share_caption(share_id):
@@ -2445,22 +2506,24 @@ def share_caption(share_id):
     s, e404 = _get_share_or_404(share_id)
     if e404:
         return e404
-    # Üret-anı ayarları (Faz 1b): istek gövdesindeki `settings` payload'a eklenir
-    # (verilmezse eski payload `{share_id}` korunur — geriye uyum).
+    # Generate-time settings (Phase 1b): added to the payload from the
+    # request body's `settings` (if omitted, the old `{share_id}` payload is
+    # kept — backward compatible).
     data = request.get_json(silent=True) or {}
     settings = data.get('settings')
     payload = {'share_id': s.id}
     if isinstance(settings, dict) and settings:
         payload['settings'] = settings
-    # Yeniden üret (feedback): kullanıcı geri bildirimi + beğenilmeyen önceki caption.
+    # Regenerate (feedback): user feedback + the previous disliked caption.
     feedback = (data.get('feedback') or '').strip()
     if feedback:
         payload['feedback'] = feedback[:500]
         prev = (data.get('previous_caption') or '').strip()
         if prev:
             payload['previous_caption'] = prev[:2000]
-    # dedup: normalde aynı share'e üst üste basmak yeni job üretmez (aktif job döner).
-    # Feedback'li yeniden üret HER SEFERİNDE yeni sonuç istediğinden dedup'suz (fresh job).
+    # dedup: normally hitting the same share repeatedly doesn't produce a new
+    # job (returns the active job). Regenerate-with-feedback wants a fresh
+    # result EVERY TIME, so no dedup (always a fresh job).
     dedup = None if feedback else f'caption:{s.id}'
     job = jobqueue.enqueue('caption', payload, priority=10,
                            dedup_key=dedup, created_by=u['sub'])
@@ -2469,8 +2532,8 @@ def share_caption(share_id):
 
 @bp.post('/shares/<int:share_id>/media')
 def share_media(share_id):
-    """Video için media işlemesi (kareler + opsiyonel transkript) kuyruğa al → media_worker.
-    Gövdedeki `use_transcript` (varsayılan False) yalnız video sesini whisper'a verir."""
+    """Queue media processing for a video (frames + optional transcript) → media_worker.
+    The body's `use_transcript` (default False) is the only thing that sends the video's audio to whisper."""
     u, err = _require_management()
     if err:
         return err
@@ -2492,25 +2555,27 @@ def job_status(job_id):
         return err
     job = db.session.get(Job, job_id)
     if job is None:
-        return jsonify(error='iş bulunamadı'), 404
+        return jsonify(error='job not found'), 404
     return jsonify(job=job.to_dict())
 
 
-# --- AI görsel üretimi (Faz 6, step 19) ---
-# GATE 18 kararı: üretim ai_worker.image_gen_handler'da Magnific/Freepik REST + API-key ile
-# (MCP YOK). Bu uçlar yalnız işi kuyruğa alır/listeler/onaylar. KVKK onay kapısı (spike §5)
-# hem burada (ön kontrol — kullanıcıya hızlı geri bildirim) hem handler'da (asıl kapı)
-# uygulanır. Yazma yalnız management (müşteri görselleri 3. tarafa gider).
+# --- AI image generation (Phase 6, step 19) ---
+# GATE 18 decision: generation happens in ai_worker.image_gen_handler via
+# Magnific/Freepik REST + API key (NO MCP). These endpoints only queue/list/
+# approve the job. The KVKK (Turkish data-protection law) consent gate
+# (spike §5) is applied BOTH here (a pre-check — fast feedback to the user)
+# AND in the handler (the actual gate). Writes are management-only (client
+# images go to a 3rd party).
 
 @bp.get('/image-generations')
 def image_generations_list():
-    """Müşterinin AI görsel üretimleri (en yeni önce). ?status= ile filtre (varsayılan hepsi)."""
+    """The client's AI image generations (newest first). Filter with ?status= (default all)."""
     _, err = _require_management()
     if err:
         return err
     client_id = request.args.get('client_id', type=int)
     if not client_id:
-        return jsonify(error='client_id zorunlu'), 400
+        return jsonify(error='client_id is required'), 400
     q = ImageGeneration.query.filter_by(client_id=client_id)
     status = request.args.get('status')
     if status:
@@ -2522,10 +2587,12 @@ def image_generations_list():
 
 @bp.post('/image-generations/generate')
 def image_generation_generate():
-    """AI görsel üretimini elle tetikle (müşteri + referans + ön ayar + opsiyonel onaylı
-    brief). Düşük priority (batch) + dedup (aynı müşteri için aktif job varsa yenisini
-    atmaz). Üretim kuyruktan `ai_worker.image_gen_handler` ile (REST + API-key). KVKK ön
-    kontrol: onaysız müşteride üretim BAŞLATILMAZ (asıl kapı handler'da)."""
+    """Manually trigger AI image generation (client + reference + preset +
+    optional approved brief). Low priority (batch) + dedup (won't queue a new
+    job if one is already active for the same client). Generation happens from
+    the queue via `ai_worker.image_gen_handler` (REST + API key). KVKK
+    pre-check: generation is NOT started for a client without consent (the
+    actual gate is in the handler)."""
     u, err = _require_management()
     if err:
         return err
@@ -2533,11 +2600,11 @@ def image_generation_generate():
     c, cerr = _client_or_404(data.get('client_id'))
     if cerr:
         return cerr
-    # KVKK onay kapısı ön kontrolü (spike §5) — onaysız müşteride Magnific'e gönderim yok.
+    # KVKK consent gate pre-check (spike §5) — no submission to Magnific for a client without consent.
     prof = c.brand_profile or {}
     if not prof.get('ai_image_consent'):
-        return jsonify(error='müşteri AI görsel onayı yok (KVKK). Müşteri kaydında '
-                             'ai_image_consent onayı gerekli.'), 409
+        return jsonify(error='client has not given AI image consent (data protection). '
+                             'ai_image_consent approval is required on the client record.'), 409
     payload = {'client_id': c.id, 'refs': data.get('refs') or [],
                'settings': data.get('settings') or {}, 'created_by': u['sub']}
     if data.get('brief_id') is not None:
@@ -2550,13 +2617,13 @@ def image_generation_generate():
 def _image_gen_or_err(idn):
     row = db.session.get(ImageGeneration, idn)
     if row is None:
-        return None, (jsonify(error='üretim bulunamadı'), 404)
+        return None, (jsonify(error='generation not found'), 404)
     return row, None
 
 
 @bp.post('/image-generations/<int:gen_id>/approve')
 def image_generation_approve(gen_id):
-    """Üretilen görseli onayla (status='approved'). Onay kapısı: yalnız management."""
+    """Approve a generated image (status='approved'). Approval gate: management only."""
     u, err = _require_management()
     if err:
         return err
@@ -2572,9 +2639,10 @@ def image_generation_approve(gen_id):
 
 @bp.post('/image-generations/<int:gen_id>/regenerate')
 def image_generation_regenerate(gen_id):
-    """Yeniden üret (8→4 döngü): mevcut üretimi status='rejected' işaretle ve aynı
-    müşteri/referans/ayarla YENİ image_gen job'u kuyruğa al. Dedup: aynı müşteri için
-    aktif job varsa onu döndürür (üst üste basma no-op)."""
+    """Regenerate (8→4 loop): mark the existing generation status='rejected' and
+    queue a NEW image_gen job with the same client/reference/settings. Dedup:
+    if a job is already active for the same client, returns that one (repeated
+    presses are a no-op)."""
     u, err = _require_management()
     if err:
         return err
@@ -2598,38 +2666,43 @@ def image_generation_regenerate(gen_id):
 def brief():
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     if u.get('role') not in ('management', 'designer', 'content_creator', 'videographer'):
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='not authorized'), 403
     client_id = request.args.get('client_id', type=int)
     week_iso = request.args.get('week_iso', '')
-    # Designer her müşterinin brief'ini görür (tam aksiyon — "Diğer Müşteriler" tile'ları
-    # da Brief açabilsin); content_creator/videographer atandığı müşteriyle sınırlı.
+    # The designer sees every client's brief (full action — so the "Other
+    # Clients" tiles can also open Brief); content_creator/videographer is
+    # limited to their assigned client.
     if u['role'] not in ('management', 'designer') and not _is_assigned(
             u['sub'], client_id, 'designer', 'content_creator',
             'videographer_shoot', 'videographer_edit'):
-        return jsonify(error='bu müşteriye erişiminiz yok'), 403
-    # VARSAYILAN approved-only okuma. 2026-07-30'dan beri AI brief'i doğar doğmaz 'approved'
-    # (onay kapısı kaldırıldı — bkz. models_sharing.WeeklyBrief.status), dolayısıyla bu süzgeç
-    # normal akışta hiçbir şeyi gizlemiyor. Yine de KALDI: elde kalan/geri yüklenen eski bir
-    # taslak sessizce akışa girmesin. `include_draft=1` yalnız management için ve yalnız o
-    # eski kayıtları görmeye yarar; management dışı roller gönderse bile taslak GÖRMEZ.
+        return jsonify(error="you don't have access to this client"), 403
+    # DEFAULT approved-only read. Since 2026-07-30 an AI brief is 'approved'
+    # the moment it's born (the approval gate was removed — see
+    # models_sharing.WeeklyBrief.status), so in the normal flow this filter
+    # hides nothing. It STAYS anyway: a leftover/restored old draft shouldn't
+    # silently enter the flow. `include_draft=1` is management-only and only
+    # useful for seeing those old records; even if a non-management role sends
+    # it, drafts are NEVER shown.
     q = WeeklyBrief.query.filter_by(client_id=client_id, week_iso=week_iso)
     include_draft = (u['role'] == 'management'
                      and request.args.get('include_draft', '') in ('1', 'true', 'yes'))
     if not include_draft:
         q = q.filter_by(status='approved')
-    # Sıralama COALESCE(synced_at, created_at): AI brief'te synced_at NULL — nullslast()
-    # onları eski import'un arkasına atardı; created_at'e düşerek en yeniyi seçeriz.
+    # Ordering by COALESCE(synced_at, created_at): synced_at is NULL for an AI
+    # brief — nullslast() would push those behind old imports; falling back
+    # to created_at picks the newest one.
     b = q.order_by(db.func.coalesce(WeeklyBrief.synced_at, WeeklyBrief.created_at).desc()).first()
     return jsonify(brief=b.to_dict() if b else None)
 
 
 @bp.get('/magnific-credits')
 def magnific_credits():
-    """Kalan Magnific kredisi (panel üst bar rozeti). Cache'ten okur (AppSetting) —
-    canlı MCP çağrısı YOK. Tazeleme: günde 2 kez timer + her görsel üretimi sonrası
-    (ai_worker.magnific_credits_handler). refreshing=aktif tazeleme job'u var mı."""
+    """Remaining Magnific credit (panel top-bar badge). Reads from cache
+    (AppSetting) — NO live MCP call. Refreshed: by a timer twice a day + after
+    every image generation (ai_worker.magnific_credits_handler).
+    refreshing=whether an active refresh job exists."""
     import json as _json
     _, err = _require_management()
     if err:
@@ -2648,9 +2721,10 @@ def magnific_credits():
 
 @bp.post('/image-gen/prompt-examples')
 def image_gen_prompt_examples():
-    """Brief'ten 3 örnek görsel istemi — job enqueue (claude worker'da koşar; web süreci
-    claude KOŞAMAZ — svc-agency'de CLI yok). Panel job'u pollJob ile bekler; sonuç
-    job.result.examples. Magnific kredisi harcamaz."""
+    """3 example image prompts from the brief — job enqueue (runs in the claude
+    worker; the web process CANNOT run claude — no CLI in svc-agency). The
+    panel waits on the job with pollJob; result is job.result.examples.
+    Doesn't spend Magnific credits."""
     u, err = _require_management()
     if err:
         return err
@@ -2661,10 +2735,10 @@ def image_gen_prompt_examples():
     brief = WeeklyBrief.query.filter_by(id=data.get('brief_id'),
                                         client_id=data['client_id']).first()
     if brief is None:
-        return jsonify(error='brief bulunamadı'), 404
+        return jsonify(error='brief not found'), 404
     job = jobqueue.enqueue('prompt_examples',
                            {'client_id': data['client_id'], 'brief_id': brief.id},
-                           priority=10,  # interaktif — caption'la aynı öncelik
+                           priority=10,  # interactive — same priority as caption
                            dedup_key=f'prompt_examples:{data["client_id"]}:{brief.id}',
                            created_by=u['sub'])
     return jsonify(job=job.to_dict()), 202
@@ -2672,45 +2746,47 @@ def image_gen_prompt_examples():
 
 @bp.post('/image-gen/convert-prompt')
 def image_gen_convert_prompt():
-    """İstemi İngilizce+JSON'a dönüştürme — job enqueue (claude worker'da). Panel pollJob
-    ile bekler; sonuç job.result.prompt. Magnific kredisi harcamaz."""
+    """Convert the prompt to English+JSON — job enqueue (in the claude worker).
+    The panel waits with pollJob; result is job.result.prompt. Doesn't spend
+    Magnific credits."""
     u, err = _require_management()
     if err:
         return err
     data = request.get_json(silent=True) or {}
     prompt = (data.get('prompt') or '').strip()
     if not prompt:
-        return jsonify(error='prompt zorunlu'), 400
+        return jsonify(error='prompt is required'), 400
     job = jobqueue.enqueue('prompt_convert', {'prompt': prompt[:8000]},
                            priority=10, dedup_key=None, created_by=u['sub'])
     return jsonify(job=job.to_dict()), 202
 
 
-# --- müşteri marka görselleri (logo + sabit standart görseller) ---
+# --- client brand images (logo + fixed standard images) ---
 
 ASSET_KINDS = ('logo', 'standard')
-ASSET_MAX_BYTES = 20 * 1024 * 1024  # marka görseli üst sınırı (20 MB)
+ASSET_MAX_BYTES = 20 * 1024 * 1024  # brand image size ceiling (20 MB)
 
 
 def _require_asset_read(client_id):
-    """Marka görseli OKUMA kapısı — /brief ucuyla aynı kalıp: management ve designer
-    her müşteri (tasarımcı board'ı tüm müşterileri tam aksiyonla gösterir), diğer
-    üretim rolleri yalnız atandığı müşteri. Yazma/silme management'ta kalır."""
+    """Brand image READ gate — same pattern as the /brief endpoint: management
+    and designer for every client (the designer board shows all clients with
+    full action), other production roles only their assigned client.
+    Write/delete stays management-only."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='not signed in'), 401)
     if u.get('role') not in ('management', 'designer', 'content_creator', 'videographer'):
-        return None, (jsonify(error='yetkiniz yok'), 403)
+        return None, (jsonify(error='not authorized'), 403)
     if u['role'] not in ('management', 'designer') and not _is_assigned(
             u['sub'], client_id, 'designer', 'content_creator',
             'videographer_shoot', 'videographer_edit'):
-        return None, (jsonify(error='bu müşteriye erişiminiz yok'), 403)
+        return None, (jsonify(error="you don't have access to this client"), 403)
     return u, None
 
 
 @bp.get('/clients/<int:client_id>/assets')
 def client_assets_list(client_id):
-    """Müşterinin marka görselleri (logo + standart), silinmemişler."""
+    """The client's brand images (logo + standard), non-deleted ones."""
     from models import ClientAsset
     _, err = _require_asset_read(client_id)
     if err:
@@ -2725,10 +2801,11 @@ def client_assets_list(client_id):
 
 @bp.get('/clients/<int:client_id>/assets/<int:asset_id>/download')
 def client_asset_download(client_id, asset_id):
-    """Marka görselini indir. Dosyayı SERVİS HESABIYLA Drive'dan çekip stream eder;
-    `drive.google.com/uc?export=download` linki kullanıcının kendi Drive erişimine
-    bağlı olurdu — logolar ajans hesabının klasöründe, tasarımcı/videografın izni
-    yok. Yetki böylece tamamen panelin rol kapısına taşınır."""
+    """Download a brand image. Pulls the file from Drive with the SERVICE
+    ACCOUNT and streams it; the `drive.google.com/uc?export=download` link
+    would depend on the user's own Drive access — logos live in the agency
+    account's folder, which the designer/videographer has no permission on.
+    Permissions are thus moved entirely to the panel's role gate."""
     from models import ClientAsset
     _, err = _require_asset_read(client_id)
     if err:
@@ -2736,14 +2813,14 @@ def client_asset_download(client_id, asset_id):
     a = ClientAsset.query.filter_by(id=asset_id, client_id=client_id,
                                     deleted_at=None).first()
     if a is None:
-        return jsonify(error='görsel bulunamadı'), 404
+        return jsonify(error='image not found'), 404
     if not dg.available():
-        return jsonify(error='Drive kullanılamıyor'), 503
+        return jsonify(error='Drive is unavailable'), 503
     try:
         data = dg.download_file(a.file_id)
     except dg.DriveError as e:
         log.warning('marka görseli indirilemedi asset=%s: %s', a.id, e)
-        return jsonify(error='dosya Drive\'dan indirilemedi'), 502
+        return jsonify(error='file could not be downloaded from Drive'), 502
     return send_file(io.BytesIO(data),
                      mimetype=a.mime_type or 'application/octet-stream',
                      as_attachment=True,
@@ -2752,9 +2829,9 @@ def client_asset_download(client_id, asset_id):
 
 @bp.post('/clients/<int:client_id>/assets')
 def client_asset_upload(client_id):
-    """Marka görseli yükle (multipart: kind, label?, file). Dosya Drive'da müşteri
-    kökü altındaki 'Marka Görselleri' klasörüne gider. kind='logo' tekil: yenisi
-    eskisini soft-delete eder."""
+    """Upload a brand image (multipart: kind, label?, file). The file goes into
+    the 'Marka Görselleri' folder under the client's Drive root. kind='logo' is
+    singular: the new one soft-deletes the old one."""
     from models import ClientAsset
     u, err = _require_management()
     if err:
@@ -2764,23 +2841,23 @@ def client_asset_upload(client_id):
         return cerr
     kind = (request.form.get('kind') or '').strip()
     if kind not in ASSET_KINDS:
-        return jsonify(error='kind logo|standard olmalı'), 400
+        return jsonify(error='kind must be logo or standard'), 400
     f = request.files.get('file')
     if f is None or not f.filename:
-        return jsonify(error='file zorunlu'), 400
+        return jsonify(error='file is required'), 400
     if not (f.mimetype or '').startswith('image/'):
-        return jsonify(error='yalnız görsel dosyaları (image/*) yüklenebilir'), 400
+        return jsonify(error='only image files (image/*) can be uploaded'), 400
     data = f.read()
     if len(data) > ASSET_MAX_BYTES:
-        return jsonify(error='dosya 20 MB sınırını aşıyor'), 413
+        return jsonify(error='file exceeds the 20 MB limit'), 413
     if not dg.available():
-        return jsonify(error='Drive kullanılamıyor'), 503
+        return jsonify(error='Drive is unavailable'), 503
     root = _extract_folder_id(c.drive_meta)
     if not root:
-        return jsonify(error='müşterinin Drive kök klasörü tanımsız'), 400
+        return jsonify(error="client's Drive root folder is not set"), 400
     folder = dg.ensure_subfolder(root, 'Marka Görselleri')
     meta = dg.upload_file(folder, f.filename, data, f.mimetype)
-    if kind == 'logo':  # logo tekil — önceki aktif logoları düşür
+    if kind == 'logo':  # logo is singular — drop previous active logos
         for old in ClientAsset.query.filter_by(client_id=client_id, kind='logo',
                                                deleted_at=None).all():
             old.deleted_at = utcnow()
@@ -2798,7 +2875,7 @@ def client_asset_upload(client_id):
 
 @bp.delete('/clients/<int:client_id>/assets/<int:asset_id>')
 def client_asset_delete(client_id, asset_id):
-    """Marka görselini kaldır (soft delete — Drive dosyasına dokunulmaz)."""
+    """Remove a brand image (soft delete — the Drive file is not touched)."""
     from models import ClientAsset
     _, err = _require_management()
     if err:
@@ -2806,7 +2883,7 @@ def client_asset_delete(client_id, asset_id):
     a = ClientAsset.query.filter_by(id=asset_id, client_id=client_id,
                                     deleted_at=None).first()
     if a is None:
-        return jsonify(error='görsel bulunamadı'), 404
+        return jsonify(error='image not found'), 404
     a.deleted_at = utcnow()
     db.session.commit()
     return jsonify(ok=True)
@@ -2814,7 +2891,7 @@ def client_asset_delete(client_id, asset_id):
 
 @bp.get('/image-gen/briefs')
 def image_gen_briefs():
-    """AI görsel üretim formu için müşterinin brief listesi (taslak dahil, en yeni önce)."""
+    """The client's brief list for the AI image generation form (drafts included, newest first)."""
     u, err = _require_management()
     if err:
         return err
@@ -2828,15 +2905,18 @@ def image_gen_briefs():
 
 @bp.post('/brief/generate')
 def brief_generate():
-    """Haftalık brief'i elle tetikle (BriefPage "Üret/Yeniden üret"). `{client_id, week_iso}`
-    zorunlu, `force` opsiyonel. Düşük priority (batch, fan-out ile aynı) + dedup (aynı
-    müşteri+hafta için aktif job varsa yenisini atmaz).
+    """Manually trigger the weekly brief (BriefPage "Generate/Regenerate").
+    `{client_id, week_iso}` required, `force` optional. Low priority (batch,
+    same as fan-out) + dedup (won't queue a new job if one is already active
+    for the same client+week).
 
-    `force` YOK → handler idempotent: brief zaten varsa üretmeden atlar (üretim harcanmaz).
-    `force=true` → handler var olan satırı YERİNDE ÜZERİNE YAZAR (eski metin saklanmaz).
-    Bu, onay kapısı 2026-07-30'da kaldırıldığı için tek düzeltme yolu: kötü bir brief artık
-    "onaylamayarak" durdurulamıyor, yeniden üretilerek düzeltiliyor. Dedup anahtarına `force`
-    katılır — aksi halde bekleyen normal bir job, force isteğini yutardı."""
+    NO `force` → the handler is idempotent: if a brief already exists it's
+    skipped without generating (no generation spent). `force=true` → the
+    handler OVERWRITES the existing row IN PLACE (the old text isn't kept).
+    This is the only fix path since the approval gate was removed on
+    2026-07-30: a bad brief can no longer be stopped by "not approving" it, it
+    gets fixed by regenerating. `force` is folded into the dedup key —
+    otherwise a pending normal job would swallow the force request."""
     u, err = _require_management()
     if err:
         return err
@@ -2844,7 +2924,7 @@ def brief_generate():
     client_id = data.get('client_id')
     week_iso = (data.get('week_iso') or '').strip()
     if not client_id or not week_iso:
-        return jsonify(error='client_id ve week_iso zorunlu'), 400
+        return jsonify(error='client_id and week_iso are required'), 400
     _, cerr = _client_or_404(client_id)
     if cerr:
         return cerr
@@ -2861,13 +2941,13 @@ def brief_generate():
 
 @bp.post('/brief/<int:brief_id>/approve')
 def brief_approve(brief_id):
-    """Taslak (AI üretimi) brief'i onayla → status='approved'."""
+    """Approve a draft (AI-generated) brief → status='approved'."""
     _, err = _require_management()
     if err:
         return err
     b = db.session.get(WeeklyBrief, brief_id)
     if b is None:
-        return jsonify(error='brief bulunamadı'), 404
+        return jsonify(error='brief not found'), 404
     b.status = 'approved'
     db.session.commit()
     return jsonify(brief=b.to_dict())
@@ -2875,13 +2955,13 @@ def brief_approve(brief_id):
 
 @bp.post('/brief/<int:brief_id>/reject')
 def brief_reject(brief_id):
-    """Reddet → taslakta bırak (status='draft')."""
+    """Reject → leave it as a draft (status='draft')."""
     _, err = _require_management()
     if err:
         return err
     b = db.session.get(WeeklyBrief, brief_id)
     if b is None:
-        return jsonify(error='brief bulunamadı'), 404
+        return jsonify(error='brief not found'), 404
     b.status = 'draft'
     db.session.commit()
     return jsonify(brief=b.to_dict())
@@ -2889,32 +2969,33 @@ def brief_reject(brief_id):
 
 @bp.post('/brief/<int:brief_id>/notes')
 def brief_notes(brief_id):
-    """Panel→DB writeback (Faz 3): onay/seçim/geri bildirim → `WeeklyBrief.week_notes`
-    JSONB'ye KISMİ merge. Gönderilen anahtar üzerine yazılır, gönderilmeyen korunur.
-    (Option A: DB tek otorite; vault emekli — ayrı bir vault-writeback yok.)"""
+    """Panel→DB writeback (Phase 3): approval/selection/feedback → PARTIAL merge
+    into `WeeklyBrief.week_notes` JSONB. Sent keys are overwritten,
+    unsent ones are kept. (Option A: DB is the single authority; the vault is
+    retired — there's no separate vault writeback.)"""
     _, err = _require_management()
     if err:
         return err
     b = db.session.get(WeeklyBrief, brief_id)
     if b is None:
-        return jsonify(error='brief bulunamadı'), 404
+        return jsonify(error='brief not found'), 404
     data = request.get_json(silent=True) or {}
     notes = dict(b.week_notes or {})
     for k in ('durum', 'onay_tarihi', 'secilen_fikirler', 'gun_atamasi', 'geri_bildirim'):
         if k in data:
             notes[k] = data[k]
-    b.week_notes = notes   # yeni dict ataması → JSONB değişiklik algılanır
+    b.week_notes = notes   # new dict assignment → JSONB change is detected
     db.session.commit()
     return jsonify(brief=b.to_dict())
 
 
-# --- Drive (thumbnail + sayım) ---
+# --- Drive (thumbnail + count) ---
 
 @bp.get('/thumbnail/<file_id>')
 def thumbnail(file_id):
     if not current_user():
-        return jsonify(error='oturum yok'), 401
-    # Lokal önizleme (ilk 21 gün) — Drive'a hiç gitmeden servis et.
+        return jsonify(error='not signed in'), 401
+    # Local preview (first 21 days) — served without ever hitting Drive.
     prev = media_store.find_preview(file_id)
     if prev:
         try:
@@ -2922,7 +3003,7 @@ def thumbnail(file_id):
             resp.headers['Cache-Control'] = 'private, max-age=86400'
             return resp
         except OSError:
-            pass  # lokal okunamadıysa Drive yoluna düş
+            pass  # fall through to Drive if the local file can't be read
     width = min(int(request.args.get('w', 400) or 400), 1024)
     cached = db.session.get(DriveThumbnail, (file_id, width))
     if cached:
@@ -2944,14 +3025,16 @@ def thumbnail(file_id):
 
 @bp.get('/media/<file_id>')
 def media_file(file_id):
-    """Lokal orijinal (21 günlük pencere) — Range destekli (video seek).
+    """Local original (21-day window) — Range-enabled (video seek).
 
-    `?dl=1` → tarayıcıya indirme (attachment); `&name=` indirilecek dosya adı
-    (Türkçe korunur, werkzeug RFC5987 ile encode eder). İndirme isteğinde lokal
-    kopya süresi dolmuşsa orijinal Drive'dan çekilir — tam boyut her zaman iner.
-    İndirme dışı (inline/video) istekte lokal yoksa 404 → frontend Drive'a düşer."""
+    `?dl=1` → download to the browser (attachment); `&name=` the file name to
+    download as (Turkish is preserved, werkzeug encodes it via RFC5987). On a
+    download request, if the local copy has expired, the original is pulled
+    from Drive — the full size always comes through. For non-download
+    (inline/video) requests, if there's no local copy, 404 → the frontend
+    falls back to Drive."""
     if not current_user():
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     dl = request.args.get('dl') == '1'
     name = request.args.get('name') or file_id
     path = media_store.find_original(file_id)
@@ -2965,7 +3048,7 @@ def media_file(file_id):
             return resp
         except OSError:
             return '', 404
-    # Lokal yok (21 gün doldu): yalnız indirme isteğinde Drive'dan tam boyut çek.
+    # No local copy (21 days expired): only pull the full size from Drive on a download request.
     if dl and dg.available():
         try:
             data = dg.download_file(file_id)
@@ -2979,8 +3062,9 @@ def media_file(file_id):
 
 @bp.get('/drive-counts')
 def drive_counts():
-    """Tüm aktif müşterilerin o haftaki Drive dosya sayısı — TEK istek (board açılışta
-    ~40 eşzamanlı yerine). Drive sayımları thread pool ile paralel, 60s cache."""
+    """Drive file count for that week across all active clients — a SINGLE
+    request (instead of ~40 concurrent ones on board load). Drive counts run
+    in parallel via a thread pool, 60s cache."""
     _, err = _require_management()
     if err:
         return err
@@ -3006,17 +3090,17 @@ def drive_counts():
 
 @bp.get('/drive-count/<int:client_id>')
 def drive_count(client_id):
-    """Müşterinin o haftaki Drive klasöründeki dosya sayısı (lazy, cache'li).
-    None = klasör yok ya da Drive'a ulaşılamadı."""
+    """File count in the client's Drive folder for that week (lazy, cached).
+    None = no folder or Drive was unreachable."""
     if not current_user():
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not signed in'), 401
     week_iso = request.args.get('week_iso', '')
     key = (client_id, week_iso)
     hit = _count_cache.get(key)
     if hit and (time.monotonic() - hit[1]) < _COUNT_TTL:
         return jsonify(count=hit[0])
-    # Board açılışta ~40 eşzamanlı istek atar; herhangi bir hata (DB/Drive) 500
-    # yerine null dönsün (rozet gizlenir), sayfa bozulmasın.
+    # The board fires ~40 concurrent requests on load; any error (DB/Drive)
+    # should return null instead of 500 (badge is hidden), so the page doesn't break.
     try:
         wn = _week_number(week_iso)
         wf = ClientWeekFolder.query.filter_by(client_id=client_id, week_number=wn).first() if wn else None
@@ -3043,20 +3127,21 @@ def special_unpublish():
     return jsonify(ok=True)
 
 
-# --- örnek (referans) hesaplar (2026-08-07) ---------------------------------
+# --- reference accounts (2026-08-07) -----------------------------------------
 
-# Instagram handle: harf/rakam/nokta/alt çizgi, en fazla 30. **En az bir harf ya da
-# rakam ŞART** — yoksa '..' gibi bir dizi geçerli sayılıyor ve yapıştırılan
-# '../../etc' handle'a dönüşüyordu (testte yakalandı).
+# Instagram handle: letters/digits/dot/underscore, max 30. **At least one
+# letter or digit is REQUIRED** — otherwise a sequence like '..' would count
+# as valid and a pasted '../../etc' would turn into a handle (caught in testing).
 REFERENCE_HANDLE_RE = re.compile(r'^(?=.*[A-Za-z0-9])[A-Za-z0-9._]{1,30}$')
 
 
 def _handle_temizle(ham):
-    """Kullanıcının yapıştırdığı her şeyi düz handle'a indirger.
+    """Reduces whatever the user pasted down to a plain handle.
 
-    Girdi tek biçimde gelmiyor: '@ad', 'instagram.com/ad', tam URL, sondaki '/'.
-    Tek bir kanonik biçim tutulmazsa aynı hesap iki farklı satır olarak eklenir
-    ve UNIQUE kısıtı işe yaramaz."""
+    Input doesn't come in one shape: '@name', 'instagram.com/name', a full
+    URL, a trailing '/'. If a single canonical form isn't enforced, the same
+    account gets added as two different rows and the UNIQUE constraint
+    becomes useless."""
     s = (ham or '').strip()
     s = re.sub(r'^https?://', '', s, flags=re.I)
     s = re.sub(r'^(www\.)?instagram\.com/', '', s, flags=re.I)
@@ -3066,12 +3151,13 @@ def _handle_temizle(ham):
 
 @bp.get('/clients/<int:client_id>/reference-accounts')
 def reference_accounts_list(client_id):
-    """Müşterinin örnek hesapları.
+    """The client's reference accounts.
 
-    Üretim rolleri YALNIZ onaylananları görür (marka rehberindeki liste bu);
-    yönetim hepsini görür — aday listesini o inceleyip karara bağlıyor."""
+    Production roles see ONLY approved ones (that's the list in the brand
+    guide); management sees all of them — they review the candidate list and
+    make the decision."""
     from models_reference import ClientReferenceAccount
-    u, err = _require_asset_read(client_id)      # marka rehberiyle aynı okuma kapısı
+    u, err = _require_asset_read(client_id)      # same read gate as the brand guide
     if err:
         return err
     _, cerr = _client_or_404(client_id)
@@ -3088,7 +3174,7 @@ def reference_accounts_list(client_id):
 
 @bp.post('/clients/<int:client_id>/reference-accounts')
 def reference_account_add(client_id):
-    """Elle örnek hesap ekle (management). Aynı handle ikinci kez eklenemez."""
+    """Manually add a reference account (management). The same handle can't be added twice."""
     from models_reference import ClientReferenceAccount
     u, err = _require_management()
     if err:
@@ -3099,19 +3185,20 @@ def reference_account_add(client_id):
     data = request.get_json(silent=True) or {}
     handle = _handle_temizle(data.get('handle'))
     if not REFERENCE_HANDLE_RE.match(handle or ''):
-        return jsonify(error='geçerli bir Instagram kullanıcı adı girin'), 400
+        return jsonify(error='enter a valid Instagram username'), 400
     mevcut = ClientReferenceAccount.query.filter_by(
         client_id=client_id, handle=handle).first()
     if mevcut:
-        return jsonify(error=f'@{handle} bu müşteride zaten var',
+        return jsonify(error=f'@{handle} already exists for this client',
                        account=mevcut.to_dict()), 409
     acc = ClientReferenceAccount(
         client_id=client_id, handle=handle,
         title=(data.get('title') or '').strip()[:200] or None,
         note=(data.get('note') or '').strip() or None,
         source='manual', added_by=u['sub'],
-        # Elle eklenen hesap zaten yönetimin seçimi — ayrıca onaylatmak
-        # gereksiz bir adım olurdu. Onay kapısı derlenen adaylar için var.
+        # A manually added account is already management's choice — making it
+        # go through approval too would be an unnecessary step. The approval
+        # gate exists for compiled candidates.
         status='approved', decided_by=u['sub'], decided_at=utcnow())
     db.session.add(acc)
     db.session.commit()
@@ -3120,18 +3207,18 @@ def reference_account_add(client_id):
 
 @bp.patch('/clients/<int:client_id>/reference-accounts/<int:acc_id>')
 def reference_account_update(client_id, acc_id):
-    """Karar ver (approved/rejected) ya da notu düzelt — management."""
+    """Make a decision (approved/rejected) or edit the note — management."""
     from models_reference import ClientReferenceAccount, REFERENCE_STATUSES
     u, err = _require_management()
     if err:
         return err
     acc = ClientReferenceAccount.query.filter_by(id=acc_id, client_id=client_id).first()
     if acc is None:
-        return jsonify(error='hesap bulunamadı'), 404
+        return jsonify(error='account not found'), 404
     data = request.get_json(silent=True) or {}
     if 'status' in data:
         if data['status'] not in REFERENCE_STATUSES:
-            return jsonify(error='geçersiz durum'), 400
+            return jsonify(error='invalid status'), 400
         acc.status = data['status']
         acc.decided_by = u['sub']
         acc.decided_at = utcnow()
@@ -3151,7 +3238,7 @@ def reference_account_delete(client_id, acc_id):
         return err
     acc = ClientReferenceAccount.query.filter_by(id=acc_id, client_id=client_id).first()
     if acc is None:
-        return jsonify(error='hesap bulunamadı'), 404
+        return jsonify(error='account not found'), 404
     db.session.delete(acc)
     db.session.commit()
     return jsonify(ok=True)

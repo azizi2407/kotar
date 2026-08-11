@@ -1,4 +1,4 @@
-// Aylık rapor veri hook'ları (2026-08-07). Sözleşme: reports.py.
+// Monthly report data hooks (2026-08-07). Contract: reports.py.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiGet, apiJson, apiUpload } from "./api"
@@ -8,7 +8,7 @@ export interface ReportRow {
   client_id: number | null
   client_name: string
   period: string
-  /** Paylaşım açıkken adres; iptal edilmişse null (kayıt durur, link ölür). */
+  /** Address while sharing is on; null if revoked (the record stays, the link dies). */
   token: string | null
   revoked: boolean
   created_at: string | null
@@ -44,9 +44,9 @@ export function useReportPeriods() {
   })
 }
 
-// CSV'ler multipart gider. `paths` = tarayıcının webkitRelativePath'i (klasör
-// seçiminde dolu, tek tek dosya seçiminde dosya adı) — backend müşteri ayrımını
-// buradan yapıyor, dosya sırasıyla birebir hizalı olmak ZORUNDA.
+// CSVs go as multipart. `paths` = the browser's webkitRelativePath (populated on
+// folder selection, just the file name on individual file selection) — the backend derives
+// the client split from this, so it MUST stay perfectly aligned with the file order.
 export function useGenerateReports() {
   const qc = useQueryClient()
   return useMutation<GenerateResult, Error,
@@ -99,17 +99,22 @@ export function reportPublicUrl(token: string) {
   return `${window.location.origin}/rapor/${token}`
 }
 
-// "2026-07" → "Temmuz 2026"
-const AYLAR = ["", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+// "2026-07" → "Temmuz 2026" (tr) / "July 2026" (en). Since this file can't use a
+// React hook, `lang` is taken directly as a parameter — the calling component
+// passes in the `lang` it got from `useI18n()`.
+const AYLAR_TR = ["", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
   "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+const AYLAR_EN = ["", "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"]
 
-export function periodLabel(period: string) {
+export function periodLabel(period: string, lang: "tr" | "en" = "tr") {
   const [y, m] = period.split("-")
-  return `${AYLAR[Number(m)] ?? m} ${y}`
+  const aylar = lang === "en" ? AYLAR_EN : AYLAR_TR
+  return `${aylar[Number(m)] ?? m} ${y}`
 }
 
-// Varsayılan dönem GEÇEN AY: rapor ay bittikten sonra hazırlanıyor, içinde
-// bulunulan ayı önermek neredeyse her seferinde elle düzeltme demek olurdu.
+// Default period is LAST MONTH: the report is prepared after the month ends, so
+// suggesting the current month would mean a manual correction almost every time.
 export function gecenAy() {
   const d = new Date()
   d.setDate(1)

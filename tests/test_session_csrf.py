@@ -1,4 +1,4 @@
-"""/api/session (oturum + CSRF token) ve CSRF zorlaması testleri."""
+"""/api/session (session + CSRF token) and CSRF enforcement tests."""
 from conftest import DESIGNER, MANAGER, login_as
 
 
@@ -25,7 +25,7 @@ def test_csrf_ayni_oturumda_sabit(client):
 
 def test_mutasyon_csrf_token_olmadan_403(client):
     login_as(client, MANAGER)
-    client.get("/api/session")  # token üretilsin
+    client.get("/api/session")  # let the token be generated
     r = client.post("/api/clients", json={"name": "Test"})
     assert r.status_code == 403
 
@@ -39,7 +39,7 @@ def test_mutasyon_yanlis_csrf_token_403(client):
 
 
 def csrf_headers(client):
-    """Geçerli CSRF header'ı üret (testlerde ortak)."""
+    """Generate a valid CSRF header (shared across tests)."""
     return {"X-CSRFToken": client.get("/api/session").get_json()["csrf"]}
 
 

@@ -1,7 +1,7 @@
-// Sağ tuş menüsü — node / seçim / boş zemin için üç bağlam.
+// Right-click menu — three contexts: node / selection / empty pane.
 //
-// Konumlandırma React Flow'un kendi örneğindeki desen: menü viewport'un dışına
-// taşmasın diye sağ/alt kenara yakınsa ters köşeden hizalanır.
+// Positioning follows the pattern from React Flow's own example: to keep the menu
+// from overflowing the viewport, it's aligned from the opposite corner when near the right/bottom edge.
 import { type ReactNode } from "react"
 
 import { cn } from "@/lib/utils"
@@ -10,7 +10,7 @@ export interface MenuPos {
   top?: number; left?: number; right?: number; bottom?: number
 }
 
-/** Tıklama noktasından, panelin kenarına taşmayan bir konum üretir. */
+/** Produces a position from the click point that doesn't overflow the panel's edge. */
 export function menuPosition(e: { clientX: number; clientY: number },
                              pane: DOMRect, w = 200, h = 260): MenuPos {
   const x = e.clientX - pane.left
@@ -54,8 +54,8 @@ export function ContextMenu({ pos, onClose, children }: {
   children: ReactNode
 }) {
   return (
-    // Dışarı tıklayınca kapanması için tam ekran şeffaf yakalayıcı; RF'in
-    // onPaneClick'i menü ÜZERİNDEKİ tıklamada da tetiklendiği için tek başına yetmiyor.
+    // A full-screen transparent catcher so it closes on an outside click; RF's
+    // onPaneClick also fires on a click ON TOP OF the menu, so it isn't sufficient on its own.
     <div className="absolute inset-0 z-50" onClick={onClose} onContextMenu={(e) => {
       e.preventDefault(); onClose()
     }}>

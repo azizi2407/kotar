@@ -1,10 +1,11 @@
-"""Yerel kimlik doğrulama (AUTH_MODE=local) — e-posta/parola ile giriş.
+"""Local authentication (AUTH_MODE=local) — email/password login.
 
-AUTH_MODE=oidc iken bu tablo kullanılmaz (kimlik dış OIDC sağlayıcısına delege
-edilir); tablo yine de `create_all` ile açılır, boş kalır. Parola werkzeug.security
-ile hash'lenir (pbkdf2:sha256) — repoda/DB'de düz metin parola hiçbir zaman
-saklanmaz. `role` alanı `UserRef.role` ile aynı sözleşmeyi paylaşır (management/
-designer/videographer/content_creator/pending).
+When AUTH_MODE=oidc, this table isn't used (identity is delegated to an
+external OIDC provider); the table still gets created via `create_all` but
+stays empty. Passwords are hashed with werkzeug.security (pbkdf2:sha256) —
+a plaintext password is never stored in the repo/DB. The `role` field shares
+the same contract as `UserRef.role` (management/designer/videographer/
+content_creator/pending).
 """
 import secrets
 
@@ -30,7 +31,7 @@ class LocalUser(db.Model):
         from models import iso
         return {'id': self.id, 'email': self.email, 'name': self.name,
                 'role': self.role, 'status': self.status,
-                'linked': True,  # yerel hesap: oluşturulduğu andan itibaren parolayla girilebilir
+                'linked': True,  # local account: can log in with a password from the moment it's created
                 'last_login': iso(self.last_login_at), 'created_at': iso(self.created_at)}
 
     def set_password(self, raw):
@@ -41,6 +42,7 @@ class LocalUser(db.Model):
 
 
 def generate_temp_password():
-    """Yönetici yeni kullanıcı açtığında/parola sıfırladığında üretilen geçici
-    parola — yalnız o API yanıtında bir kez döner, DB'ye hash'i yazılır."""
+    """Temporary password generated when an admin creates a new user /
+    resets a password — returned only once, in that API response; only its
+    hash is written to the DB."""
     return secrets.token_urlsafe(9)

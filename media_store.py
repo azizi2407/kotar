@@ -1,9 +1,10 @@
-"""Lokal medya deposu — panele yüklenen dosyaların 21 günlük sunucu kopyası.
+"""Local media store — a 21-day server copy of files uploaded to the panel.
 
-Drive kanonik kaynaktır; burası yalnız hızlandırma katmanıdır (Sharing Board +
-müşteri onay sayfası ilk 3 hafta medyayı buradan servis eder). Kayıt defteri
-yok: "sunucuda var mı?" = dosya diskte var mı; süre ölçütü dosya mtime'ı.
-Dizin: $MEDIA_STORE_DIR (varsayılan <repo>/data/media) altında originals/ + previews/.
+Drive is the canonical source; this is only an acceleration layer (Sharing Board +
+the client approval page serve media from here for the first 3 weeks). No
+registry: "does it exist on the server?" = does the file exist on disk; age is
+measured by file mtime. Directory: originals/ + previews/ under
+$MEDIA_STORE_DIR (default <repo>/data/media).
 """
 import glob
 import io
@@ -20,15 +21,15 @@ log = logging.getLogger(__name__)
 
 RETENTION_DAYS = 21
 PREVIEW_MAX_PX = 800
-_ID_RE = re.compile(r'^[A-Za-z0-9_-]+$')      # Drive file_id alfabesi
+_ID_RE = re.compile(r'^[A-Za-z0-9_-]+$')      # Drive file_id alphabet
 _EXT_RE = re.compile(r'^\.[a-z0-9]{1,8}$')
 
-# media.py ile AYNI env değişkeni; oradan import etmiyoruz — depo katmanının
-# işleme katmanına bağımlı olmaması testi de hafif tutuyor.
+# The SAME env variable as media.py; we don't import it from there — keeps the
+# store layer independent of the processing layer, which also keeps testing light.
 FFMPEG = os.environ.get('FFMPEG_BIN', 'ffmpeg')
-# `-c copy` remux I/O bağımlı (150 MB ≈ 0.2 sn); bu tavan yalnız takılmaya karşı.
+# `-c copy` remux is I/O bound (150 MB ≈ 0.2s); this cap is only against hangs.
 FASTSTART_TIMEOUT = 120
-# `+faststart` yalnız ISO-BMFF konteynerinde anlamlı.
+# `+faststart` is meaningful only in an ISO-BMFF container.
 FASTSTART_EXTS = ('.mp4', '.mov', '.m4v')
 
 
@@ -52,9 +53,10 @@ def _ext_for(filename, mime):
 
 
 def make_preview(source, max_px=PREVIEW_MAX_PX):
-    """Görselden en fazla max_px kenarlı JPEG önizleme üret.
+    """Generate a JPEG preview from the image with edges of at most max_px.
 
-    `source`: bytes veya disk yolu (PIL yoldan akışlı okur — RAM'e tüm dosya girmez)."""
+    `source`: bytes or a disk path (PIL reads streamed from a path — the whole
+    file doesn't go into RAM)."""
     from PIL import Image
     img = Image.open(io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source)
     img.thumbnail((max_px, max_px))
@@ -66,37 +68,38 @@ def make_preview(source, max_px=PREVIEW_MAX_PX):
 
 
 def _write_preview(source, file_id):
-    """Önizlemeyi best-effort yaz (bozuk görselde sessizce vazgeç)."""
+    """Write the preview best-effort (silently give up on a corrupt image)."""
     try:
         prev = make_preview(source)
         with open(os.path.join(_dir('previews'), file_id + '.jpg'), 'wb') as f:
             f.write(prev)
-    except Exception:  # noqa: BLE001 — bozuk görsel vb.; orijinal yeterli
+    except Exception:  # noqa: BLE001 — corrupt image etc.; the original is enough
         log.warning('önizleme üretilemedi: %s', file_id)
 
 
 def _faststart(path, mime):
-    """Videoda `moov` atom'unu dosyanın BAŞINA taşı (kayıpsız remux).
+    """Move the `moov` atom to the START of the file for video (lossless remux).
 
-    NEDEN: telefon/kamera çıktısı mp4'lerde `moov` (süre, codec, kare indeksi)
-    dosyanın SONUNDA yazılır — kaydı bitirmeden boyutu bilinmediği için. Tarayıcı
-    oynatmaya başlamak için `moov`'u okumak zorunda; sonda olunca mobil Chrome
-    videoyu başlatamıyordu (2026-08-01, Android). İndirme etkilenmiyordu — o
-    baytları sırayla alır, `moov`'u beklemez; "iniyor ama oynamıyor" tablosu
-    tam olarak bundandı.
+    WHY: in mp4s produced by phones/cameras, `moov` (duration, codec, frame index)
+    is written at the END of the file — because the size isn't known until the
+    recording finishes. The browser needs to read `moov` to start playback; when
+    it's at the end, mobile Chrome couldn't start the video (2026-08-01, Android).
+    Downloading wasn't affected — it takes bytes sequentially and doesn't wait for
+    `moov`; that's exactly why we saw the "downloads but doesn't play" pattern.
 
-    `-c copy`: yalnız konteyner yeniden yazılır, kare/ses DOKUNULMAZ → kayıpsız
-    ve hızlı (150 MB ≈ 0.2 sn). Zaten önde olan dosyada da güvenli (idempotent).
+    `-c copy`: only the container is rewritten, frames/audio are NOT TOUCHED →
+    lossless and fast (150 MB ≈ 0.2s). Also safe (idempotent) on a file that's
+    already faststart.
 
-    Best-effort: ffmpeg yoksa/çözemezse orijinal olduğu gibi kalır — yükleme
-    kritik, remux değil. Başarıysa True."""
+    Best-effort: if ffmpeg is missing/fails, the original stays as-is — the upload
+    is critical, not the remux. Returns True on success."""
     if not (mime or '').startswith('video/'):
         return False
     ext = os.path.splitext(path)[1].lower()
     if ext not in FASTSTART_EXTS:
         return False
-    # Geçici ad NOKTA ile başlar → `find_original` glob'u (`<file_id>.*`) onu
-    # ASLA yakalamaz; yarım kalmış remux yanlışlıkla servis edilemez.
+    # The temp name starts with a DOT → `find_original`'s glob (`<file_id>.*`)
+    # NEVER matches it; a half-finished remux can't be accidentally served.
     tmp = os.path.join(os.path.dirname(path), f'.fstmp-{uuid.uuid4().hex}{ext}')
     try:
         r = subprocess.run(
@@ -104,7 +107,7 @@ def _faststart(path, mime):
              '-c', 'copy', '-movflags', '+faststart', tmp],
             capture_output=True, timeout=FASTSTART_TIMEOUT)
         if r.returncode == 0 and os.path.getsize(tmp) > 0:
-            os.replace(tmp, path)      # aynı dizin → atomik
+            os.replace(tmp, path)      # same directory → atomic
             return True
         log.warning('faststart remux başarısız (%s): %s', os.path.basename(path),
                     (r.stderr or b'')[:200].decode('utf-8', 'replace'))
@@ -120,9 +123,9 @@ def _faststart(path, mime):
 
 
 def save_original(file_id, data, mime, filename=None):
-    """Drive yüklemesi SONRASI lokal kopya + (görselse) önizleme yaz.
+    """Write a local copy + (if it's an image) a preview AFTER the Drive upload.
 
-    Best-effort: hata yüklemeyi geçersiz kılmaz, yalnız log'lanır."""
+    Best-effort: an error doesn't invalidate the upload, it's only logged."""
     if not _safe_id(file_id):
         return False
     try:
@@ -139,13 +142,14 @@ def save_original(file_id, data, mime, filename=None):
     return True
 
 
-# --- Akış tabanlı yol (büyük dosyalar: RAM'e almadan diskten diske) ---
+# --- Stream-based path (large files: disk-to-disk without loading into RAM) ---
 
 def stage(stream, chunk=8 * 1024 * 1024):
-    """İstek akışını originals/ altına GEÇİCİ dosyaya kopyala; yolunu döndür.
+    """Copy the request stream into a TEMPORARY file under originals/; return its path.
 
-    Drive yüklemesi bu dosyadan (seek'lenebilir) yapılır; başarıda `commit`,
-    hatada `discard` çağrılır. Yazılamazsa None (çağıran akıştan devam eder)."""
+    The Drive upload is done from this file (seekable); `commit` is called on
+    success, `discard` on error. Returns None if it can't be written (the caller
+    continues from the stream)."""
     tmp = os.path.join(_dir('originals'), f'.tmp-{uuid.uuid4().hex}')
     try:
         with open(tmp, 'wb') as f:
@@ -158,7 +162,7 @@ def stage(stream, chunk=8 * 1024 * 1024):
 
 
 def commit(tmp_path, file_id, mime, filename=None):
-    """Drive başarılı → geçiciyi kalıcı adına al, görselse önizleme üret."""
+    """Drive succeeded → move the temp file to its permanent name, generate a preview if it's an image."""
     if not tmp_path:
         return False
     if not _safe_id(file_id):
@@ -174,14 +178,14 @@ def commit(tmp_path, file_id, mime, filename=None):
     if (mime or '').startswith('image/'):
         _write_preview(final, file_id)
     else:
-        # Videolar bu yoldan gelir (akış tabanlı); `/m/<id>` sayfasının mobilde
-        # oynayabilmesi buna bağlı — bkz. `_faststart`.
+        # Videos come through this path (stream-based); the `/m/<id>` page playing
+        # on mobile depends on this — see `_faststart`.
         _faststart(final, mime)
     return True
 
 
 def discard(tmp_path):
-    """Geçici dosyayı sil (yoksa sessiz)."""
+    """Delete the temp file (silent if missing)."""
     if not tmp_path:
         return
     try:
@@ -191,7 +195,7 @@ def discard(tmp_path):
 
 
 def find_original(file_id):
-    """Orijinalin disk yolu; yoksa/geçersiz id'de None."""
+    """Disk path of the original; None if missing/invalid id."""
     if not _safe_id(file_id):
         return None
     hits = glob.glob(os.path.join(_dir('originals'), file_id + '.*'))
@@ -210,31 +214,32 @@ def has_original(file_id):
 
 
 def web_path(file_id):
-    """Web türevinin hedef yolu (`web/<file_id>.mp4`); geçersiz id'de None.
+    """Target path of the web variant (`web/<file_id>.mp4`); None for an invalid id.
 
-    Türev DAİMA .mp4/H.264'tür (`media.make_web_variant`), o yüzden uzantı sabit —
-    `find_original`'ın glob'una gerek yok."""
+    The variant is ALWAYS .mp4/H.264 (`media.make_web_variant`), so the extension
+    is fixed — no need for `find_original`'s glob."""
     if not _safe_id(file_id):
         return None
     return os.path.join(_dir('web'), file_id + '.mp4')
 
 
 def find_web(file_id):
-    """Web türevinin yolu; yoksa None.
+    """Path of the web variant; None if missing.
 
-    Türev, orijinali tarayıcıda oynamayan videolar için üretilir (4K/HEVC/10-bit);
-    `/m/<file_id>` sayfası ONU oynatır, "İndir" düğmesi orijinali verir."""
+    The variant is generated for videos whose original doesn't play in the browser
+    (4K/HEVC/10-bit); the `/m/<file_id>` page plays IT, the "Download" button gives
+    the original."""
     p = web_path(file_id)
     return p if p and os.path.exists(p) else None
 
 
 def remove(file_id):
-    """Bir dosyanın lokal kopyalarını (orijinal + önizleme + web türevi) HEMEN sil.
+    """IMMEDIATELY delete a file's local copies (original + preview + web variant).
 
-    `cleanup` yaşa göre çalışır; bu ise tekil ve anlıktır — kalıcı silinen bir
-    yükleme 21 gün boyunca diskte ve `/m/<file_id>` üzerinden erişilebilir
-    kalmasın diye (2026-07-31 videograf "Sil" düğmesi). Silinen dosya sayısını
-    döner; yoksa 0 (hata değil)."""
+    `cleanup` runs by age; this is single and instant — so a permanently-deleted
+    upload doesn't stay accessible on disk and via `/m/<file_id>` for 21 days
+    (2026-07-31 videographer "Delete" button). Returns the number of deleted
+    files; 0 if none (not an error)."""
     removed = 0
     for path in (find_original(file_id), find_preview(file_id), find_web(file_id)):
         if not path:
@@ -248,15 +253,17 @@ def remove(file_id):
 
 
 def cleanup(max_age_days=RETENTION_DAYS):
-    """Süresi (mtime) dolan lokal kopyaları sil; silinen dosya sayısını döner.
+    """Delete local copies that have expired (by mtime); returns the number deleted.
 
-    Yarım kalmış `.tmp-*` dosyaları (çöken istek artığı) 1 günden eskiyse silinir."""
+    Half-finished `.tmp-*` files (leftovers from a crashed request) are deleted
+    once older than 1 day."""
     now = time.time()
     cutoff = now - max_age_days * 86400
     tmp_cutoff = now - 86400
     removed = 0
-    # 'web': türevler de orijinalle aynı 21 günlük pencereye tabi — orijinal
-    # gidince türevi tutmanın anlamı yok (kaynağı Drive'dan yeniden üretilir).
+    # 'web': variants are also subject to the same 21-day window as the original —
+    # keeping the variant once the original is gone is pointless (it's regenerated
+    # from the Drive source).
     for kind in ('originals', 'previews', 'web'):
         d = _dir(kind)
         for name in os.listdir(d):

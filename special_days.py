@@ -1,8 +1,9 @@
-"""Public özel gün seçim sayfası (/special-days/<token>).
+"""Public special-day selection page (/special-days/<token>).
 
-Auth YOK: token = yetki. Müşteri, ayının özel günlerini (global + kendine özel)
-görür ve içerik üretilmesini istediklerini seçer. Seçim `selected_event_ids`'e
-yazılır (yönetim board'ında özel kart olarak kullanılır). noindex, mobil.
+NO auth: token = authorization. The client sees the month's special days
+(global + their own) and picks which ones they want content produced for. The
+selection is written to `selected_event_ids` (used as a special card on the
+management board). noindex, mobile.
 """
 from flask import Blueprint, Response, abort, jsonify, request
 
@@ -15,8 +16,8 @@ bp = Blueprint('special_days', __name__)
 
 
 def _sel_or_404(token):
-    # Eski veride aynı token birden çok selection'da geçebiliyor (tutarsızlık);
-    # ay/yıl'ı dolu, en yeni kaydı tercih et.
+    # In old data the same token can appear on multiple selections (inconsistency);
+    # prefer the newest record with month/year populated.
     sel = (SpecialDaySelection.query.filter_by(token=token)
            .order_by(SpecialDaySelection.month.desc().nullslast(),
                      SpecialDaySelection.id.desc()).first())
@@ -26,11 +27,11 @@ def _sel_or_404(token):
 
 
 def _events_for(sel):
-    """Seçimin ay/yılındaki global + müşteriye özel etkinlikler.
+    """Global + client-specific events in the selection's month/year.
 
-    `active=False` = silinmiş (soft delete) — müşteriye gösterilmez.
-    Onay kapısı: bu uç MÜŞTERİ-FACING (public seçim sayfası) — yalnız `approved`
-    etkinlik döner; onaysız/taslak (AI üretimi) özel gün müşteriye asla sızmaz.
+    `active=False` = deleted (soft delete) — not shown to the client.
+    Approval gate: this endpoint is CLIENT-FACING (public selection page) — only
+    `approved` events are returned; unapproved/draft (AI-generated) special days never leak to the client.
     """
     q = SpecialDayEvent.query.filter_by(month=sel.month, year=sel.year, active=True,
                                         status='approved')
@@ -54,7 +55,7 @@ def events(token):
 def select(token):
     sel = _sel_or_404(token)
     if not ratelimit.hit(f'sd:{token}', 60, 60):
-        return jsonify(error='çok fazla istek, biraz bekleyin'), 429
+        return jsonify(error='too many requests, please wait a moment'), 429
     incoming = (request.get_json(silent=True) or {}).get('event_ids', [])
     valid = {e.id for e in _events_for(sel)}
     sel.selected_event_ids = [i for i in incoming if i in valid]
@@ -74,7 +75,7 @@ _PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
-<title>Özel Günler</title>
+<title>Special Days</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet">
@@ -154,31 +155,31 @@ _PAGE = """<!doctype html>
 </style></head>
 <body>
   <header class="page-header">
-    <div class="logo-lockup"><img class="logo-img" src="/panel/kotar-logo.png" alt="Kotar — dijital medya ajansı"></div>
+    <div class="logo-lockup"><img class="logo-img" src="/panel/kotar-logo.png" alt="Kotar — digital media agency"></div>
     <p class="header-eyebrow" id="eyebrow"></p>
-    <h1 class="header-title">Özel<br><em>Günler</em></h1>
+    <h1 class="header-title">Special<br><em>Days</em></h1>
     <p class="header-client" id="client"></p>
-    <p class="header-desc" id="desc">İçerik üretmemizi istediğiniz özel günleri aşağıdan işaretleyin. Seçiminizi kaydedince ekibimiz planlamaya başlar.</p>
+    <p class="header-desc" id="desc">Mark the special days below that you'd like us to create content for. Once you save your selection, our team will start planning.</p>
   </header>
   <div class="divider"><div class="divider-line"></div></div>
   <div class="counter-chip"><div class="counter-inner"><div class="counter-dot"></div>
-    <p class="counter-text"><span id="countNum">0</span> gün seçildi</p></div></div>
-  <div class="cards-container" id="cards"><div class="empty-state">Yükleniyor…</div></div>
+    <p class="counter-text"><span id="countNum">0</span> days selected</p></div></div>
+  <div class="cards-container" id="cards"><div class="empty-state">Loading…</div></div>
   <div class="save-bar">
     <button class="save-btn" id="saveBtn" type="button">
-      <div class="spinner"></div><span class="btn-text">Seçimi Kaydet</span>
+      <div class="spinner"></div><span class="btn-text">Save Selection</span>
     </button>
   </div>
 <script>
 const TOKEN="__TOKEN__";
-const MONTHS=["","Ocak","Şubat","Mart","Nisan","Mayıs","Haziran","Temmuz","Ağustos","Eylül","Ekim","Kasım","Aralık"];
-const trUpper=s=>(s||"").toLocaleUpperCase("tr-TR");
+const MONTHS=["","January","February","March","April","May","June","July","August","September","October","November","December"];
+const trUpper=s=>(s||"").toUpperCase();
 const cardsEl=document.getElementById("cards"), saveBtn=document.getElementById("saveBtn"),
       countEl=document.getElementById("countNum"), btnText=saveBtn.querySelector(".btn-text");
 let selected=new Set();
 function esc(s){const d=document.createElement("div");d.textContent=s||"";return d.innerHTML;}
 function updateCounter(){countEl.textContent=selected.size;}
-function resetSaveBtn(){ if(saveBtn.classList.contains("success")){saveBtn.classList.remove("success");btnText.textContent="Seçimi Kaydet";} }
+function resetSaveBtn(){ if(saveBtn.classList.contains("success")){saveBtn.classList.remove("success");btnText.textContent="Save Selection";} }
 function card(e,monthUpper){
   const el=document.createElement("div");
   el.className="day-card"+(selected.has(e.id)?" selected":"");
@@ -186,7 +187,7 @@ function card(e,monthUpper){
   el.setAttribute("aria-checked",selected.has(e.id)?"true":"false");
   const isWeek=!e.date_num&&e.date_start&&e.date_end;
   const dateBlock=isWeek
-    ? `<div class="card-date-range">${e.date_start}–${e.date_end}</div><div class="card-date-month">${monthUpper}</div><div class="card-type-badge">Hafta</div>`
+    ? `<div class="card-date-range">${e.date_start}–${e.date_end}</div><div class="card-date-month">${monthUpper}</div><div class="card-type-badge">Week</div>`
     : `<div class="card-date-num">${e.date_num||""}</div><div class="card-date-month">${monthUpper}</div>`;
   el.innerHTML=`<div class="card-inner"><div class="card-date">${dateBlock}</div>
     <div class="card-sep"></div>
@@ -201,14 +202,14 @@ function card(e,monthUpper){
 async function load(){
   let d;
   try{ const r=await fetch(`/special-days/${TOKEN}/events`); if(!r.ok)throw 0; d=await r.json(); }
-  catch{ cardsEl.innerHTML='<div class="empty-state">Bu bağlantı geçersiz.</div>'; return; }
+  catch{ cardsEl.innerHTML='<div class="empty-state">This link is invalid.</div>'; return; }
   const monthName=MONTHS[d.month]||"", monthUpper=trUpper(monthName);
   document.getElementById("eyebrow").textContent=monthUpper+" "+d.year;
   document.getElementById("client").textContent=d.client_name||"";
-  document.getElementById("desc").textContent=monthName+" ayında içerik üretmemizi istediğiniz özel günleri aşağıdan işaretleyin. Seçiminizi kaydedince ekibimiz planlamaya başlar.";
+  document.getElementById("desc").textContent="In "+monthName+", mark the special days below that you'd like us to create content for. Once you save your selection, our team will start planning.";
   selected=new Set(d.events.filter(e=>e.selected).map(e=>e.id));
   updateCounter();
-  if(!d.events.length){ cardsEl.innerHTML='<div class="empty-state">Bu ay için özel gün yok.</div>'; return; }
+  if(!d.events.length){ cardsEl.innerHTML='<div class="empty-state">There are no special days for this month.</div>'; return; }
   cardsEl.innerHTML="";
   d.events.forEach((e,i)=>{ const el=card(e,monthUpper); cardsEl.appendChild(el);
     setTimeout(()=>el.classList.add("visible"),150+i*60); });
@@ -220,10 +221,10 @@ saveBtn.addEventListener("click",async()=>{
     const r=await fetch(`/special-days/${TOKEN}/select`,{method:"POST",
       headers:{"Content-Type":"application/json"},body:JSON.stringify({event_ids:[...selected]})});
     saveBtn.classList.remove("loading");
-    if(r.ok){ saveBtn.classList.add("success"); btnText.textContent="Kaydedildi"; }
-    else{ btnText.textContent="Hata, tekrar deneyin"; setTimeout(()=>btnText.textContent="Seçimi Kaydet",3000); }
-  }catch{ saveBtn.classList.remove("loading"); btnText.textContent="Hata, tekrar deneyin";
-    setTimeout(()=>btnText.textContent="Seçimi Kaydet",3000); }
+    if(r.ok){ saveBtn.classList.add("success"); btnText.textContent="Saved"; }
+    else{ btnText.textContent="Error, try again"; setTimeout(()=>btnText.textContent="Save Selection",3000); }
+  }catch{ saveBtn.classList.remove("loading"); btnText.textContent="Error, try again";
+    setTimeout(()=>btnText.textContent="Save Selection",3000); }
 });
 load();
 </script></body></html>"""

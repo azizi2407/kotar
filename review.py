@@ -1,14 +1,16 @@
-"""Public review sayfası — müşteri onay akışı (/review/<token>).
+"""Public review page — client approval flow (/review/<token>).
 
-Auth YOK: token'ın kendisi yetkidir (32-baytlık, tahmin edilemez). Panelden
-bağımsız, tek dosya HTML (inline CSS/JS), mobil öncelikli, noindex. Müşteri
-o hafta için SEÇİLMİŞ paylaşımları (share'in varlığı = yönetimin seçimi;
-draft/published fark etmez) görür, onaylar veya revize ister. Onay yayından
-ÖNCE gelir — board ile aynı görünürlük kuralı (`_visible_shares`).
+NO auth: the token itself is the authorization (32 bytes, unguessable).
+Independent of the panel, a single-file HTML page (inline CSS/JS), mobile-
+first, noindex. The client sees the shares SELECTED for that week (a share's
+existence = management's selection; draft/published doesn't matter), and
+approves or requests a revision. Approval happens BEFORE publishing — same
+visibility rule as the board (`_visible_shares`).
 
-Güvenlik: medya proxy + action yalnız link'in (client_id, week_iso) kapsamındaki
-paylaşımlara; keyfi file_id / başka müşteri paylaşımı reddedilir. CSRF yok
-(mutasyon token'la korunur), basit token-başına hız sınırı.
+Security: the media proxy + action are restricted to shares within the
+link's (client_id, week_iso) scope; an arbitrary file_id / another client's
+share is rejected. No CSRF (mutation is protected by the token), a simple
+per-token rate limit.
 """
 import mimetypes
 
@@ -33,7 +35,7 @@ bp = Blueprint('review', __name__)
 
 
 def _link_or_404(token):
-    """Musteri onay linki (ReviewLink). Ayri tip icin `_scope_or_404`."""
+    """Client approval link (ReviewLink). For the other type, see `_scope_or_404`."""
     link = ReviewLink.query.filter_by(token=token, revoked=False).first()
     if link is None:
         abort(404)
@@ -41,9 +43,9 @@ def _link_or_404(token):
 
 
 def _scope_or_404(token):
-    """Token -> (link, mode). mode: 'client' (musteri onay linki) veya 'pre'
-    (on-onay linki, 2026-07-24). Ayni /review/<token> yolu iki tipi de cozer;
-    sayfa ve uclar moda gore davranir."""
+    """Token -> (link, mode). mode: 'client' (client approval link) or 'pre'
+    (pre-approval link, 2026-07-24). The same /review/<token> route resolves
+    both types; the page and endpoints behave according to the mode."""
     link = ReviewLink.query.filter_by(token=token, revoked=False).first()
     if link is not None:
         return link, 'client'
@@ -53,7 +55,7 @@ def _scope_or_404(token):
     abort(404)
 
 
-# Sayfayı personel (yönetim/tasarımcı) açtığında kaldırma düğmeleri görünür.
+# When staff (management/designer) opens the page, removal buttons show up.
 STAFF_ROLES = ('management', 'designer')
 
 
@@ -63,8 +65,9 @@ def _is_staff():
 
 
 def _review_uploads(link, include_excluded=False):
-    """Linkin kapsamındaki yüklemeler — kural `sharing.review_visible_uploads`'ta
-    tek yerde tanımlı (link üretimindeki `share_count` ile aynı kaynak)."""
+    """Uploads within the link's scope — the rule is defined in one place, in
+    `sharing.review_visible_uploads` (same source as the `share_count` used
+    at link generation)."""
     return review_visible_uploads(link.client_id, link.week_iso,
                                   include_excluded=include_excluded)
 
@@ -85,11 +88,12 @@ def _reviews_for(upload_ids):
 
 @bp.get('/review/<token>/shares')
 def shares(token):
-    """Icerik listesi. Iki mod:
-    - client: musteri onay linki (public). Personel oturumluysa can_manage + excluded.
-    - pre:    on-onay linki (2026-07-24) - YALNIZ personel; karar yalniz yonetimde
-              (can_decide). Kaldirma/kademeli kapi uygulanmaz: yonetici tasarimcinin
-              o hafta yukledigi HER SEYI gorur."""
+    """Content list. Two modes:
+    - client: client approval link (public). If staff is logged in, adds can_manage + excluded.
+    - pre:    pre-approval link (2026-07-24) - staff ONLY; decision rests
+              solely with management (can_decide). Removal/staged gating does
+              not apply: management sees EVERYTHING the designer uploaded
+              that week."""
     link, mode = _scope_or_404(token)
     client = db.session.get(Client, link.client_id)
     staff = _is_staff()
@@ -97,8 +101,8 @@ def shares(token):
 
     if mode == 'pre':
         if not staff:
-            return jsonify(error='Bu bağlantı yalnız yönetim ve tasarımcılar içindir. '
-                                 'Panele giriş yapıp tekrar deneyin.'), 403
+            return jsonify(error='This link is for management and designers only. '
+                                 'Please log in to the panel and try again.'), 403
         rows = review_visible_uploads(link.client_id, link.week_iso, include_excluded=True)
         pre = pre_approval_map([r.id for r in rows])
         out = [dict(_item(token, up), pre=(pre[up.id].to_dict() if up.id in pre else None))
@@ -125,12 +129,12 @@ def shares(token):
 
 
 def _item(token, up):
-    """Bir yuklemenin ortak (moddan bagimsiz) medya alanlari."""
+    """A single upload's shared (mode-independent) media fields."""
     is_video = up.category == 'video'
     return {
         'id': up.id, 'kind': up.category, 'file_name': up.file_name,
         'media_url': f'/review/{token}/media/{up.file_id}' if up.file_id else None,
-        # Lokal kopya varken video sayfa icinde oynar (21 gun penceresi).
+        # While a local copy exists, the video plays in-page (21-day window).
         'video_url': (f'/review/{token}/stream/{up.file_id}'
                       if is_video and up.file_id
                       and media_store.has_original(up.file_id) else None),
@@ -139,21 +143,21 @@ def _item(token, up):
     }
 
 
-# Önizleme genişlikleri. `full` = Drive'ın s2048 render'ı — retina telefonda
-# caption/detay okunabilsin diye (eski taraftaki `?size=full` karşılığı).
-# Cache (file_id, width) ile anahtarlı olduğundan 2048 ayrı satıra düşer.
+# Preview widths. `full` = Drive's s2048 render — so caption/detail is
+# readable on a retina phone (equivalent of the old `?size=full`). The cache
+# is keyed by (file_id, width), so 2048 lands in its own row.
 MEDIA_WIDTHS = {'thumb': 600, 'full': 2048}
 
 
 @bp.get('/review/<token>/media/<file_id>')
 def media(token, file_id):
     link, _mode = _scope_or_404(token)
-    # file_id yalnız bu linkin YÜKLEMELERİNDEN biriyse proxy'le (keyfi dosya engeli).
-    # Kaldırılmış olanlar da dahil: personel geri alma önizlemesi görebilsin.
+    # Only proxy file_id if it's one of THIS link's UPLOADS (blocks arbitrary files).
+    # Includes removed ones too: so staff can preview before restoring.
     allowed = {u.file_id for u in _review_uploads(link, include_excluded=True) if u.file_id}
     if file_id not in allowed:
         abort(404)
-    # Lokal kopya (ilk 21 gün): full=orijinal (görselse), thumb=önizleme.
+    # Local copy (first 21 days): full=original (if it's an image), thumb=preview.
     if request.args.get('size') == 'full':
         path = media_store.find_original(file_id)
         mime = mimetypes.guess_type(path)[0] if path else None
@@ -171,7 +175,7 @@ def media(token, file_id):
             resp.headers['Cache-Control'] = 'private, max-age=86400'
             return resp
         except OSError:
-            pass  # lokal okunamadıysa Drive yoluna düş
+            pass  # fall through to Drive if local read fails
     width = MEDIA_WIDTHS.get(request.args.get('size'), MEDIA_WIDTHS['thumb'])
     cached = db.session.get(DriveThumbnail, (file_id, width))
     if cached:
@@ -192,9 +196,9 @@ def media(token, file_id):
 
 @bp.get('/review/<token>/stream/<file_id>')
 def stream(token, file_id):
-    """Lokal orijinal akışı (Range destekli) — yalnız linkin kapsamındaki dosyalar.
+    """Local original streaming (Range-supported) — only files within the link's scope.
 
-    Lokal kopya süresi dolduysa 404: sayfa drive_url fallback'ini kullanır."""
+    404 if the local copy has expired: the page falls back to drive_url."""
     link, _mode = _scope_or_404(token)
     if not ratelimit.hit(f'stream:{token}', 120, 60):
         abort(429)
@@ -219,21 +223,21 @@ def action(token):
     if mode == 'pre':
         return _pre_action(link)
     if not ratelimit.hit(f'review:{token}', 40, 60):
-        return jsonify(error='çok fazla istek, biraz bekleyin'), 429
+        return jsonify(error='too many requests, please wait a moment'), 429
     data = request.get_json(silent=True) or {}
     act = data.get('action')
     if act not in ('approve', 'revise'):
-        return jsonify(error='geçersiz işlem'), 400
+        return jsonify(error='invalid action'), 400
     note = (data.get('note') or '').strip()
     if act == 'revise' and not note:
-        return jsonify(error='revize için not zorunlu'), 400
+        return jsonify(error='a note is required for a revision'), 400
     up = db.session.get(CardUpload, data.get('upload_id') or data.get('share_id'))
     if (up is None or up.deleted_at is not None
             or up.client_id != link.client_id or up.week_iso != link.week_iso
             or up.category not in REVIEW_CATEGORIES):
         abort(404)
     if _excluded_ids([up.id]):
-        abort(404)  # sayfadan kaldırılmış içeriğe karar verilemez
+        abort(404)  # can't decide on content that's been removed from the page
     status = 'approved' if act == 'approve' else 'revision_requested'
     rv = UploadReview.query.filter_by(upload_id=up.id).first()
     if rv is None:
@@ -243,28 +247,29 @@ def action(token):
     rv.note = note[:1000] or None
     rv.at = utcnow()
     db.session.flush()
-    # Yazımdan SONRA, commit'ten ÖNCE: müşteri ekibini bilgilendir.
+    # AFTER the write, BEFORE the commit: notify the client team.
     notify_client_review(link.client_id, link.week_iso, status)
     db.session.commit()
     return jsonify(ok=True, review=rv.to_dict())
 
 
 def _pre_action(link):
-    """On-onay karari - YALNIZ yonetim (tasarimci sayfayi gorur ama karar veremez).
-    Karar `card_upload_pre_approvals`e yazilir; kademeli kapi sayesinde yalniz
-    `approved` olanlar musteri onay linkinde gorunur."""
+    """Pre-approval decision - management ONLY (the designer sees the page
+    but cannot decide). The decision is written to `card_upload_pre_approvals`;
+    thanks to staged gating, only `approved` ones show up on the client
+    approval link."""
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     if u.get('role') != 'management':
-        return jsonify(error='ön-onay kararını yalnız yönetim verebilir'), 403
+        return jsonify(error='only management can make pre-approval decisions'), 403
     data = request.get_json(silent=True) or {}
     act = data.get('action')
     if act not in ('approve', 'revise'):
-        return jsonify(error='geçersiz işlem'), 400
+        return jsonify(error='invalid action'), 400
     note = (data.get('note') or '').strip()
     if act == 'revise' and not note:
-        return jsonify(error='revize için not zorunlu'), 400
+        return jsonify(error='a note is required for a revision'), 400
     up = db.session.get(CardUpload, data.get('upload_id'))
     if (up is None or up.deleted_at is not None
             or up.client_id != link.client_id or up.week_iso != link.week_iso
@@ -287,22 +292,22 @@ def _pre_action(link):
 
 @bp.post('/review/<token>/exclude')
 def exclude(token):
-    """Bir yüklemeyi onay sayfasından kaldır / geri al — YALNIZ personel
-    (yönetim veya tasarımcı, oturumlu). Yıkıcı değildir: `card_uploads` satırına
-    dokunulmaz, yalnız bu sayfadaki görünürlük değişir.
+    """Remove / restore an upload from the approval page — STAFF ONLY
+    (management or designer, logged in). Not destructive: the `card_uploads`
+    row is untouched, only visibility on this page changes.
 
-    CSRF: bu blueprint public olduğu için `api.csrf_protect` bağlı değil; token
-    elle doğrulanır (sayfa `/api/session`'dan alır)."""
+    CSRF: since this blueprint is public, `api.csrf_protect` isn't attached;
+    the token is verified manually (the page gets it from `/api/session`)."""
     link = _link_or_404(token)
     u = current_user()
     if not u:
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='no active session'), 401
     if u.get('role') not in STAFF_ROLES:
-        return jsonify(error='yetkiniz yok'), 403
+        return jsonify(error='you do not have permission'), 403
     sess_token = session.get('csrf')
     if not sess_token or not hmac.compare_digest(
             sess_token, request.headers.get('X-CSRFToken', '')):
-        return jsonify(error='CSRF doğrulaması başarısız'), 403
+        return jsonify(error='CSRF verification failed'), 403
     data = request.get_json(silent=True) or {}
     up = db.session.get(CardUpload, data.get('upload_id'))
     if (up is None or up.deleted_at is not None
@@ -321,7 +326,7 @@ def exclude(token):
 
 @bp.get('/review/<token>')
 def page(token):
-    _scope_or_404(token)  # gecersizse 404 (musteri VEYA on-onay linki)
+    _scope_or_404(token)  # 404 if invalid (client OR pre-approval link)
     html = _PAGE.replace('__TOKEN__', token)
     return Response(html, mimetype='text/html',
                     headers={'X-Robots-Tag': 'noindex, nofollow'})
@@ -332,7 +337,7 @@ _PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>İçerik Onayı</title>
+<title>Content Approval</title>
 <style>
   :root { --bg:#0b1220; --card:#131c2e; --fg:#e6edf6; --mut:#8ea2bd; --acc:#14b8a6; --dan:#ef4444; --line:#22304a; }
   * { box-sizing:border-box; }
@@ -371,8 +376,8 @@ _PAGE = """<!doctype html>
   .toast.show { opacity:1; }
 </style></head>
 <body>
-<header><h1 id="title">İçerik Onayı</h1><div class="sub" id="sub"></div></header>
-<main id="main"><div class="empty">Yükleniyor…</div></main>
+<header><h1 id="title">Content Approval</h1><div class="sub" id="sub"></div></header>
+<main id="main"><div class="empty">Loading…</div></main>
 <div class="toast" id="toast"></div>
 <script>
 const TOKEN = "__TOKEN__";
@@ -384,7 +389,7 @@ let CAN_DECIDE = false; // ön-onayda karar yetkisi (yalnız yönetim)
 function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2200); }
 function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
 // Medya yüklenemezse sessizce gizleme — müşteri "içerik yok" sanmasın.
-function ph(){ const d=document.createElement("div"); d.className="ph"; d.textContent="Önizleme yüklenemedi"; return d; }
+function ph(){ const d=document.createElement("div"); d.className="ph"; d.textContent="Preview unavailable"; return d; }
 const KIND={post:"Post",story:"Story",video:"Video",linkedin:"LinkedIn"};
 
 async function load(){
@@ -392,36 +397,36 @@ async function load(){
   try { const s = await fetch("/api/session"); if(s.ok){ CSRF = (await s.json()).csrf || ""; } } catch(e){}
   const r = await fetch(`/review/${TOKEN}/shares`);
   if(r.status===403){
-    let m="Bu bağlantı yalnız yönetim ve tasarımcılar içindir.";
+    let m="This link is for management and designers only.";
     try{ m = (await r.json()).error || m; }catch(e){}
     main.innerHTML='<div class="err">'+esc(m)+'</div>'; return;
   }
-  if(!r.ok){ main.innerHTML='<div class="err">Bu bağlantı geçersiz veya süresi dolmuş.</div>'; return; }
+  if(!r.ok){ main.innerHTML='<div class="err">This link is invalid or has expired.</div>'; return; }
   const d = await r.json();
   CAN_MANAGE = !!d.can_manage;
   MODE = d.mode || "client";
   CAN_DECIDE = !!d.can_decide;
   document.getElementById("title").textContent =
-    d.client_name + (MODE==="pre" ? " — Ön Onay (yönetim)" : " — İçerik Onayı");
+    d.client_name + (MODE==="pre" ? " — Pre-Approval (management)" : " — Content Approval");
   const shown = d.shares.filter(x=>!x.excluded).length;
-  document.getElementById("sub").textContent = d.week_iso + " haftası · " + shown + " içerik";
-  if(!d.shares.length){ main.innerHTML='<div class="empty">Bu hafta için yüklenmiş içerik yok.</div>'; return; }
+  document.getElementById("sub").textContent = d.week_iso + " week · " + shown + " item(s)";
+  if(!d.shares.length){ main.innerHTML='<div class="empty">No content has been uploaded for this week.</div>'; return; }
   main.innerHTML="";
   if(MODE==="pre"){
     const b=document.createElement("div"); b.className="banner";
     b.textContent = CAN_DECIDE
-      ? "Ön onay: onayladıklarınız müşteriye gönderilebilir. Revize istediğiniz içerik müşteriye gitmez."
-      : "Ön onay durumu (yalnız görüntüleme) — kararı yönetim verir.";
+      ? "Pre-approval: items you approve can be sent to the client. Content you request a revision for will not go to the client."
+      : "Pre-approval status (view only) — the decision is made by management.";
     main.appendChild(b);
   } else if(CAN_MANAGE){
     const b=document.createElement("div"); b.className="banner";
-    b.textContent="Yönetim görünümü: içerikleri bu sayfadan kaldırabilir veya geri alabilirsiniz. Müşteri yalnız kaldırılmamış olanları görür.";
+    b.textContent="Management view: you can remove or restore content from this page. The client only sees items that haven't been removed.";
     main.appendChild(b);
   }
   for(const s of d.shares) main.appendChild(card(s));
 }
 async function toggleExclude(s, btn){
-  if(!CSRF){ toast("Oturum bulunamadı — panele giriş yapın"); return; }
+  if(!CSRF){ toast("Session not found — please log in to the panel"); return; }
   btn.disabled = true;
   try{
     const r = await fetch(`/review/${TOKEN}/exclude`, {
@@ -429,16 +434,16 @@ async function toggleExclude(s, btn){
       headers:{"Content-Type":"application/json","X-CSRFToken":CSRF},
       body: JSON.stringify({upload_id:s.id, excluded: !s.excluded}),
     });
-    if(!r.ok){ toast("İşlem başarısız"); btn.disabled=false; return; }
-    toast(s.excluded ? "Geri alındı" : "Sayfadan kaldırıldı");
+    if(!r.ok){ toast("Action failed"); btn.disabled=false; return; }
+    toast(s.excluded ? "Restored" : "Removed from page");
     await load();   // listeyi tazele (sayaç + görünüm)
-  }catch(e){ toast("İşlem başarısız"); btn.disabled=false; }
+  }catch(e){ toast("Action failed"); btn.disabled=false; }
 }
 function statusHtml(rv, prefix){
   if(!rv) return "";
   const p = prefix || "";
-  if(rv.status==="approved") return '<div class="status ok">✓ '+p+'Onaylandı</div>';
-  if(rv.status==="revision_requested") return '<div class="status rev">✎ '+p+'Revize istendi'+(rv.note?': '+esc(rv.note):'')+'</div>';
+  if(rv.status==="approved") return '<div class="status ok">✓ '+p+'Approved</div>';
+  if(rv.status==="revision_requested") return '<div class="status rev">✎ '+p+'Revision requested'+(rv.note?': '+esc(rv.note):'')+'</div>';
   return "";
 }
 function media(s){
@@ -447,7 +452,7 @@ function media(s){
   if(!s.media_url) return "";
   // Tam boyut (proje sahibi 2026-07-24): önizleme değil, doğrudan tam çözünürlük servis edilir.
   const img=`<img class="media" loading="lazy" src="${s.media_url}?size=full"`+
-    ` alt="içerik önizleme" onerror="this.replaceWith(ph())">`;
+    ` alt="content preview" onerror="this.replaceWith(ph())">`;
   // Video (lokal süresi dolmuş): poster'a tıkla, Drive'da aç.
   if(s.drive_url) return `<a class="mwrap" href="${s.drive_url}" target="_blank" rel="noopener noreferrer">${img}<span class="play"><span>▶</span></span></a>`;
   // Görsel: tıklayınca tam çözünürlük (lokalse orijinal, değilse Drive s2048).
@@ -458,21 +463,21 @@ function card(s){
   el.innerHTML = media(s)+
     `<div class="body">
        <span class="kind">${KIND[s.kind]||s.kind}</span>
-       ${s.drive_url&&!s.video_url?'<div class="dnote">Videoyu izlemek için görsele dokunun — Google Drive\\'da açılır.</div>':""}
+       ${s.drive_url&&!s.video_url?'<div class="dnote">Tap the image to watch the video — it opens in Google Drive.</div>':""}
        ${MODE==="pre"
-          ? `<div class="st">${statusHtml(s.pre,"Ön onay: ")}</div>
+          ? `<div class="st">${statusHtml(s.pre,"Pre-approval: ")}</div>
              ${CAN_DECIDE?`<div class="row">
-               <button class="ok">Ön Onay Ver</button>
-               <button class="rev">Revize İste</button>
+               <button class="ok">Give Pre-Approval</button>
+               <button class="rev">Request Revision</button>
              </div>`:""}`
-          : `<div class="st">${statusHtml(s.review)}${CAN_MANAGE&&s.pre?statusHtml(s.pre,"Ön onay: "):""}</div>
-             ${s.excluded?'<div class="row"><span class="offtag">Bu içerik sayfadan kaldırıldı — müşteri görmüyor</span></div>':`<div class="row">
-               <button class="ok">Onayla</button>
-               <button class="rev">Revize İste</button>
+          : `<div class="st">${statusHtml(s.review)}${CAN_MANAGE&&s.pre?statusHtml(s.pre,"Pre-approval: "):""}</div>
+             ${s.excluded?'<div class="row"><span class="offtag">This content has been removed from the page — the client doesn\\'t see it</span></div>':`<div class="row">
+               <button class="ok">Approve</button>
+               <button class="rev">Request Revision</button>
              </div>`}`}
      </div>`+
     ((MODE!=="pre"&&CAN_MANAGE)?`<div class="staff"><span>${esc(s.file_name||"")}</span>
-       <button class="excl" style="margin-left:auto">${s.excluded?"Geri al":"Sayfadan kaldır"}</button></div>`:"")+
+       <button class="excl" style="margin-left:auto">${s.excluded?"Restore":"Remove from page"}</button></div>`:"")+
     (MODE==="pre"?`<div class="staff"><span>${esc(s.file_name||"")}</span></div>`:"");
   const st=el.querySelector(".st");
   const ex=el.querySelector(".excl");
@@ -482,10 +487,10 @@ function card(s){
   el.querySelector(".ok").onclick=()=>act(s.id,"approve",null,st);
   el.querySelector(".rev").onclick=()=>{
     if(el.querySelector("textarea")) return;
-    const ta=document.createElement("textarea"); ta.placeholder="Neyin değişmesini istersiniz?"; ta.maxLength=1000;
-    const send=document.createElement("button"); send.className="rev"; send.textContent="Gönder"; send.style.marginTop="8px";
+    const ta=document.createElement("textarea"); ta.placeholder="What would you like changed?"; ta.maxLength=1000;
+    const send=document.createElement("button"); send.className="rev"; send.textContent="Send"; send.style.marginTop="8px";
     st.after(ta); ta.after(send);
-    send.onclick=()=>{ if(!ta.value.trim()){toast("Not gerekli");return;} act(s.id,"revise",ta.value.trim(),st,[ta,send]); };
+    send.onclick=()=>{ if(!ta.value.trim()){toast("Note required");return;} act(s.id,"revise",ta.value.trim(),st,[ta,send]); };
   };
   return el;
 }
@@ -495,10 +500,10 @@ async function act(id,action,note,st,extra){
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({upload_id:id,action,note})});
   const d=await r.json().catch(()=>({}));
-  if(!r.ok){ toast(d.error||"Hata"); return; }
-  st.innerHTML = MODE==="pre" ? statusHtml(d.pre,"Ön onay: ") : statusHtml(d.review);
+  if(!r.ok){ toast(d.error||"Error"); return; }
+  st.innerHTML = MODE==="pre" ? statusHtml(d.pre,"Pre-approval: ") : statusHtml(d.review);
   (extra||[]).forEach(e=>e.remove());
-  toast(action==="approve" ? (MODE==="pre"?"Ön onay verildi":"Onaylandı") : "Revize isteği gönderildi");
+  toast(action==="approve" ? (MODE==="pre"?"Pre-approval given":"Approved") : "Revision request sent");
 }
 load();
 </script></body></html>"""

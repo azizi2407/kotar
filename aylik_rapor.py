@@ -1,19 +1,20 @@
-"""Aylık Instagram performans raporu — CSV işleme, HTML ve PDF üretimi.
+"""Monthly Instagram performance report — CSV processing, HTML and PDF generation.
 
-**Kaynak:** proje sahibi'in kendi bilgisayarında çalıştırdığı masaüstü aracın (tkinter)
-veri katmanı, 2026-08-07'de panele taşındı. Hesaplama mantığı BİLEREK satır satır
-korundu — aylardır gerçek Meta CSV'leriyle sınanmış sezgisel kuralları (sütun
-seçimi, Türkçe sayı biçimi, dosya adı eşleştirmesi) yeniden yazmak, kanıtlanmış
-davranışı kaybetme riskiydi. Değişenler yalnız ortama bağlı olanlar:
+**Origin:** the data layer of a desktop tool (tkinter) the project owner ran on their
+own computer, moved into the panel on 2026-08-07. The calculation logic was
+DELIBERATELY preserved line by line — rewriting the heuristic rules (column
+selection, Turkish number format, filename matching) that had been tested for
+months against real Meta CSVs risked losing proven behavior. Only
+environment-dependent things changed:
 
-- tkinter/webbrowser bağımlılıkları atıldı (bu modül arayüz bilmez).
-- Şablon ve logo repo içinde (`templates/`), kullanıcının indirme klasöründe değil.
-- PDF motoru macOS Chrome yerine Linux `chromium` (`CHROMIUM_BIN` ile override).
+- tkinter/webbrowser dependencies were dropped (this module knows nothing about a UI).
+- The template and logo live in the repo (`templates/`), not in the user's downloads folder.
+- The PDF engine is Linux `chromium` instead of macOS Chrome (overridable via `CHROMIUM_BIN`).
 
-Web akışı dosya YOLU üzerinden ilerler (klasör → CSV eşleştirme → rapor): yüklenen
-dosyalar geçici bir dizine müşteri klasörleriyle yazılır, sonra buradaki fonksiyonlar
-masaüstündeki gibi çağrılır. Böylece `auto_match_csv_files` / `preflight_bulk` tek
-satır değişmeden toplu üretimi de karşılar.
+The web flow proceeds via a file PATH (folder → CSV matching → report): uploaded
+files are written to a temp directory with client folders, then the functions here
+are called just like on the desktop. This way `auto_match_csv_files` / `preflight_bulk`
+also serve bulk generation without changing a single line.
 """
 import csv
 import json
@@ -29,7 +30,7 @@ import pandas as pd
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SABITLER
+# CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
 _TR_MAP = str.maketrans(
@@ -74,9 +75,9 @@ _LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # ─────────────────────────────────────────────────────────────────────────────
 
 def read_csv_robust(path: str) -> pd.DataFrame:
-    """UTF-8/16 BOM, virgül/noktalı virgül/tab ayraçlarıyla CSV okur."""
+    """Reads a CSV with UTF-8/16 BOM, comma/semicolon/tab delimiters."""
     if not path or not os.path.exists(path):
-        raise FileNotFoundError(f"Dosya bulunamadı: {path}")
+        raise FileNotFoundError(f"File not found: {path}")
 
     lines = None
     for enc in ("utf-16", "utf-8-sig", "utf-8"):
@@ -89,9 +90,9 @@ def read_csv_robust(path: str) -> pd.DataFrame:
             continue
 
     if not lines:
-        raise ValueError(f"Dosya okunamadı: {path}")
+        raise ValueError(f"File could not be read: {path}")
 
-    # "sep=," gibi meta satırları atla
+    # skip meta lines like "sep=,"
     start = 0
     for i, line in enumerate(lines[:5]):
         if line.strip().lower().lstrip('"').startswith("sep="):
@@ -106,8 +107,8 @@ def read_csv_robust(path: str) -> pd.DataFrame:
     except Exception:
         delim = ";" if sample.count(";") > sample.count(",") else ","
 
-    # Yeni Meta formatı: tek alanlı metrik başlığı + '"Tarih","Primary"' header'ı.
-    # Başlık satırını atla; değer sütununu metrik adıyla yeniden adlandır.
+    # New Meta format: single-field metric title + '"Tarih","Primary"' header.
+    # Skip the title row; rename the value column to the metric name.
     first_rows = list(csv.reader(lines[start:start + 2], delimiter=delim))
     title = None
     if (len(first_rows) >= 2 and len(first_rows[0]) == 1
@@ -123,7 +124,7 @@ def read_csv_robust(path: str) -> pd.DataFrame:
 
 
 def coerce_numeric_series(s: pd.Series) -> pd.Series:
-    """Türkçe binlik/ondalık ayraçlarını düzelterek sayıya çevirir."""
+    """Converts to a number, correcting Turkish thousands/decimal separators."""
     if pd.api.types.is_numeric_dtype(s):
         return pd.to_numeric(s, errors="coerce")
 
@@ -144,7 +145,7 @@ def coerce_numeric_series(s: pd.Series) -> pd.Series:
 
 
 def best_value_column(df: pd.DataFrame) -> str | None:
-    """Toplanacak en uygun sayısal sütunu seçer."""
+    """Selects the most suitable numeric column to sum."""
     if df is None or df.empty:
         return None
 
@@ -173,16 +174,16 @@ def best_value_column(df: pd.DataFrame) -> str | None:
 
 
 def sum_metric_from_csv(path: str) -> float:
-    """CSV'deki en uygun sayısal sütunu toplar."""
+    """Sums the most suitable numeric column in the CSV."""
     df = read_csv_robust(path)
     col = best_value_column(df)
     if col is None:
-        raise ValueError(f"Toplanacak sayısal sütun bulunamadı: {os.path.basename(path)}")
+        raise ValueError(f"No numeric column found to sum: {os.path.basename(path)}")
     return float(coerce_numeric_series(df[col]).sum(skipna=True))
 
 
 def sum_column_from_df(df: pd.DataFrame, candidates: list[str]) -> float:
-    """DataFrame'de aday sütun listesinden ilk bulunanın toplamını döndürür."""
+    """Returns the sum of the first found column from the candidate list in the DataFrame."""
     cols_lower = {c.lower(): c for c in df.columns}
     for cand in candidates:
         if cand.lower() in cols_lower:
@@ -191,11 +192,11 @@ def sum_column_from_df(df: pd.DataFrame, candidates: list[str]) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ANALİZ
+# ANALYSIS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def analyze_follower_changes(path: str) -> dict:
-    """Kazanılan, kaybedilen ve net takipçi değişimini hesaplar."""
+    """Calculates gained, lost and net follower change."""
     if not path or not os.path.exists(path):
         return {}
     try:
@@ -214,7 +215,7 @@ def analyze_follower_changes(path: str) -> dict:
 
 
 def process_meta_ads_csv(path: str) -> dict:
-    """Meta reklam CSV'sini işler: harcama, erişim, CTR, CPM ve detay analizleri."""
+    """Processes the Meta ads CSV: spend, reach, CTR, CPM and detail analyses."""
     if not path or not os.path.exists(path):
         return {}
     try:
@@ -272,7 +273,7 @@ def process_meta_ads_csv(path: str) -> dict:
             if g > 0:
                 metrics["CTR (%)"] = (t / g) * 100
 
-        # Ağırlıklı CPM
+        # Weighted CPM
         cpm_col = next((c for c in df.columns if "CPM" in c), None)
         if cpm_col and harcama_col:
             df_tmp = df[[cpm_col, harcama_col]].copy()
@@ -286,7 +287,7 @@ def process_meta_ads_csv(path: str) -> dict:
                     (df_tmp["cpm"] * df_tmp["harcama"]).sum() / total_h
                 )
 
-        # Yaş gruplarına göre dağılım
+        # Distribution by age group
         if "Yaş" in df.columns and harcama_ser is not None and erisim_ser is not None:
             yas_analiz = {}
             for yas in df["Yaş"].unique():
@@ -300,7 +301,7 @@ def process_meta_ads_csv(path: str) -> dict:
             if yas_analiz:
                 details["yas_gruplari"] = yas_analiz
 
-        # Cinsiyete göre dağılım
+        # Distribution by gender
         if "Cinsiyet" in df.columns and harcama_ser is not None and erisim_ser is not None:
             cinsiyet_analiz = {}
             for cinsiyet in df["Cinsiyet"].unique():
@@ -315,7 +316,7 @@ def process_meta_ads_csv(path: str) -> dict:
             if cinsiyet_analiz:
                 details["cinsiyet"] = cinsiyet_analiz
 
-        # En çok harcama yapılan reklamlar
+        # Ads with the most spend
         if "Reklamlar" in df.columns and harcama_ser is not None:
             df_tmp = df.copy()
             df_tmp["_h"] = harcama_ser
@@ -325,7 +326,7 @@ def process_meta_ads_csv(path: str) -> dict:
             if not top.empty:
                 details["top_reklamlar"] = [(str(k), float(v)) for k, v in top.items()]
 
-        # En iyi günler (erişim)
+        # Best days (reach)
         if "Gün" in df.columns and erisim_ser is not None:
             df_tmp = df.copy()
             df_tmp["_e"] = erisim_ser
@@ -342,7 +343,7 @@ def process_meta_ads_csv(path: str) -> dict:
 
 
 def detect_rank_column(df: pd.DataFrame, kind: str) -> str | None:
-    """Gönderi/hikaye sıralaması için en uygun metrik sütununu seçer."""
+    """Selects the most suitable metric column for post/story ranking."""
     priority = {
         "post": ["Erişim", "Reach", "Gösterimler", "Impressions",
                  "Görüntülemeler", "Views", "Etkileşimler", "Interactions"],
@@ -358,7 +359,7 @@ def detect_rank_column(df: pd.DataFrame, kind: str) -> str | None:
 
 
 def detect_title_column(df: pd.DataFrame) -> str | None:
-    """Gönderi/hikaye için okunabilir bir kimlik sütunu bulur."""
+    """Finds a readable identifying column for a post/story."""
     candidates = [
         "Başlık", "Title", "Açıklama", "Description", "Metin", "Text",
         "Caption", "İçerik", "Content", "URL", "Permalink", "ID",
@@ -368,7 +369,7 @@ def detect_title_column(df: pd.DataFrame) -> str | None:
         if c.lower() in cols_lower:
             return cols_lower[c.lower()]
 
-    # Fallback: en dolgun metin sütunu
+    # Fallback: the most-filled text column
     best, best_score = None, -1.0
     for c in df.columns:
         if coerce_numeric_series(df[c]).notna().mean() > 0.5:
@@ -379,12 +380,12 @@ def detect_title_column(df: pd.DataFrame) -> str | None:
     return best
 
 
-_AYLAR = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
-          "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+_AYLAR = ["January", "February", "March", "April", "May", "June",
+          "July", "August", "September", "October", "November", "December"]
 
 
 def _publish_date_tr(val) -> str | None:
-    """'07/15/2026 01:13' veya ISO tarih string'ini '15 Temmuz' biçimine çevirir."""
+    """Converts a '07/15/2026 01:13' or ISO date string to '15 July' format."""
     val = str(val).strip()
     if not val or val.lower() in ("nan", "none"):
         return None
@@ -399,7 +400,7 @@ def _publish_date_tr(val) -> str | None:
 
 
 def _publish_column(df_cols: list[str]) -> str | None:
-    """Yayınlanma tarihi sütununu bulur."""
+    """Finds the publish date column."""
     for col_name in df_cols:
         if "yayınlanma" in col_name.lower() or "publish" in col_name.lower():
             return col_name
@@ -407,7 +408,7 @@ def _publish_column(df_cols: list[str]) -> str | None:
 
 
 def _post_title(row, title_col: str | None, df_cols: list[str]) -> str:
-    """Bir gönderi satırı için en anlamlı başlığı üretir."""
+    """Produces the most meaningful title for a post row."""
     title = ""
     if title_col and title_col in df_cols:
         title = " ".join(str(row[title_col]).split()).strip()
@@ -423,7 +424,7 @@ def _post_title(row, title_col: str | None, df_cols: list[str]) -> str:
 
 
 def top_story_publish_date(path: str) -> str | None:
-    """En iyi hikayenin yayınlanma tarihini '15 Temmuz' biçiminde döndürür."""
+    """Returns the best story's publish date in '15 July' format."""
     df = read_csv_robust(path)
     rank_col = detect_rank_column(df, "story")
     pub_col = _publish_column(df.columns.tolist())
@@ -438,11 +439,11 @@ def top_story_publish_date(path: str) -> str | None:
 
 
 def top5_items_from_csv(path: str, kind: str) -> tuple[list[tuple[str, float]], str]:
-    """CSV'den en iyi 5 gönderi/hikayeyi döndürür: [(başlık, değer), ...], sıralama_sütunu"""
+    """Returns the top 5 posts/stories from the CSV: [(title, value), ...], rank_column"""
     df = read_csv_robust(path)
     rank_col = detect_rank_column(df, kind)
     if rank_col is None:
-        raise ValueError(f"Sıralama metriği bulunamadı: {os.path.basename(path)}")
+        raise ValueError(f"No ranking metric found: {os.path.basename(path)}")
 
     title_col = detect_title_column(df)
     df = df.copy()
@@ -460,19 +461,19 @@ def top5_items_from_csv(path: str, kind: str) -> tuple[list[tuple[str, float]], 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OTOMATİK DOSYA EŞLEŞTİRME
+# AUTOMATIC FILE MATCHING
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _normalize(text: str) -> str:
-    """Dosya ismini eşleştirme için normalleştirir (küçük harf, Türkçe → ASCII)."""
+    """Normalizes a file name for matching (lowercase, Turkish → ASCII)."""
     text = unicodedata.normalize("NFC", text.lower()).translate(_TR_MAP)
     text = re.sub(r"\.csv$", "", text)
-    text = re.sub(r"[-_][a-z0-9]+$", "", text)   # -mahir, -user gibi ekleri kaldır
+    text = re.sub(r"[-_][a-z0-9]+$", "", text)   # strip suffixes like -mahir, -user
     return re.sub(r"[-_]+", "-", text).strip("-")
 
 
 def auto_match_csv_files(folder_path: str) -> dict[str, str]:
-    """Klasördeki CSV dosyalarını isimlerine göre otomatik eşleştirir."""
+    """Automatically matches CSV files in the folder by their names."""
     if not os.path.isdir(folder_path):
         return {}
 
@@ -502,7 +503,7 @@ def auto_match_csv_files(folder_path: str) -> dict[str, str]:
 
 
 def preflight_bulk(parent: str) -> list[dict]:
-    """Toplu üretim öncesi tüm müşteri klasörlerini analiz eder (hiçbir dosya yazmaz)."""
+    """Analyzes all client folders before bulk generation (writes no files)."""
     results: list[dict] = []
     for item in sorted(os.listdir(parent)):
         p = os.path.join(parent, item)
@@ -520,7 +521,7 @@ def preflight_bulk(parent: str) -> list[dict]:
 
         content_missing = [k for k in ("Gönderiler CSV", "Hikayeler CSV") if k not in matched]
         if content_missing:
-            entry["skip"] = "Eksik dosya: " + ", ".join(content_missing)
+            entry["skip"] = "Missing file: " + ", ".join(content_missing)
             results.append(entry)
             continue
 
@@ -528,21 +529,23 @@ def preflight_bulk(parent: str) -> list[dict]:
             data = generate_report_data(matched, item)
             entry["data"] = data
             entry["warnings"] = list(data.get("warnings", []))
-            for k in ("Toplam Görüntüleme", "Toplam Erişim", "Toplam Etkileşim"):
+            for label, k in (("Total Views", "Toplam Görüntüleme"),
+                              ("Total Reach", "Toplam Erişim"),
+                              ("Total Engagement", "Toplam Etkileşim")):
                 if data["totals"].get(k, 0) == 0:
-                    entry["warnings"].append(f"{k} = 0 — veri eksik olabilir")
+                    entry["warnings"].append(f"{label} = 0 — data may be missing")
         except Exception as e:
-            entry["skip"] = f"Hata: {type(e).__name__}: {str(e)[:80]}"
+            entry["skip"] = f"Error: {type(e).__name__}: {str(e)[:80]}"
         results.append(entry)
     return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RAPOR VERİSİ OLUŞTURMA
+# BUILDING REPORT DATA
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _sum_from_posts_and_stories(matched: dict, candidates: list[str]) -> float:
-    """Gönderi ve hikaye CSV'lerinden belirtilen sütunları toplar (fallback)."""
+    """Sums the given columns from the post and story CSVs (fallback)."""
     total = 0.0
     for key in ("Gönderiler CSV", "Hikayeler CSV"):
         if key not in matched:
@@ -556,45 +559,45 @@ def _sum_from_posts_and_stories(matched: dict, candidates: list[str]) -> float:
 
 
 def _safe_metric_sum(matched: dict, key: str, warnings: list[str]) -> float:
-    """CSV toplamını okur; hata durumunda 0 döner ve uyarı kaydeder."""
+    """Reads the CSV total; returns 0 and logs a warning on error."""
     try:
         return sum_metric_from_csv(matched[key])
     except Exception as e:
         fname = os.path.basename(matched.get(key, "?"))
-        warnings.append(f"{key}: '{fname}' okunamadı ({type(e).__name__}) — 0 varsayıldı")
+        warnings.append(f"{key}: '{fname}' could not be read ({type(e).__name__}) — assumed 0")
         return 0.0
 
 
 def generate_report_data(matched: dict, client_name: str) -> dict:
-    """Eşleştirilmiş CSV dosyalarından tek bir rapor veri sözlüğü üretir."""
+    """Produces a single report data dict from the matched CSV files."""
     client_name = unicodedata.normalize("NFC", client_name)
     totals: dict[str, float] = {}
     warnings: list[str] = []
 
-    # Görüntüleme
+    # Views
     if "Görüntüleme CSV" in matched:
         totals["Toplam Görüntüleme"] = _safe_metric_sum(matched, "Görüntüleme CSV", warnings)
     else:
         totals["Toplam Görüntüleme"] = _sum_from_posts_and_stories(
             matched, ["Görüntülemeler", "Görüntüleme", "Gösterimler", "Gösterim", "Views", "Impressions"]
         )
-        warnings.append("Görüntüleme CSV yok — gönderi+hikaye toplamından hesaplandı")
+        warnings.append("Görüntüleme CSV missing — calculated from post+story total")
 
-    # Erişim
+    # Reach
     if "Erişim CSV" in matched:
         totals["Toplam Erişim"] = _safe_metric_sum(matched, "Erişim CSV", warnings)
     else:
         totals["Toplam Erişim"] = _sum_from_posts_and_stories(matched, ["Erişim", "Reach"])
-        warnings.append("Erişim CSV yok — gönderi+hikaye toplamı kullanıldı (şişirme riski)")
+        warnings.append("Erişim CSV missing — post+story total used (risk of inflation)")
 
-    # Etkileşim
+    # Engagement
     if "Etkileşim CSV" in matched:
         totals["Toplam Etkileşim"] = _safe_metric_sum(matched, "Etkileşim CSV", warnings)
     else:
         totals["Toplam Etkileşim"] = _sum_from_posts_and_stories(
             matched, ["Etkileşimler", "Etkileşim", "Interactions", "Engagement", "Beğeniler", "Likes"]
         )
-        warnings.append("Etkileşim CSV yok — gönderi+hikaye toplamından hesaplandı")
+        warnings.append("Etkileşim CSV missing — calculated from post+story total")
 
     totals["Bağlantı Tıklamaları"] = (
         _safe_metric_sum(matched, "Bağlantı Tıklamaları CSV", warnings)
@@ -609,13 +612,13 @@ def generate_report_data(matched: dict, client_name: str) -> dict:
         if "Takipler CSV" in matched else 0.0
     )
 
-    # Reklam
+    # Ads
     ads_data = (
         process_meta_ads_csv(matched["Meta Reklam Raporu CSV"])
         if "Meta Reklam Raporu CSV" in matched else {}
     )
 
-    # En iyi içerikler
+    # Top content
     top_posts, post_rank_col = [], ""
     if "Gönderiler CSV" in matched:
         try:
@@ -637,7 +640,7 @@ def generate_report_data(matched: dict, client_name: str) -> dict:
         except Exception:
             pass
 
-    # Takipçi analizi
+    # Follower analysis
     toplam_takipci = totals["Net Takipçi Değişimi"]
     reklam_takipci = ads_data.get("metrics", {}).get("Reklamdan Gelen Takipçiler", 0.0)
     organik_takipci = max(0.0, toplam_takipci - reklam_takipci)
@@ -668,7 +671,7 @@ def generate_report_data(matched: dict, client_name: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FORMAT & METİN
+# FORMAT & TEXT
 # ─────────────────────────────────────────────────────────────────────────────
 
 def fmt_int(n: float) -> str:
@@ -686,7 +689,7 @@ def fmt_currency(n: float) -> str:
 
 
 def build_report_text(data: dict) -> str:
-    """Rapor verisinden kopyalanabilir metin özet üretir."""
+    """Produces a copyable text summary from the report data."""
     totals = data["totals"]
     ads_data = data.get("ads_data", {})
     ads_metrics = ads_data.get("metrics", {})
@@ -700,88 +703,91 @@ def build_report_text(data: dict) -> str:
     reklam_takipci = data["reklam_takipci"]
     organik_takipci = data["organik_takipci"]
 
-    lines = ["INSTAGRAM AYLIK ÖZET", ""]
+    lines = ["INSTAGRAM MONTHLY SUMMARY", ""]
 
-    for key in ["Toplam Görüntüleme", "Toplam Erişim", "Toplam Etkileşim",
-                "Bağlantı Tıklamaları", "Profil Ziyaretleri"]:
-        lines.append(f"{key}: {fmt_int(totals.get(key, 0))}")
+    for label, key in [("Total Views", "Toplam Görüntüleme"),
+                        ("Total Reach", "Toplam Erişim"),
+                        ("Total Engagement", "Toplam Etkileşim"),
+                        ("Link Clicks", "Bağlantı Tıklamaları"),
+                        ("Profile Visits", "Profil Ziyaretleri")]:
+        lines.append(f"{label}: {fmt_int(totals.get(key, 0))}")
 
-    lines.append(f"Net Takipçi Değişimi: {fmt_int(toplam_takipci)}")
+    lines.append(f"Net Follower Change: {fmt_int(toplam_takipci)}")
     if kazanilan > 0 or kaybedilen > 0:
-        lines.append(f"  • Kazanılan Takipçi: {fmt_int(kazanilan)}")
+        lines.append(f"  • Followers Gained: {fmt_int(kazanilan)}")
         if kaybedilen > 0:
-            lines.append(f"  • Takibi Bırakan: {fmt_int(kaybedilen)}")
+            lines.append(f"  • Unfollowed: {fmt_int(kaybedilen)}")
             if kazanilan > 0:
-                lines.append(f"  • Kayıp Oranı: {kaybedilen / kazanilan * 100:.1f}%")
+                lines.append(f"  • Loss Rate: {kaybedilen / kazanilan * 100:.1f}%")
     if reklam_takipci > 0:
-        lines.append(f"  • Organik: {fmt_int(organik_takipci)}  |  Reklam: {fmt_int(reklam_takipci)}")
+        lines.append(f"  • Organic: {fmt_int(organik_takipci)}  |  Ads: {fmt_int(reklam_takipci)}")
     else:
-        lines.append(f"  • Organik: {fmt_int(organik_takipci)}")
+        lines.append(f"  • Organic: {fmt_int(organik_takipci)}")
 
-    # Meta Reklam
+    # Meta Ads
     if ads_metrics:
-        lines += ["", "META REKLAM METRİKLERİ", "─" * 40]
+        lines += ["", "META AD METRICS", "─" * 40]
 
         if "Toplam Harcama (TRY)" in ads_metrics:
-            lines.append(f"Toplam Harcama: {fmt_currency(ads_metrics['Toplam Harcama (TRY)'])} TRY")
+            lines.append(f"Total Spend: {fmt_currency(ads_metrics['Toplam Harcama (TRY)'])} TRY")
         for label, key in [
-            ("Reklam Erişimi",            "Reklam Erişimi"),
-            ("Reklam Gösterimi",          "Reklam Gösterimi"),
-            ("Reklam Tıklamaları",        "Reklam Tıklamaları"),
-            ("Reklam Etkileşimleri",      "Reklam Etkileşimleri"),
-            ("Reklamdan Gelen Takipçiler","Reklamdan Gelen Takipçiler"),
+            ("Ad Reach",             "Reklam Erişimi"),
+            ("Ad Impressions",       "Reklam Gösterimi"),
+            ("Ad Clicks",            "Reklam Tıklamaları"),
+            ("Ad Engagement",        "Reklam Etkileşimleri"),
+            ("Followers From Ads",   "Reklamdan Gelen Takipçiler"),
         ]:
             if key in ads_metrics:
                 lines.append(f"{label}: {fmt_int(ads_metrics[key])}")
         if "CTR (%)" in ads_metrics:
-            lines.append(f"CTR (Tıklama Oranı): {ads_metrics['CTR (%)']:.2f}%")
+            lines.append(f"CTR (Click-Through Rate): {ads_metrics['CTR (%)']:.2f}%")
         if "Ortalama CPM (TRY)" in ads_metrics:
-            lines.append(f"Ortalama CPM: {fmt_currency(ads_metrics['Ortalama CPM (TRY)'])} TRY")
+            lines.append(f"Average CPM: {fmt_currency(ads_metrics['Ortalama CPM (TRY)'])} TRY")
         if "Reklamdan Gelen Takipçiler" in ads_metrics and "Toplam Harcama (TRY)" in ads_metrics:
             tak = ads_metrics["Reklamdan Gelen Takipçiler"]
             if tak > 0:
                 maliyet = ads_metrics["Toplam Harcama (TRY)"] / tak
-                lines.append(f"Takipçi Başına Maliyet: {fmt_currency(maliyet)} TRY")
+                lines.append(f"Cost Per Follower: {fmt_currency(maliyet)} TRY")
 
         if "yas_gruplari" in ads_details:
-            lines.append("\nYaş Gruplarına Göre Dağılım:")
+            lines.append("\nDistribution by Age Group:")
             toplam_h = ads_metrics.get("Toplam Harcama (TRY)", 1)
             for yas, d in sorted(ads_details["yas_gruplari"].items(),
                                   key=lambda x: x[1]["harcama"], reverse=True):
                 pct = d["harcama"] / toplam_h * 100 if toplam_h > 0 else 0
-                lines.append(f"  • {yas}: {fmt_currency(d['harcama'])} TRY ({pct:.1f}%) | Erişim: {fmt_int(d['erisim'])}")
+                lines.append(f"  • {yas}: {fmt_currency(d['harcama'])} TRY ({pct:.1f}%) | Reach: {fmt_int(d['erisim'])}")
 
         if "cinsiyet" in ads_details:
-            lines.append("\nCinsiyete Göre Dağılım:")
+            lines.append("\nDistribution by Gender:")
             toplam_h = ads_metrics.get("Toplam Harcama (TRY)", 1)
             for cinsiyet, d in ads_details["cinsiyet"].items():
                 pct = d["harcama"] / toplam_h * 100 if toplam_h > 0 else 0
-                lines.append(f"  • {cinsiyet}: {fmt_currency(d['harcama'])} TRY ({pct:.1f}%) | Erişim: {fmt_int(d['erisim'])}")
+                lines.append(f"  • {cinsiyet}: {fmt_currency(d['harcama'])} TRY ({pct:.1f}%) | Reach: {fmt_int(d['erisim'])}")
 
         if "top_reklamlar" in ads_details:
-            lines.append("\nEn Çok Harcama Yapılan Reklamlar:")
+            lines.append("\nTop Spending Ads:")
             for i, (reklam, h) in enumerate(ads_details["top_reklamlar"], 1):
                 kisa = reklam[:60] + "..." if len(reklam) > 60 else reklam
                 lines.append(f"  {i}. {kisa} — {fmt_currency(h)} TRY")
 
         if "top_gunler" in ads_details:
-            lines.append("\nEn İyi Performans Gösteren Günler:")
+            lines.append("\nBest Performing Days:")
             for i, (gun, erisim) in enumerate(ads_details["top_gunler"], 1):
                 try:
                     dt = datetime.strptime(str(gun), "%Y-%m-%d")
                     gun_fmt = f"{dt.day} {_AYLAR[dt.month - 1]}"
                 except Exception:
                     gun_fmt = str(gun)
-                lines.append(f"  {i}. {gun_fmt} — {fmt_int(erisim)} erişim")
+                lines.append(f"  {i}. {gun_fmt} — {fmt_int(erisim)} reach")
 
-    # En iyi içerikler
+    # Top content
     if top_posts:
-        lines += ["", f"En İyi 5 Gönderi (Sıralama: {data['post_rank_col']})"]
+        lines += ["", f"Top 5 Posts (Ranked by: {data['post_rank_col']})"]
         for i, (title, val) in enumerate(top_posts, 1):
             lines.append(f"  {i}. {title} — {fmt_int(val)}")
 
     if top_stories:
-        lines += ["", f"En İyi 5 Hikaye (Sıralama: {data['story_rank_col']})"]
+        lines += ["", f"Top 5 Stories (Ranked by: {data['story_rank_col']})"]
         for i, (title, val) in enumerate(top_stories, 1):
             lines.append(f"  {i}. {title} — {fmt_int(val)}")
 
@@ -793,19 +799,19 @@ def build_report_text(data: dict) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _safe_json(data) -> str:
-    """JSON dump yapar, </script> injection'ını engeller."""
+    """Dumps JSON while preventing </script> injection."""
     return json.dumps(data, ensure_ascii=False, indent=2).replace("</script>", "<\\/script>")
 
 
 def export_to_html(data: dict, output_path: str) -> None:
-    """Rapor verisini HTML şablonuna enjekte ederek kaydeder."""
+    """Saves by injecting the report data into the HTML template."""
     if not os.path.exists(_TEMPLATE_PATH):
-        raise FileNotFoundError("report_generator.html şablonu bulunamadı!")
+        raise FileNotFoundError("report_generator.html template not found!")
 
     with open(_TEMPLATE_PATH, "r", encoding="utf-8") as f:
         html = f.read()
 
-    # Tuple listelerini JSON'a uygun dict'e çevir
+    # Convert tuple lists into JSON-friendly dicts
     export_data = {**data,
                    "top_posts":   [{"title": t, "value": v} for t, v in data["top_posts"]],
                    "top_stories": [{"title": t, "value": v} for t, v in data["top_stories"]]}
@@ -814,8 +820,8 @@ def export_to_html(data: dict, output_path: str) -> None:
     html = html.replace("</head>", js_block + "</head>")
 
     client = data.get("client_name", "")
-    html = html.replace("<title>Casaba Mahir - Aylık Rapor</title>",
-                        f"<title>{client} - Aylık Rapor</title>")
+    html = html.replace("<title>Casaba Mahir - Monthly Report</title>",
+                        f"<title>{client} - Monthly Report</title>")
     html = html.replace('value="Casaba Mahir"', f'value="{client}"')
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -823,19 +829,19 @@ def export_to_html(data: dict, output_path: str) -> None:
 
 
 def create_index_page(reports_folder: str, clients: list[tuple[str, str]]) -> None:
-    """Tüm müşteri raporlarına bağlantı veren index.html oluşturur."""
+    """Creates an index.html linking to all client reports."""
     cards = "\n".join(
         f'<a href="{fname}" class="client-card">'
         f'<div class="icon">📊</div><h3>{name}</h3>'
-        f'<p>Instagram performans raporu</p>'
-        f'<span class="view-btn">Raporu Görüntüle</span></a>'
+        f'<p>Instagram performance report</p>'
+        f'<span class="view-btn">View Report</span></a>'
         for name, fname in clients
     )
     html = f"""<!DOCTYPE html>
 <html lang="tr">
 <head>
 <meta charset="UTF-8">
-<title>Kotar - Müşteri Raporları</title>
+<title>Kotar - Client Reports</title>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:'Segoe UI',sans-serif;background:#f5f5f5;min-height:100vh;padding:40px 20px}}
@@ -857,10 +863,10 @@ body{{font-family:'Segoe UI',sans-serif;background:#f5f5f5;min-height:100vh;padd
 <div class="container">
   <div class="header">
     <h1>Kotar</h1>
-    <div class="subtitle">Dijital Medya Ajansı</div>
+    <div class="subtitle">Digital Media Agency</div>
   </div>
   <div class="clients-grid">{cards}</div>
-  <div class="footer"><p>{len(clients)} müşteri raporu</p></div>
+  <div class="footer"><p>{len(clients)} client reports</p></div>
 </div>
 </body>
 </html>"""
@@ -872,17 +878,17 @@ body{{font-family:'Segoe UI',sans-serif;background:#f5f5f5;min-height:100vh;padd
 # PDF EXPORT
 # ─────────────────────────────────────────────────────────────────────────────
 
-# macOS Chrome yolu yerine sunucudaki Chromium. Şablon veriyi JS ile bastığı için
-# PDF gerçek bir tarayıcı motoru İSTER — weasyprint/wkhtmltopdf boş sayfa üretirdi.
+# Chromium on the server instead of the macOS Chrome path. Since the template renders
+# data via JS, the PDF NEEDS a real browser engine — weasyprint/wkhtmltopdf would produce a blank page.
 _CHROME = os.environ.get("CHROMIUM_BIN") or "/usr/bin/chromium"
 _PDF_CACHE_DIR = os.path.join(tempfile.gettempdir(), "kotar_pdf_font_cache")
 
 
 def export_to_pdf(html_path: str, pdf_path: str) -> None:
-    """Chrome headless kullanarak HTML dosyasını PDF'e dönüştürür."""
+    """Converts the HTML file to PDF using headless Chrome."""
     import subprocess
 
-    # Relative logo.png → absolute path + JS ile @page yüksekliğini içeriğe göre ayarla
+    # Relative logo.png → absolute path + use JS to set the @page height to fit the content
     html_dir = os.path.dirname(os.path.abspath(html_path))
     with open(html_path, "r", encoding="utf-8") as f:
         html = f.read()
@@ -911,12 +917,13 @@ window.addEventListener('load', function() {
     html = html.replace("</head>", _measure_script + "</head>", 1)
 
     tmp = html_path + "._pdf_tmp.html"
-    # Sunucuda servis `svc-agency` (nologin) olarak koşuyor: HOME'u yazılabilir
-    # değil ve Chromium varsayılan profil dizinini açamayınca "Failed to create
-    # headless user data directory container" ile ÇIKIYOR — PDF hiç üretilmiyordu.
-    # Çözüm HTML'in yanına tek kullanımlık bir profil açmak; HOME da oraya
-    # bakmalı, yoksa crashpad yine ev dizinine uzanıyor. Masaüstünde de zararsız:
-    # profil zaten geçici ve istek sonunda siliniyor.
+    # On the server the service runs as `svc-agency` (nologin): HOME isn't writable,
+    # and when Chromium can't open its default profile directory it EXITS with
+    # "Failed to create headless user data directory container" — no PDF was ever
+    # produced. The fix is to open a single-use profile next to the HTML file; HOME
+    # must point there too, otherwise crashpad still reaches for the home directory.
+    # Harmless on desktop too: the profile is already temporary and gets deleted at
+    # the end of the request.
     profil = os.path.join(os.path.dirname(os.path.abspath(html_path)), "_chrome_profil")
     os.makedirs(profil, exist_ok=True)
     env = {**os.environ, "HOME": profil}
@@ -929,16 +936,17 @@ window.addEventListener('load', function() {
                 "--headless=new", "--disable-gpu", "--no-sandbox",
                 "--no-pdf-header-footer",
                 f"--user-data-dir={profil}",
-                # Crashpad yardımcısı bu ortamda başlatılamıyor ve hata akışını
-                # kirletiyor; PDF için gereği yok.
+                # The crashpad helper can't start in this environment and pollutes
+                # the error stream; not needed for PDF generation.
                 "--disable-crash-reporter", "--no-first-run",
                 "--window-size=1200,800",
-                # Web fontları inene kadar (max ~20sn) sanal zamanı ilerlet;
-                # yazdırmadan önce fontların yüklenmesini garantiler.
+                # Advance virtual time until web fonts load (max ~20s); guarantees
+                # fonts are loaded before printing.
                 "--virtual-time-budget=20000",
-                # Paylaşılan disk cache: ilk PDF fontları indirir, sonrakiler
-                # cache'ten alır → toplu üretimde fallback fonta düşme önlenir
-                # (Türkçe karakterlerin ş/ğ/ç bozulmasının asıl nedeni).
+                # Shared disk cache: the first PDF downloads the fonts, subsequent
+                # ones get them from the cache → prevents falling back to a
+                # substitute font during bulk generation (the actual cause of
+                # Turkish characters ş/ğ/ç getting mangled).
                 f"--disk-cache-dir={_PDF_CACHE_DIR}",
                 f"--print-to-pdf={pdf_path}",
                 f"file://{tmp}",

@@ -1,11 +1,12 @@
-// Görsel Bölücü — 3120×1350 geniş görseli 3 Instagram postuna (1080×1350) böler.
-// Reels modu: orta kareyi 1080×1920 video kapağına çevirir (play overlay'li).
+// Image Splitter — splits a 3120×1350 wide image into 3 Instagram posts (1080×1350).
+// Reels mode: turns the middle frame into a 1080×1920 video cover (with a play overlay).
 import { useRef, useState } from "react"
 import { useMutation } from "@tanstack/react-query"
 import { Download, FileArchive, ImageDown, Upload, Film } from "lucide-react"
 import { toast } from "sonner"
 
 import { ApiError, apiUpload } from "@/lib/api"
+import { useI18n } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { Switch } from "@/components/ui/switch"
@@ -23,6 +24,7 @@ interface SplitResult {
 }
 
 export function ImageSplitterPage() {
+  const { t } = useI18n()
   const fileInput = useRef<HTMLInputElement>(null)
   const [result, setResult] = useState<SplitResult | null>(null)
   const pieces = result?.pieces ?? []
@@ -37,8 +39,11 @@ export function ImageSplitterPage() {
       setPct(0)
       return apiUpload("/tools/image-split", form, setPct).then((d) => d as SplitResult)
     },
-    onSuccess: (r) => { setResult(r); toast.success(reels ? "Reels kapağı hazır" : "Görsel bölündü") },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "İşlem başarısız"),
+    onSuccess: (r) => {
+      setResult(r)
+      toast.success(reels ? t("pages.imageSplitter.reelsReady") : t("pages.imageSplitter.splitDone"))
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("pages.imageSplitter.failed")),
   })
 
   function onPick(e: React.ChangeEvent<HTMLInputElement>) {
@@ -57,9 +62,9 @@ export function ImageSplitterPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Görsel Bölücü</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("pages.imageSplitter.title")}</h1>
         <p className="text-muted-foreground">
-          3120×1350 geniş görseli yan yana 3 Instagram postuna (1080×1350) böler.
+          {t("pages.imageSplitter.subtitle")}
         </p>
       </div>
 
@@ -68,9 +73,9 @@ export function ImageSplitterPage() {
         <div className="flex items-center gap-2">
           <Film className="h-4 w-4 text-muted-foreground" />
           <div>
-            <div className="text-sm font-medium">Reels video kapağı</div>
+            <div className="text-sm font-medium">{t("pages.imageSplitter.reelsToggleTitle")}</div>
             <div className="text-xs text-muted-foreground">
-              Orta kareyi 1080×1920 Reels kapağına çevirir (play düğmesi bindirilir); sol/sağ post kalır.
+              {t("pages.imageSplitter.reelsToggleDesc")}
             </div>
           </div>
         </div>
@@ -79,17 +84,17 @@ export function ImageSplitterPage() {
       <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed p-10 text-center">
         <ImageDown className="h-10 w-10 text-muted-foreground" />
         <p className="text-sm text-muted-foreground">
-          {reels ? "Reels kapağı üretilecek görseli seç" : "Bölünecek görseli seç"} (PNG/JPG, tam 3120×1350).
+          {reels ? t("pages.imageSplitter.pickReelsImage") : t("pages.imageSplitter.pickSplitImage")} (PNG/JPG, {t("pages.imageSplitter.exactSize")}).
         </p>
         <input ref={fileInput} type="file" accept="image/png,image/jpeg" className="hidden" onChange={onPick} />
         <Button onClick={() => fileInput.current?.click()} disabled={split.isPending}>
           <Upload className="mr-1 h-4 w-4" />
-          {split.isPending ? "İşleniyor…" : "Görsel Seç"}
+          {split.isPending ? t("pages.imageSplitter.processing") : t("pages.imageSplitter.pickImageButton")}
         </Button>
         {split.isPending && (
           <div className="w-full max-w-xs space-y-1">
             <Progress value={pct} />
-            <p className="text-[11px] text-muted-foreground">Yükleniyor… %{pct}</p>
+            <p className="text-[11px] text-muted-foreground">{t("pages.imageSplitter.uploadingPct", { pct })}</p>
           </div>
         )}
       </div>
@@ -103,7 +108,7 @@ export function ImageSplitterPage() {
             a.download = result.zip_name
             a.click()
           }}>
-            <FileArchive className="mr-1 h-4 w-4" /> Tümünü ZIP indir
+            <FileArchive className="mr-1 h-4 w-4" /> {t("pages.imageSplitter.downloadZip")}
           </Button>
         </div>
       )}
@@ -113,16 +118,16 @@ export function ImageSplitterPage() {
           {pieces.map((p, i) => (
             <div key={i} className="flex flex-col gap-2 rounded-lg border p-3">
               <div className="relative">
-                <img src={p.data_url} alt={`Parça ${i + 1}`}
+                <img src={p.data_url} alt={t("pages.imageSplitter.pieceAlt", { n: i + 1 })}
                   className="w-full rounded border bg-[repeating-conic-gradient(#e5e5e5_0_25%,#fff_0_50%)] bg-[length:16px_16px]" />
                 {p.is_cover && (
                   <span className="absolute left-2 top-2 rounded bg-primary px-1.5 py-0.5 text-[10px] font-medium text-primary-foreground">
-                    Video kapağı
+                    {t("pages.imageSplitter.videoCoverBadge")}
                   </span>
                 )}
               </div>
               <Button variant="outline" size="sm" onClick={() => download(p)}>
-                <Download className="mr-1 h-3.5 w-3.5" /> {p.is_cover ? "Kapağı indir" : `${i + 1}. parça`}
+                <Download className="mr-1 h-3.5 w-3.5" /> {p.is_cover ? t("pages.imageSplitter.downloadCover") : t("pages.imageSplitter.downloadPiece", { n: i + 1 })}
               </Button>
             </div>
           ))}

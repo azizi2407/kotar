@@ -1,6 +1,6 @@
-"""sso_client.OIDCClient — saf yapı/URL testleri (ağa çıkmaz: üç uç da elle verilir,
-discovery tetiklenmez; PyJWKClient de tembel, JWKS'i ilk `verify()` çağrısına kadar
-çekmez — burada hiç çağrılmıyor)."""
+"""sso_client.OIDCClient — pure struct/URL tests (no network access: all three endpoints
+are given explicitly, discovery is never triggered; PyJWKClient is also lazy and won't
+fetch the JWKS until the first `verify()` call — which never happens here)."""
 from sso_client import OIDCClient
 
 

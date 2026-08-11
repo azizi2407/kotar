@@ -1,14 +1,15 @@
-"""Mail hesap parolaları için Fernet şifreleme. Ana anahtar MAIL_ENC_KEY
-Infisical'da (base64 urlsafe 32B, Fernet.generate_key formatı). Anahtar yoksa
-modül fail-closed: available()=False, encrypt/decrypt MailCryptoError atar.
-Anahtar çalışma anında okunur (import değil) → testte monkeypatch/enjeksiyon çalışır."""
+"""Fernet encryption for mail account passwords. The master key MAIL_ENC_KEY lives
+in Infisical (base64 urlsafe 32B, Fernet.generate_key format). If the key is
+missing, the module fails closed: available()=False, encrypt/decrypt raise
+MailCryptoError. The key is read at call time (not at import) → monkeypatch/injection
+works in tests."""
 import os
 
 from cryptography.fernet import Fernet, InvalidToken
 
 
 class MailCryptoError(Exception):
-    """Şifreleme anahtarı yok veya token geçersiz."""
+    """The encryption key is missing, or the token is invalid."""
 
 
 def _fernet():
@@ -22,7 +23,7 @@ def _fernet():
 
 
 def available():
-    """Şifreleme anahtarı yapılandırılmış mı (mail modülü çalışabilir mi)?"""
+    """Is the encryption key configured (can the mail module work)?"""
     return bool((os.environ.get('MAIL_ENC_KEY') or '').strip())
 
 

@@ -1,4 +1,4 @@
-"""mail_service — yetki, domain allowlist, Fernet round-trip, senkron idempotentliği."""
+"""mail_service — authorization, domain allowlist, Fernet round-trip, sync idempotency."""
 import pytest
 
 import mail_gateway as gw
@@ -35,38 +35,38 @@ def test_create_rejects_foreign_domain():
 def test_create_own_account_ok():
     acc = svc.create_account(NORMAL, {'email': 'mert@example.com', 'password': 'gizli'})
     assert acc.owner_sub == 's1' and acc.id
-    # secret şifreli saklandı, çözülebiliyor
+    # secret is stored encrypted, and can be decrypted
     assert svc.mail_crypto.decrypt(acc.secret_enc) == 'gizli'
 
 
 def test_create_succeeds_when_smtp_blocked(monkeypatch):
-    # SMTP erişilemez olsa da IMAP OK ise hesap oluşur, uyarı yazılır.
-    # (2026-07-31: metin "SMTP doğrulanamadı" → "SMTP sunucusuna erişilemedi";
-    #  kimlik hatasından ayırt edilebilsin diye bilinçli değiştirildi.)
+    # Even if SMTP is unreachable, the account still gets created as long as IMAP is OK, and a warning is written.
+    # (2026-07-31: the text changed from "SMTP could not be verified" to "SMTP server unreachable";
+    #  deliberately changed so it can be distinguished from an auth error.)
     monkeypatch.setattr(gw, 'test_smtp', lambda conn: (_ for _ in ()).throw(gw.MailError('timed out')))
     acc = svc.create_account(NORMAL, {'email': 'mert@example.com', 'password': 'p'})
     assert acc.id
-    assert 'erişilemedi' in (acc.last_error or '')
-    assert 'parola' not in (acc.last_error or '')     # ağ sorunu, kimlik sorunu DEĞİL
+    assert 'unreachable' in (acc.last_error or '')
+    assert 'password' not in (acc.last_error or '')     # network issue, NOT an auth issue
 
 
 def test_create_smtp_KIMLIK_hatasini_agdan_AYIRIR(monkeypatch):
-    """`MailAuthError` `MailError`'ın alt sınıfı; tek `except gw.MailError`
-    ikisini de yakalıyordu ve yanlış SMTP parolası "gönderim şimdilik kapalı"
-    (ağ engeli) gibi görünüyordu. Ağ engeli kalktıktan sonra bu metin aktif
-    olarak yanlış yönlendirir: düzeltilebilir bir parola sorununu "sunucu
-    engeli" sanıp kimse dokunmaz."""
+    """`MailAuthError` is a subclass of `MailError`; a single `except gw.MailError`
+    caught both, so a wrong SMTP password looked like "sending is currently disabled"
+    (network block). After the network block was lifted, this text actively
+    misleads: a fixable password problem gets mistaken for a "server block"
+    and nobody touches it."""
     monkeypatch.setattr(gw, 'test_smtp',
                         lambda conn: (_ for _ in ()).throw(gw.MailAuthError('535 bad password')))
     acc = svc.create_account(NORMAL, {'email': 'mert@example.com', 'password': 'p'})
     assert acc.id
-    assert 'parola' in (acc.last_error or '')
-    assert 'erişilemedi' not in (acc.last_error or '')
+    assert 'password' in (acc.last_error or '')
+    assert 'unreachable' not in (acc.last_error or '')
 
 
 def test_test_account_hata_SINIFINI_raporlar(monkeypatch):
-    """Panelde "parolayı düzelt" ile "sunucuya ulaşılamıyor" farklı işler →
-    uç hatanın sınıfını da döndürür."""
+    """"fix the password" and "server unreachable" are different actions in the panel →
+    the endpoint also returns the error's class."""
     a = _mk()
     monkeypatch.setattr(gw, 'test_smtp',
                         lambda conn: (_ for _ in ()).throw(gw.MailAuthError('535')))
@@ -97,26 +97,26 @@ def test_shared_account_superadmin_only():
 def test_require_account_blocks_foreign():
     a = _mk(owner_sub='s1', email='mert@example.com')
     with pytest.raises(svc.MailAccessError):
-        svc.require_account(OTHER, a.id)  # s2 başkasının özel hesabı
+        svc.require_account(OTHER, a.id)  # s2 is someone else's private account
 
 
 def test_accessible_accounts_own_plus_shared():
     _mk(owner_sub='s1', email='mert@example.com')
-    _mk(owner_sub='s2', email='talu@example.com')            # başkasının özeli — görünmez
-    _mk(owner_sub='s0', email='info@example.com', is_shared=True)  # ortak — görünür
+    _mk(owner_sub='s2', email='talu@example.com')            # someone else's private one — not visible
+    _mk(owner_sub='s0', email='info@example.com', is_shared=True)  # shared — visible
     emails = {a.email for a in svc.accessible_accounts(NORMAL)}
     assert emails == {'mert@example.com', 'info@example.com'}
 
 
-# --- parola güncelleme (2026-07-31) -----------------------------------------
-# Kullanıcı posta sunucusunda parolasını değiştirdi → panel bağlantısı koptu →
-# "Şifreyi güncelle" 500 verdi. Kök neden: panel var olan hesabı GÜNCELLEMİYOR,
-# yeni hesap OLUŞTURMAYI deniyordu (`uq_mail_owner_email` ihlali). Bu blok o
-# akışın backend tarafını çiviliyor.
+# --- password update (2026-07-31) -----------------------------------------
+# The user changed their password on the mail server → the panel connection broke →
+# "Update password" returned a 500. Root cause: the panel wasn't UPDATING the
+# existing account, it was trying to CREATE a new one (violating `uq_mail_owner_email`).
+# This block pins down the backend side of that flow.
 
 def test_parola_guncelleme_IMAP_ile_DOGRULANIR(monkeypatch):
-    """Yanlış parolayı sessizce kaydetmek kullanıcıyı bozuk durumda bırakır —
-    tam olarak düzeltmeye çalıştığı durumda. Doğrulanmadan yazılmamalı."""
+    """Silently saving a wrong password leaves the user in a broken state —
+    exactly the state they were trying to fix. It must not be written without verification."""
     a = _mk(secret='eski')
     monkeypatch.setattr(gw, 'test_imap',
                         lambda conn: (_ for _ in ()).throw(gw.MailAuthError('535 bad')))
@@ -127,10 +127,10 @@ def test_parola_guncelleme_IMAP_ile_DOGRULANIR(monkeypatch):
 
 
 def test_parola_guncelleme_basarilida_saglik_kaydini_TEMIZLER(monkeypatch):
-    """Şerit `last_error`'a bakıyor; temizlenmezse parola düzelse bile hesap
-    "bozuk" görünmeye devam eder (2026-07-31 gönderim yolunda düzeltilen aynı sınıf)."""
+    """The banner looks at `last_error`; if it isn't cleared, the account keeps looking
+    "broken" even after the password is fixed (same class of bug fixed on the sending path 2026-07-31)."""
     a = _mk(secret='eski')
-    a.last_error = 'IMAP kimliği reddedildi'
+    a.last_error = 'IMAP credentials rejected'
     db.session.commit()
     out = svc.update_account(NORMAL, a.id, {'password': 'yeni'})
     assert svc.mail_crypto.decrypt(out.secret_enc) == 'yeni'
@@ -138,65 +138,65 @@ def test_parola_guncelleme_basarilida_saglik_kaydini_TEMIZLER(monkeypatch):
 
 
 def test_parolasiz_guncelleme_IMAP_TESTI_YAPMAZ(monkeypatch):
-    """Yalnız display_name değiştiren istek ağa çıkmamalı."""
+    """A request that only changes display_name must not go over the network."""
     a = _mk()
     monkeypatch.setattr(gw, 'test_imap',
                         lambda conn: (_ for _ in ()).throw(AssertionError('ağa çıkıldı')))
     assert svc.update_account(NORMAL, a.id, {'display_name': 'Mert Y'}).display_name == 'Mert Y'
 
 
-# --- aynı e-postayı ikinci kez bağlama --------------------------------------
+# --- linking the same email a second time -----------------------------------
 
 def test_ayni_hesabi_tekrar_baglamak_ANLASILIR_hata_verir():
-    """Ham `IntegrityError` 500 veriyordu ve panel bunu "Bağlanamadı (e-posta/şifre?)"
-    diye gösteriyordu — parola DOĞRUYKEN bile. Mesaj tam ters yönü işaret ediyordu."""
+    """A raw `IntegrityError` returned a 500 and the panel showed it as "Could not connect
+    (email/password?)" — even when the password was CORRECT. The message pointed in exactly the wrong direction."""
     svc.create_account(NORMAL, {'email': 'mert@example.com', 'password': 'p'})
     with pytest.raises(svc.MailConfigError) as e:
         svc.create_account(NORMAL, {'email': 'mert@example.com', 'password': 'p2'})
-    assert 'zaten bağlı' in str(e.value)
+    assert 'already connected' in str(e.value)
 
 
 def test_silinmis_hesap_yeniden_baglanabilir():
-    """`delete_account` soft-delete (`active=False`) ama unique kısıt satırı görüyor →
-    "kaldır, yeniden bağla" yolu kısıta çarpıyordu. Yeniden bağlama satırı canlandırır."""
+    """`delete_account` soft-deletes (`active=False`), but the unique constraint still sees
+    the row → the "remove, reconnect" path was hitting the constraint. Reconnecting revives the row."""
     acc = svc.create_account(NORMAL, {'email': 'mert@example.com', 'password': 'eski'})
     acc_id = acc.id
     svc.delete_account(NORMAL, acc_id)
     again = svc.create_account(NORMAL, {'email': 'mert@example.com', 'password': 'yeni'})
-    assert again.id == acc_id                 # YENİ satır değil — aynı satır canlandı
+    assert again.id == acc_id                 # not a NEW row — the same row was revived
     assert again.active is True
     assert svc.mail_crypto.decrypt(again.secret_enc) == 'yeni'
 
 
-# --- okuma yolu sağlık kaydını güncelliyor mu? ------------------------------
+# --- does the read path update the health record? ---------------------------
 
 def test_klasor_tazelemede_kimlik_hatasi_SAGLIGA_YAZILIR(monkeypatch):
-    """Parola sunucuda değişince ilk belirti klasör listesinin 502 vermesi. Sağlık
-    kaydı yazılmazsa şerit "Bağlantı sorunu bildirilmedi" (yeşil) demeye devam eder
-    ve "Şifreyi güncelle" düğmesi HİÇ görünmez — kullanıcı elle test etmek zorunda
-    kalır. Bugün tam olarak bu oldu."""
+    """When the password changes on the server, the first symptom is the folder list returning 502.
+    If the health record isn't written, the banner keeps saying "No connection issue reported" (green)
+    and the "Update password" button NEVER appears — the user has to test manually.
+    That's exactly what happened today."""
     a = _mk()
     monkeypatch.setattr(gw, 'list_folders',
                         lambda conn: (_ for _ in ()).throw(gw.MailAuthError('535 auth')))
     with pytest.raises(gw.MailAuthError):
         svc.refresh_folders(a)
-    # Metin `create_account` ile aynı kelimeleri taşımalı: şerit "parola sorunu"
-    # ile "sunucuya ulaşılamıyor"u bu metinden ayırt ediyor ve gateway'in ham
-    # "IMAP giriş başarısız" metni o ayrımı vermiyor.
+    # The text must carry the same words as `create_account`: the banner tells apart
+    # "password issue" from "server unreachable" using this text, and the gateway's raw
+    # "IMAP login failed" text doesn't give that distinction.
     err = db.session.get(MailAccount, a.id).last_error or ''
-    assert '535 auth' in err and 'parola' in err and 'kimliği' in err
+    assert '535 auth' in err and 'password' in err and 'credentials' in err
 
 
 def test_klasor_tazelemede_AG_hatasi_parola_hatasi_gibi_YAZILMAZ(monkeypatch):
-    """Karşıt kontrol: erişim hatası "parolayı kontrol edin" dememeli, yoksa şerit
-    kullanıcıyı düzeltemeyeceği bir işe yollar."""
+    """Counter-check: an access error must not say "check your password", otherwise the banner
+    sends the user to fix something they can't fix."""
     a = _mk()
     monkeypatch.setattr(gw, 'list_folders',
                         lambda conn: (_ for _ in ()).throw(gw.MailError('timed out')))
     with pytest.raises(gw.MailError):
         svc.refresh_folders(a)
     err = db.session.get(MailAccount, a.id).last_error or ''
-    assert 'erişilemedi' in err and 'parola' not in err
+    assert 'unreachable' in err and 'password' not in err
 
 
 def test_conn_for_decrypts():
@@ -224,7 +224,7 @@ def test_sync_folder_idempotent(monkeypatch):
 
 def test_send_sets_reply_and_answered(monkeypatch):
     a = _mk()
-    # kaynak mesaj (yanıtlanacak)
+    # source message (to be replied to)
     monkeypatch.setattr(gw, 'list_folders', lambda conn: [
         {'name': 'INBOX', 'path': 'INBOX', 'flags': '', 'special_use': 'inbox',
          'uidvalidity': 5}])
@@ -255,16 +255,15 @@ def test_send_requires_recipient():
         svc.send_message(NORMAL, a.id, {'to': [], 'subject': 's', 'body_text': 'b'})
 
 
-# --- gönderim hesabın SAĞLIK durumunu günceller (2026-07-31) ----------------
-# Eskiden bunu yalnız `test_account` yapıyordu ve o uç panelden HİÇ çağrılmıyor
-# (`lib/mail.ts`'te `testAccount` var, hiçbir bileşen kullanmıyor). Sonuç: SMTP
-# ağ engeli döneminde yazılan "gönderim kapalı" notu, engel kalktıktan ve
-# gönderim çalışmaya başladıktan sonra da kayıtta kalıyordu — kendiliğinden
-# temizlenen bir yol yoktu.
+# --- sending updates the account's HEALTH status (2026-07-31) ----------------
+# Previously only `test_account` did this, and that endpoint is NEVER called from the panel
+# (`testAccount` exists in `lib/mail.ts`, but no component uses it). Result: the "sending
+# disabled" note written during the SMTP network block period stayed on the record even
+# after the block was lifted and sending started working again — there was no self-clearing path.
 
 def test_basarili_gonderim_BAYAT_hatayi_temizler(monkeypatch):
     a = _mk()
-    a.last_error = 'IMAP OK · SMTP sunucusuna erişilemedi (gönderim kapalı): timed out'
+    a.last_error = 'IMAP OK · SMTP server unreachable (sending disabled): timed out'
     a.last_ok_at = None
     db.session.commit()
 
@@ -284,8 +283,8 @@ def test_basarisiz_gonderim_sebebi_yazar_ve_hatayi_YUKSELTIR(monkeypatch):
     with pytest.raises(gw.MailError):
         svc.send_message(NORMAL, a.id, {'to': ['x@example.com'], 'body_text': 'b'})
     db.session.refresh(a)
-    assert 'erişilemedi' in (a.last_error or '')
-    assert 'parola' not in (a.last_error or '')
+    assert 'unreachable' in (a.last_error or '')
+    assert 'password' not in (a.last_error or '')
 
 
 def test_gonderim_kimlik_hatasi_parolayi_isaret_eder(monkeypatch):
@@ -295,12 +294,12 @@ def test_gonderim_kimlik_hatasi_parolayi_isaret_eder(monkeypatch):
     with pytest.raises(gw.MailAuthError):
         svc.send_message(NORMAL, a.id, {'to': ['x@example.com'], 'body_text': 'b'})
     db.session.refresh(a)
-    assert 'parola' in (a.last_error or '')
+    assert 'password' in (a.last_error or '')
 
 
 def test_basarisiz_gonderim_Sent_APPEND_etmez(monkeypatch):
-    """Gönderilemeyen mesaj Gönderilmiş klasörüne yazılmamalı — kullanıcı
-    gitmediği bir maili gitmiş sanır."""
+    """A message that failed to send must not be written to the Sent folder — otherwise
+    the user thinks an email went out when it didn't."""
     a = _mk()
     appended = []
     monkeypatch.setattr(gw, 'send',

@@ -1,21 +1,22 @@
-"""Kimlik istemcisi — iki mod (`AUTH_MODE` env, varsayılan `oidc`):
+"""Identity client — two modes (`AUTH_MODE` env, default `oidc`):
 
-**oidc** — standart OpenID Connect Authorization Code akışı. Sağlayıcı
-`OIDC_ISSUER`'dan (discovery: `{issuer}/.well-known/openid-configuration`) ya da
-`OIDC_AUTHORIZATION_ENDPOINT`/`OIDC_TOKEN_ENDPOINT`/`OIDC_JWKS_URL` env'leriyle
-elle yapılandırılır (Keycloak/Authentik/Auth0/Google Workspace vb. ile çalışır).
-Rol claim'i standart değildir — `OIDC_ROLE_CLAIM` (varsayılan `role`) hangi custom
-claim/attribute'un okunacağını belirler; claim yoksa `OIDC_DEFAULT_ROLE`
-(varsayılan `pending`) atanır. Akış: `/auth/login` → sağlayıcı → Google/... →
-`/auth/callback?code` → code'u token'a çevir (`exchange`) → `id_token`'ı JWKS ile
-doğrula (`verify`) → claim'ler Flask session'a yazılır.
+**oidc** — standard OpenID Connect Authorization Code flow. The provider is
+configured either via discovery from `OIDC_ISSUER`
+(`{issuer}/.well-known/openid-configuration`) or manually via the
+`OIDC_AUTHORIZATION_ENDPOINT`/`OIDC_TOKEN_ENDPOINT`/`OIDC_JWKS_URL` env vars
+(works with Keycloak/Authentik/Auth0/Google Workspace etc.). The role claim
+isn't standard — `OIDC_ROLE_CLAIM` (default `role`) determines which custom
+claim/attribute is read; if the claim is missing, `OIDC_DEFAULT_ROLE` (default
+`pending`) is assigned. Flow: `/auth/login` → provider → Google/... →
+`/auth/callback?code` → exchange the code for a token (`exchange`) → verify the
+`id_token` with JWKS (`verify`) → claims are written to the Flask session.
 
-**local** — e-posta/parola girişi; kimlik dış sağlayıcıya delege edilmez (bkz.
-`local_auth.py`, `models_auth.py`, `auth.py` POST /auth/local-login`). Bu modda
-`OIDCClient` hiç kurulmaz.
+**local** — email/password login; identity isn't delegated to an external
+provider (see `local_auth.py`, `models_auth.py`, `auth.py` POST
+/auth/local-login`). `OIDCClient` is never set up in this mode.
 
-Her iki modda da sonraki istekler yalnız imzalı Flask session cookie'sine güvenir
-— ne agency'de ne sağlayıcıda sunucu tarafı oturum tablosu vardır.
+In both modes, subsequent requests rely only on the signed Flask session cookie
+— neither the agency nor the provider has a server-side session table.
 """
 import functools
 import os
@@ -43,7 +44,7 @@ class OIDCClient:
             disc = self._discover()
         self.authorization_endpoint = authorization_endpoint or disc['authorization_endpoint']
         self.token_endpoint = token_endpoint or disc['token_endpoint']
-        self._jwks = jwt.PyJWKClient(jwks_url or disc['jwks_uri'])  # public key'i çeker + cache'ler
+        self._jwks = jwt.PyJWKClient(jwks_url or disc['jwks_uri'])  # fetches + caches the public key
 
     def _discover(self):
         r = requests.get(f'{self.issuer}/.well-known/openid-configuration', timeout=10)
@@ -78,19 +79,19 @@ def oidc():
 
 
 def current_user():
-    # Impersonation altında session['user'] hedef kullanıcıdır (etkin kimlik);
-    # tüm rol kontrolleri ve created_by/updated_by bunu okur.
+    # Under impersonation, session['user'] is the target user (the effective
+    # identity); all role checks and created_by/updated_by read this.
     return session.get('user')
 
 
 def real_user():
-    """GERÇEK (giriş yapan) kimlik: impersonation sırasında impersonator, yoksa mevcut."""
+    """The REAL (logged-in) identity: the impersonator during impersonation, else the current one."""
     return session.get('impersonator') or session.get('user')
 
 
 def is_superadmin(u=None):
-    """u (verilmezse gerçek kimlik) impersonation başlatma yetkisine sahip mi?
-    Yetki HER ZAMAN gerçek kimlik üzerinden — impersonate edilen kullanıcı yükseltemez."""
+    """Does u (the real identity if not given) have permission to start impersonation?
+    The check is ALWAYS via the real identity — an impersonated user can't escalate."""
     u = u or real_user()
     if not u:
         return False
@@ -109,7 +110,7 @@ def login_required(fn):
 
 
 def role_required(*roles):
-    """İlgili rollerden biri VEYA management (her şeye erişir)."""
+    """One of the given roles OR management (has access to everything)."""
     def decorator(fn):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):

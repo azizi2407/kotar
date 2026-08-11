@@ -1,9 +1,10 @@
-"""Media worker — proje sahibi bağlamında koşar (Drive indirme + ffmpeg + whisper servisi).
+"""Media worker — runs under the project owner's context (Drive download + ffmpeg + whisper service).
 
-Postgres kuyruğundan 'media' işlerini çeker: Drive'dan videoyu indir → ses varsa
-whisper transkripti → share.transcript'e yaz; birkaç kare çıkar → ilk kareyi
-video thumbnail'i olarak sakla (Drive video thumbnail 404 çözümü). systemd
---user (proje sahibi), Infisical enjeksiyonlu (GOOGLE_SA_JSON) — Drive indirme için.
+Pulls 'media' jobs from the Postgres queue: download the video from Drive → if
+it has audio, whisper transcript → write to share.transcript; extract a few
+frames → store the first as the video thumbnail (works around Drive's video
+thumbnail 404). systemd --user (project owner), Infisical-injected
+(GOOGLE_SA_JSON) — for Drive downloads.
 """
 import glob
 import os
@@ -21,19 +22,19 @@ from models import Client
 from models_sharing import DriveThumbnail, Share
 
 POLL_SECONDS = 5
-CLEANUP_INTERVAL = 3600  # boştayken saatte bir süresi dolan lokal kopyaları sil
+CLEANUP_INTERVAL = 3600  # while idle, delete expired local copies once an hour
 THUMB_WIDTHS = (300, 600)
 
 
 def _frames_dir(share_id):
-    """Kareleri ai_worker'ın okuyabileceği paylaşımlı dizin (data/, gitignore)."""
+    """Shared directory where ai_worker can read frames (data/, gitignored)."""
     d = os.path.join(app.root_path, 'data', 'frames', str(share_id))
     os.makedirs(d, exist_ok=True)
     return d
 
 
 def _write_frames(fdir, frames):
-    """Eski kareleri sil, yeni kareleri frame{i}.jpg olarak yaz."""
+    """Delete old frames, write new ones as frame{i}.jpg."""
     for old in glob.glob(os.path.join(fdir, '*.jpg')):
         os.remove(old)
     for i, fr in enumerate(frames):
@@ -42,14 +43,14 @@ def _write_frames(fdir, frames):
 
 
 def process_web_variant(job):
-    """Tarayıcı uyumlu 1080p H.264 türev üret (`media_store` `web/` altına).
+    """Produce a browser-compatible 1080p H.264 derivative (into `media_store`'s `web/`).
 
-    NEDEN AYRI İŞ: transkod 4K/30sn video için ~1 dk CPU — yükleme isteğinin
-    içinde koşamaz (gunicorn 2 worker × 4 thread, 500 MB'lık yüklemeler zaten
-    thread tutuyor). Yükleme `jobqueue`'ya atar, burada arka planda üretilir;
-    hazır olana kadar `/m/<id>` orijinali oynatmayı dener.
+    WHY A SEPARATE JOB: transcoding a 4K/30s video takes ~1 min of CPU — can't
+    run inside the upload request (gunicorn 2 workers × 4 threads, 500 MB uploads
+    already occupy a thread). The upload enqueues to `jobqueue`, this produces it
+    in the background; until it's ready, `/m/<id>` tries playing the original.
 
-    Orijinal DOKUNULMAZ — "İndir" düğmesi tam kaliteyi vermeye devam eder."""
+    The original is UNTOUCHED — the "Download" button keeps giving full quality."""
     file_id = (job.payload or {}).get('file_id')
     if not file_id:
         raise ValueError('web_variant: file_id yok')
@@ -57,8 +58,8 @@ def process_web_variant(job):
         return {'skipped': 'türev zaten var', 'file_id': file_id}
     src = media_store.find_original(file_id)
     if not src:
-        # 21 günlük pencere dolmuş ya da dosya silinmiş; Drive'dan yeniden
-        # indirmiyoruz — o kopya gidince `/m/` zaten Drive'a yönleniyor.
+        # Either the 21-day window has expired or the file was deleted; we don't
+        # re-download from Drive — once that copy is gone, `/m/` already redirects to Drive anyway.
         return {'skipped': 'lokal orijinal yok', 'file_id': file_id}
     if not media.needs_web_variant(src):
         return {'skipped': 'zaten tarayıcı uyumlu', 'file_id': file_id}
@@ -76,16 +77,16 @@ def process(job):
         raise ValueError(f'share/file_id yok: {share_id}')
     data = dg.download_file(share.file_id)
 
-    # Hangi yol izlenecek İÇERİKTEN belirlenir — `share.kind` YAYIN türüdür
-    # (post/story/reel), dosya türü değil: bir video "post" olarak paylaşılabilir.
-    # `kind`'a güvenmek .mp4'ü PIL'e verip "cannot identify image file" ile
-    # zinciri kırıyordu (share 671, 2026-07-27). `kind` yalnız içerik VE uzantı
-    # birlikte tanınmazsa ipucu olarak kullanılır.
+    # Which path to take is determined from CONTENT — `share.kind` is the
+    # PUBLISHING type (post/story/reel), not the file type: a video can be shared
+    # as a "post". Trusting `kind` used to break the chain by feeding a .mp4 to
+    # PIL and getting "cannot identify image file" (share 671, 2026-07-27).
+    # `kind` is only used as a hint when both content AND extension fail to identify it.
     hint = 'video' if share.kind == 'video' else 'image'
     kind = media.resolve_kind(data, share.file_name, fallback=hint)
 
-    # Görsel paylaşım: küçült → caption görsel bağlamı olarak sakla.
-    # ffprobe/whisper yok; kareyi doğrudan görselden yazarız.
+    # Image share: downscale → store as caption's visual context.
+    # No ffprobe/whisper; we write the frame directly from the image.
     if kind == 'image':
         frame = media.downscale_image(data)
         _write_frames(_frames_dir(share.id), [frame])
@@ -98,12 +99,12 @@ def process(job):
     try:
         audio = media.has_audio(path)
         transcript = ''
-        # Transkript OPSİYONEL (2026-07-18): yalnız job payload'ında use_transcript
-        # istenirse whisper çalışır. Varsayılan kapalı → hız + gereksiz ses işleme yok.
+        # Transcript is OPTIONAL (2026-07-18): whisper only runs if use_transcript
+        # is requested in the job payload. Default off → speed + no unnecessary audio processing.
         use_transcript = bool((job.payload or {}).get('use_transcript'))
         if audio and use_transcript:
-            # Sözlük: bu paylaşımın müşterisi BAŞA konur (kırpılma olursa o hayatta
-            # kalsın — videonun kendi markası en çok geçen ad).
+            # Vocabulary: this share's client goes FIRST (so it survives if
+            # truncated — the video's own brand is the most-repeated name).
             musteri = None
             if share.client_id:
                 c = db.session.get(Client, share.client_id)
@@ -113,19 +114,19 @@ def process(job):
                 initial_prompt=ai_context.transcript_vocabulary(extra=musteri))
         frames = media.extract_frames(path, 3)
         if frames:
-            # ilk kareyi thumbnail cache'e (endpoint video 404'ü yerine bunu sunar)
+            # first frame into the thumbnail cache (served instead of the endpoint's video 404)
             for w in THUMB_WIDTHS:
                 db.session.merge(DriveThumbnail(
                     file_id=share.file_id, width=w, data=frames[0], mime='image/jpeg'))
-            # tüm kareleri diske kaydet (ai_worker caption handler görsel bağlam için okur)
+            # save all frames to disk (ai_worker's caption handler reads them for visual context)
             _write_frames(_frames_dir(share.id), frames)
         share.transcript = transcript or None
         db.session.commit()
         if not frames and not transcript:
-            # Ne kare ne transkript → caption guard'ı sonsuza dek "medya
-            # bekliyor"da kalırdı. Sessiz kalmak yerine anlaşılır hata: iş
-            # failed olur, panelde görünür. (Transkript varsa kare şart değil,
-            # caption metinden üretilebilir.)
+            # Neither frames nor transcript → the caption guard would stay stuck
+            # on "waiting for media" forever. Instead of staying silent, a clear
+            # error: the job fails, visible in the panel. (If there's a
+            # transcript, frames aren't required — the caption can be generated from text.)
             raise ValueError(
                 f'videodan kare/transkript çıkarılamadı (share {share.id}, '
                 f'{share.file_name}) — bozuk dosya veya desteklenmeyen kodek olabilir')
@@ -145,9 +146,9 @@ def run_once():
     try:
         jobqueue.complete(job, process(job))
     except Exception as e:  # noqa: BLE001
-        # Ağ/Drive kopmaları GEÇİCİ: backoff'la requeue (Broken pipe tek denemede
-        # terminal fail oluyordu). Mantık hataları (ör. ValueError) terminal kalır.
-        # OSError, requests.RequestException'ı da kapsar (whisper POST'u).
+        # Network/Drive drops are TRANSIENT: requeue with backoff (a broken pipe
+        # used to terminal-fail on the first attempt). Logic errors (e.g.
+        # ValueError) stay terminal. OSError also covers requests.RequestException (the whisper POST).
         transient = isinstance(e, (dg.DriveError, OSError))
         jobqueue.fail(job, e, transient=transient)
     return True
@@ -164,7 +165,7 @@ def main():
                 print(f'[media_worker] döngü hatası: {e}', flush=True)
                 worked = False
             if not worked:
-                # Boşta janitor: 21 günü dolan lokal medya kopyalarını temizle.
+                # Idle janitor: clean up local media copies past the 21-day window.
                 if time.monotonic() - last_cleanup > CLEANUP_INTERVAL:
                     last_cleanup = time.monotonic()
                     try:

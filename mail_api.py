@@ -1,6 +1,7 @@
-"""/api/mail/* — panel mail modülü uçları. Oturum SSO'dan (session); mutasyonlar
-CSRF korumalı (api.csrf_protect paylaşılır, sharing.py deseni). Erişim owner_sub ile
-sınırlı (IDOR koruması mail_service'te). Anahtar yoksa 503 (fail-closed)."""
+"""/api/mail/* — panel mail module endpoints. Session comes from SSO (session);
+mutations are CSRF-protected (api.csrf_protect is shared, same pattern as
+sharing.py). Access is restricted by owner_sub (IDOR protection lives in
+mail_service). 503 if there's no key (fail-closed)."""
 from flask import Blueprint, Response, jsonify, request
 
 import mail_gateway as gw
@@ -9,15 +10,15 @@ from api import csrf_protect
 from sso_client import current_user
 
 bp = Blueprint('mail', __name__)
-bp.before_request(csrf_protect)  # api ile aynı CSRF
+bp.before_request(csrf_protect)  # same CSRF as api
 
 
 @bp.before_request
 def _require_login_and_config():
     if not current_user():
-        return jsonify(error='oturum yok'), 401
+        return jsonify(error='not authenticated'), 401
     if not gw.available():
-        return jsonify(error='mail modülü yapılandırılmamış (MAIL_ENC_KEY yok)'), 503
+        return jsonify(error='mail module not configured (MAIL_ENC_KEY missing)'), 503
 
 
 @bp.errorhandler(svc.MailAccessError)
@@ -44,7 +45,7 @@ def _u():
     return current_user()
 
 
-# --- hesaplar ---------------------------------------------------------------
+# --- accounts ---------------------------------------------------------------
 @bp.get('/accounts')
 def accounts():
     return jsonify(accounts=[a.to_dict() for a in svc.accessible_accounts(_u())])
@@ -73,7 +74,7 @@ def test_account(acc_id):
     return jsonify(svc.test_account(_u(), acc_id))
 
 
-# --- klasörler & mesajlar ---------------------------------------------------
+# --- folders & messages ---------------------------------------------------
 @bp.get('/<int:acc_id>/folders')
 def folders(acc_id):
     acc = svc.require_account(_u(), acc_id)
@@ -96,7 +97,7 @@ def sync(acc_id, folder_id):
     from extensions import db
     folder = db.session.get(MailFolder, folder_id)
     if folder is None or folder.account_id != acc.id:
-        raise svc.MailAccessError('klasör bulunamadı')
+        raise svc.MailAccessError('folder not found')
     new = svc.sync_folder(acc, folder.path)
     return jsonify(new=new)
 
@@ -124,7 +125,7 @@ def flags(acc_id, msg_id):
     return jsonify(message=m.to_dict())
 
 
-# --- gönderim & taslak ------------------------------------------------------
+# --- sending & drafts ------------------------------------------------------
 @bp.post('/<int:acc_id>/send')
 def send(acc_id):
     out = svc.send_message(_u(), acc_id, request.get_json(force=True) or {})

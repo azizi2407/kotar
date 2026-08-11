@@ -1,5 +1,5 @@
-"""/api/client-tracking — Müşteri Takip: yetki, katalog, durum hücreleri, aktivite
-günlüğü, türetilmiş sinyaller ve liste ucunun N+1 muhafızı."""
+"""/api/client-tracking — Client Tracking: authorization, catalog, status cells, activity
+log, derived signals, and the list endpoint's N+1 guard."""
 import datetime as dt
 
 from sqlalchemy import event
@@ -11,7 +11,7 @@ from test_session_csrf import csrf_headers
 BASE = '/api/client-tracking'
 
 
-# --- yardımcılar ---------------------------------------------------------
+# --- helpers ---------------------------------------------------------------
 
 def _client_id(client, name='Takip Müşteri'):
     login_as(client, MANAGER)
@@ -42,7 +42,7 @@ def _add_note(client, cid, **kw):
 
 
 def _row(client, cid):
-    """Liste yanıtından bir müşterinin satırını çek."""
+    """Pull one client's row from the list response."""
     rows = client.get(BASE).get_json()['clients']
     return next(r for r in rows if r['client_id'] == cid)
 
@@ -68,7 +68,7 @@ def _mk_shoot(cid, day, status='pending'):
     return task
 
 
-# --- yetki / CSRF --------------------------------------------------------
+# --- authorization / CSRF ---------------------------------------------------
 
 def test_no_session_401(client):
     assert client.get(BASE).status_code == 401
@@ -107,7 +107,7 @@ def test_note_delete_without_csrf_403(client):
     assert client.delete(f'{BASE}/notes/{note_id}').status_code == 403
 
 
-# --- tohumlama -----------------------------------------------------------
+# --- seeding -----------------------------------------------------------------
 
 def test_seed_creates_twelve_items(client):
     login_as(client, MANAGER)
@@ -115,13 +115,13 @@ def test_seed_creates_twelve_items(client):
     assert len(items) == 12
     assert [i['position'] for i in items] == list(range(12))
     assert len({i['key'] for i in items}) == 12
-    assert items[0]['name'] == 'Marka Tescili'
+    assert items[0]['name'] == 'Trademark Registration'
 
 
 def test_seed_idempotent(client):
     login_as(client, MANAGER)
     _items(client)
-    client.get(BASE)          # liste ucu da tohumlar — çift kayıt olmamalı
+    client.get(BASE)          # the list endpoint also seeds — must not create duplicates
     assert len(_items(client)) == 12
 
 
@@ -133,7 +133,7 @@ def test_seed_does_not_resurrect_deleted_item(client):
     assert len(client.get(BASE).get_json()['items']) == 11
 
 
-# --- katalog CRUD --------------------------------------------------------
+# --- catalog CRUD ------------------------------------------------------------
 
 def test_create_item_appends_position(client):
     login_as(client, MANAGER)
@@ -148,10 +148,10 @@ def test_create_item_appends_position(client):
 def test_duplicate_item_name_rejected(client):
     login_as(client, MANAGER)
     _items(client)
-    r = client.post(f'{BASE}/items', json={'name': 'web SİTESİ'},
+    r = client.post(f'{BASE}/items', json={'name': 'WEBSITE'},
                     headers=csrf_headers(client))
     assert r.status_code == 400
-    assert 'zaten var' in r.get_json()['error']
+    assert 'already exists' in r.get_json()['error']
 
 
 def test_bad_category_rejected(client):
@@ -170,7 +170,7 @@ def test_inactive_item_flagged_but_entry_kept(client):
                  headers=csrf_headers(client))
     payload = client.get(BASE).get_json()
     assert next(i for i in payload['items'] if i['id'] == item_id)['active'] is False
-    # kayıt duruyor ama fırsat sayımına girmiyor (aktif değil)
+    # the record stays but doesn't count toward opportunity (not active)
     row = next(r for r in payload['clients'] if r['client_id'] == cid)
     assert row['entries'][str(item_id)]['status'] == 'var'
     assert row['summary']['opportunity'] == 11
@@ -197,7 +197,7 @@ def test_reorder_items(client):
     assert bad.status_code == 400
 
 
-# --- durum hücreleri -----------------------------------------------------
+# --- status cells -------------------------------------------------------------
 
 def test_put_entry_upserts_single_row(client):
     from models import ClientTrackingEntry
@@ -215,7 +215,7 @@ def test_bad_status_rejected(client):
     cid = _client_id(client)
     item_id = _item_id(client)
     r = _put_entry(client, cid, item_id, status='belki')
-    assert r.status_code == 400 and 'geçersiz durum' in r.get_json()['error']
+    assert r.status_code == 400 and 'invalid status' in r.get_json()['error']
 
 
 def test_bad_url_rejected(client):
@@ -262,10 +262,10 @@ def test_summary_opportunity_count(client):
     summary = _row(client, cid)['summary']
     assert summary['var'] == 2 and summary['surecte'] == 1
     assert summary['yok'] == 9
-    assert summary['opportunity'] == 9      # 12 aktif kalem - 3 kapatılan
+    assert summary['opportunity'] == 9      # 12 active items - 3 closed
 
 
-# --- aktivite günlüğü ----------------------------------------------------
+# --- activity log --------------------------------------------------------------
 
 def test_add_note_and_last_note_is_newest(client):
     cid = _client_id(client)
@@ -277,7 +277,7 @@ def test_add_note_and_last_note_is_newest(client):
 def test_note_requires_text(client):
     cid = _client_id(client)
     r = _add_note(client, cid, text='   ')
-    assert r.status_code == 400 and 'zorunlu' in r.get_json()['error']
+    assert r.status_code == 400 and 'required' in r.get_json()['error']
 
 
 def test_note_soft_delete_falls_back(client):
@@ -318,20 +318,20 @@ def test_note_patch_updates_text(client):
     assert r.status_code == 200 and r.get_json()['note']['text'] == 'düzeltildi'
 
 
-# --- türetilmiş sinyaller ------------------------------------------------
+# --- derived signals -----------------------------------------------------------
 
 def test_last_ad_date_derived(client):
     cid = _client_id(client)
     _mk_campaign(cid, '2026-01-01', '2026-02-01', status='finished')
     _mk_campaign(cid, '2026-03-01', '2026-03-20', status='finished')
-    _mk_campaign(cid, '2026-05-01', '2026-12-31', deleted=True)   # sayılmamalı
+    _mk_campaign(cid, '2026-05-01', '2026-12-31', deleted=True)   # should not be counted
     signals = _row(client, cid)['signals']
     assert signals['last_ad_date'] == '2026-03-20'
     assert signals['ad_count'] == 2
 
 
 def test_ad_active_flag(client):
-    """Devam eden kampanyada 'son reklam' BUGÜN'dür — hâlâ yayında."""
+    """For an ongoing campaign, the 'last ad' is TODAY — it's still live."""
     cid = _client_id(client)
     _mk_campaign(cid, '2026-01-01', None, status='active')
     signals = _row(client, cid)['signals']
@@ -340,8 +340,8 @@ def test_ad_active_flag(client):
 
 
 def test_future_end_date_clamped_to_today(client):
-    """İleride bitecek kampanya 'son reklam'ı İLERİ TARİHE taşımamalı (canlı veride
-    görülen kusur: bugün 25 Tem iken 'son reklam 27 Tem' yazıyordu)."""
+    """A campaign ending in the future must not push 'last ad' into the FUTURE (a bug
+    seen in live data: with today being Jul 25, it showed 'last ad Jul 27')."""
     cid = _client_id(client)
     today = dt.date.today()
     _mk_campaign(cid, (today - dt.timedelta(days=10)).isoformat(),
@@ -350,22 +350,22 @@ def test_future_end_date_clamped_to_today(client):
 
 
 def test_not_yet_started_campaign_is_not_last_ad(client):
-    """Planlanmış ama başlamamış kampanya 'reklam çıkıldı' saymaz."""
+    """A planned-but-not-yet-started campaign does not count as 'ad ran'."""
     cid = _client_id(client)
     future = (dt.date.today() + dt.timedelta(days=15)).isoformat()
     _mk_campaign(cid, future, None, status='planned')
     signals = _row(client, cid)['signals']
     assert signals['last_ad_date'] is None
-    assert signals['ad_count'] == 1          # kayıt var, ama henüz yayına girmedi
+    assert signals['ad_count'] == 1          # record exists, but hasn't gone live yet
 
 
 def test_last_shoot_prefers_past_plan(client):
-    """Sahada `completed` işaretlenmiyor (73 pending / 3 completed) — bu yüzden
-    'son çekim' tarihi geçmiş en yeni PLAN, status'e bakılmaz."""
+    """In the field, `completed` doesn't get marked (73 pending / 3 completed) — so
+    'last shoot' date is the newest PAST plan, regardless of status."""
     cid = _client_id(client)
     today = dt.date.today()
     _mk_shoot(cid, (today - dt.timedelta(days=30)).isoformat())
-    _mk_shoot(cid, (today - dt.timedelta(days=3)).isoformat())    # pending ama en yeni geçmiş
+    _mk_shoot(cid, (today - dt.timedelta(days=3)).isoformat())    # pending but the newest past one
     _mk_shoot(cid, (today + dt.timedelta(days=10)).isoformat())
     signals = _row(client, cid)['signals']
     assert signals['last_shoot_date'] == (today - dt.timedelta(days=3)).isoformat()
@@ -393,7 +393,7 @@ def test_signals_null_for_empty_client(client):
     assert row['last_note'] is None
 
 
-# --- liste ucu genel -----------------------------------------------------
+# --- list endpoint general -----------------------------------------------------
 
 def test_list_search_filters_by_name(client):
     _client_id(client, 'Alfa Firma')
@@ -409,8 +409,8 @@ def test_deleted_client_not_listed(client):
 
 
 def test_list_query_count_constant_with_client_count(client):
-    """N+1 MUHAFIZI — liste ucunun sorgu sayısı müşteri sayısından BAĞIMSIZ olmalı.
-    Serializer'a lazy erişim (client.ad_campaigns, entry.item…) eklenirse bu test kırılır."""
+    """N+1 GUARD — the list endpoint's query count must be INDEPENDENT of client count.
+    If lazy access (client.ad_campaigns, entry.item…) gets added to the serializer, this test breaks."""
     def count_queries(n_clients):
         db.drop_all()
         db.create_all()
@@ -437,7 +437,7 @@ def test_list_query_count_constant_with_client_count(client):
     assert count_queries(2) == count_queries(6)
 
 
-# --- detay ucu -----------------------------------------------------------
+# --- detail endpoint -----------------------------------------------------------
 
 def test_detail_returns_notes_ads_shoots(client):
     cid = _client_id(client)
@@ -448,7 +448,7 @@ def test_detail_returns_notes_ads_shoots(client):
     assert body['client']['name'] == 'Takip Müşteri'
     assert [n['text'] for n in body['notes']] == ['ilk temas']
     assert len(body['ads']) == 1 and len(body['shoots']) == 1
-    assert 'amount_spent' not in body['ads'][0]   # mali veri bilerek dışarıda
+    assert 'amount_spent' not in body['ads'][0]   # financial data intentionally excluded
 
 
 def test_detail_unknown_client_404(client):

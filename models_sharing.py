@@ -1,22 +1,22 @@
-"""Sharing Board domain modelleri (Faz 2a çekirdeği).
+"""Sharing Board domain models (Phase 2a core).
 
-Eski monolitin paralel iki modeli (yeni `sharing_shares` + terk edilmiş
-`sharing_card_status`) analiz edildi: **shares yetkili**, card_status yalnız
-W20-W22 tarihsel arşiv (bkz LegacyCardStatus). Ana eksen `(client_id, week_iso)`,
-week_iso = ISO hafta string'i "YYYY-Www".
+The old monolith's two parallel models (new `sharing_shares` + abandoned
+`sharing_card_status`) were analyzed: **shares is authoritative**, card_status is
+only a W20-W22 historical archive (see LegacyCardStatus). The main axis is
+`(client_id, week_iso)`, week_iso = ISO week string "YYYY-Www".
 
-PostgreSQL dönüşümü: durum/tür alanları native PG enum (sqlite'ta VARCHAR+CHECK'e
-düşer), yarı-yapısal alanlar JSONB (sqlite'ta JSON), gerçek FK + timestamptz.
-`legacy_mongo_id` idempotent göç anahtarı.
+PostgreSQL conversion: status/type fields are native PG enums (fall back to
+VARCHAR+CHECK on sqlite), semi-structured fields are JSONB (JSON on sqlite), real
+FKs + timestamptz. `legacy_mongo_id` is an idempotent migration key.
 """
 from sqlalchemy.dialects.postgresql import JSONB
 
 from extensions import db
 from models import iso, utcnow
 
-# PG'de JSONB, sqlite testlerinde JSON'a düşer.
-# none_as_null=True: Python None → SQL NULL (JSON 'null' skaleri değil) → IS NULL
-# sorguları tutarlı, gereksiz JSON-null yazımı olmaz.
+# JSONB on PG, falls back to JSON in sqlite tests.
+# none_as_null=True: Python None → SQL NULL (not the JSON 'null' scalar) → IS NULL
+# queries stay consistent, no pointless JSON-null writes.
 JSONB_ = JSONB(none_as_null=True).with_variant(db.JSON(none_as_null=True), 'sqlite')
 
 SHARE_KINDS = ('post', 'story', 'video', 'linkedin')
@@ -33,7 +33,7 @@ ShootStatus = db.Enum(*SHOOT_STATUSES, name='shoot_status')
 
 
 class Share(db.Model):
-    """Yetkili paylaşım kaydı — satır = tek paylaşım."""
+    """Authoritative share record — one row = one share."""
     __tablename__ = 'shares'
     __table_args__ = (db.Index('ix_shares_client_week', 'client_id', 'week_iso'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -58,8 +58,8 @@ class Share(db.Model):
 
     platforms = db.Column(JSONB_)       # {instagram|story|linkedin: {published_at, url}}
     client_review = db.Column(JSONB_)   # {status: approved|revision_requested, note, at}
-    transcript = db.Column(db.Text)     # video ses transkripti (media_worker; caption bağlamı)
-    caption_suggestions = db.Column(JSONB_)  # {captions:[...], hashtags} — son üretilen (kalıcı; modal kapansa bile durur)
+    transcript = db.Column(db.Text)     # video audio transcript (media_worker; caption context)
+    caption_suggestions = db.Column(JSONB_)  # {captions:[...], hashtags} — last generated (persistent; stays even if the modal closes)
     revision = db.Column(db.Integer, nullable=False, default=0)
 
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
@@ -91,7 +91,7 @@ class Share(db.Model):
 
 
 class CardUpload(db.Model):
-    """Drive'a yüklenen ham dosya kaydı (paylaşım seçici kaynağı)."""
+    """Record of a raw file uploaded to Drive (source for the sharing picker)."""
     __tablename__ = 'card_uploads'
     __table_args__ = (db.Index('ix_uploads_client_week', 'client_id', 'week_iso'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -128,7 +128,7 @@ class CardUpload(db.Model):
 
 
 class ReviewLink(db.Model):
-    """Public /review/<token> için tek-kullanımlık olmayan onay linki."""
+    """Non-single-use approval link for the public /review/<token>."""
     __tablename__ = 'review_links'
     __table_args__ = (db.Index('ix_review_client_week', 'client_id', 'week_iso'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -147,7 +147,8 @@ class ReviewLink(db.Model):
 
 
 class RevisionRequest(db.Model):
-    """Revizyon talebi (tasarım veya video). Tam akış Faz 2c; tablo+durum burada."""
+    """Revision request (design or video). Full flow is Phase 2c; table+status live
+    here."""
     __tablename__ = 'revision_requests'
     id = db.Column(db.Integer, primary_key=True)
     legacy_mongo_id = db.Column(db.String(24), unique=True)
@@ -172,7 +173,7 @@ class RevisionRequest(db.Model):
 
 
 class ClientPriority(db.Model):
-    """Haftalık öncelik bayrağı (aktif = cleared_at NULL)."""
+    """Weekly priority flag (active = cleared_at NULL)."""
     __tablename__ = 'client_priority'
     __table_args__ = (db.UniqueConstraint('client_id', 'week_iso'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -186,7 +187,7 @@ class ClientPriority(db.Model):
 
 
 class SpecialDayEvent(db.Model):
-    """Özel gün/hafta kaynağı. client_id NULL=global, dolu=müşteriye özel."""
+    """Special day/week source. client_id NULL=global, set=client-specific."""
     __tablename__ = 'special_days_events'
     id = db.Column(db.Integer, primary_key=True)
     legacy_mongo_id = db.Column(db.String(24), unique=True)
@@ -200,8 +201,9 @@ class SpecialDayEvent(db.Model):
     date_start = db.Column(db.Integer)
     date_end = db.Column(db.Integer)
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'))
-    # onay kapısı: server_default = mevcut/elle-girme kayıtlar (approved/manual),
-    # ORM default = yeni AI insert'leri (draft/ai). İkisi AYRI olmalı (geriye uyum).
+    # approval gate: server_default = existing/manually-entered records
+    # (approved/manual), ORM default = new AI inserts (draft/ai). The two must stay
+    # SEPARATE (backward compatibility).
     status = db.Column(db.String(16), nullable=False, server_default='approved', default='draft')
     generated_by = db.Column(db.String(16), nullable=False, server_default='manual', default='ai')
 
@@ -215,7 +217,7 @@ class SpecialDayEvent(db.Model):
 
 
 class SpecialCardStatus(db.Model):
-    """Bir özel günün bir haftada yayınlandığı işareti."""
+    """Marker that a special day was published in a given week."""
     __tablename__ = 'special_card_status'
     __table_args__ = (db.UniqueConstraint('client_id', 'week_iso', 'event_id'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -232,19 +234,19 @@ class SpecialCardStatus(db.Model):
 
 
 class SpecialDaySelection(db.Model):
-    """Müşterinin bir ay için seçtiği özel günler (event id listesi)."""
+    """Special days a client selected for a given month (list of event ids)."""
     __tablename__ = 'special_day_selections'
     id = db.Column(db.Integer, primary_key=True)
     legacy_mongo_id = db.Column(db.String(24), unique=True)
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), nullable=False)
-    selected_event_ids = db.Column(JSONB_)   # [yeni SpecialDayEvent.id, ...]
+    selected_event_ids = db.Column(JSONB_)   # [new SpecialDayEvent.id, ...]
     token = db.Column(db.String(64))
     month = db.Column(db.Integer)
     year = db.Column(db.Integer)
 
 
 class CaptionHistory(db.Model):
-    """Seçilmiş caption geçmişi (yeniden kullanım için)."""
+    """History of selected captions (for reuse)."""
     __tablename__ = 'caption_history'
     __table_args__ = (db.Index('ix_caption_client', 'client_id'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -260,8 +262,8 @@ class CaptionHistory(db.Model):
 
 
 class ShootTask(db.Model):
-    """Videografçı çekim planı görevi (Kanban kartı). scheduled_date = gün kolonu,
-    position = kolon içi sıra."""
+    """Videographer's shoot plan task (Kanban card). scheduled_date = day column,
+    position = order within the column."""
     __tablename__ = 'shoot_tasks'
     __table_args__ = (db.Index('ix_shoot_date', 'scheduled_date'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -300,7 +302,7 @@ class ShootTask(db.Model):
 
 
 class VideographerBusinessMark(db.Model):
-    """Bir müşterinin o hafta 'videosu var' işareti."""
+    """Marker that a client "has a video" for that week."""
     __tablename__ = 'videographer_business_marks'
     __table_args__ = (db.UniqueConstraint('client_id', 'week_iso'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -313,7 +315,7 @@ class VideographerBusinessMark(db.Model):
 
 
 class VideographerPhoto(db.Model):
-    """Çekimden yüklenen fotoğraf (Drive referansı)."""
+    """Photo uploaded from a shoot (Drive reference)."""
     __tablename__ = 'videographer_photos'
     id = db.Column(db.Integer, primary_key=True)
     legacy_mongo_id = db.Column(db.String(24), unique=True)
@@ -327,40 +329,42 @@ class VideographerPhoto(db.Model):
     uploaded_by = db.Column(db.String(64))
     uploaded_at = db.Column(db.DateTime(timezone=True))
     deleted_at = db.Column(db.DateTime(timezone=True))
-    # designer bu fotoğrafı kullandığında işaretlenir (designer board sonraki işte
-    # bağlanacak; şimdilik used-mark ucundan set edilir). used_at NULL = kullanılmadı.
+    # marked when the designer uses this photo (will be linked to the designer
+    # board in a future task; for now it's set from the used-mark endpoint).
+    # used_at NULL = unused.
     used_at = db.Column(db.DateTime(timezone=True))
     used_by = db.Column(db.String(64))
 
 
 class DepotFile(db.Model):
-    """Videograf Deposu (2026-07-25) — tüm videograflar + yönetim için ORTAK serbest
-    dosya alanı. Müşteriye ve haftaya BAĞLI DEĞİL (bilinçli: depo bir çalışma alanı,
-    teslim kanalı değil).
+    """Videographer Depot (2026-07-25) — a SHARED free-form file area for all
+    videographers + management. NOT tied to a client or a week (deliberate: the
+    depot is a workspace, not a delivery channel).
 
-    Drive'da `<içerik kökü>/Videograf Deposu` altında TEK DÜZ klasör; kişi/ay alt klasörü yok.
-    Kota (ortak 5 GB) sayaç kolonuyla DEĞİL, her istekte `SUM(file_size)` ile ölçülür
-    (`depot._used_bytes`) — sayaç, Drive yüklemesi ile DB commit'i arasındaki her
-    çökmede kalıcı drift üretir ve mutabakat işi gerektirirdi.
+    A SINGLE FLAT folder in Drive under `<content root>/Videograf Deposu`; no
+    per-person/month subfolders. The quota (shared 5 GB) is measured with
+    `SUM(file_size)` on each request (`depot._used_bytes`), NOT with a counter
+    column — a counter would drift permanently on every crash between the Drive
+    upload and the DB commit and would need a reconciliation job.
 
-    Silme İKİ KATMANLI: DB'de soft-delete (`deleted_at` → kota anında boşalır) +
-    Drive'da çöp kutusu (`dg.trash_file`, 30 gün geri alınabilir). Drive tarafı hata
-    verse bile DB satırı soft-delete edilir; aksi halde tek Drive hıçkırığı dosyayı
-    silinemez yapıp kotayı kalıcı meşgul ederdi.
+    Deletion is TWO-LAYERED: soft-delete in the DB (`deleted_at` → quota frees up
+    immediately) + trash in Drive (`dg.trash_file`, recoverable for 30 days). The DB
+    row is soft-deleted even if the Drive side errors; otherwise a single Drive
+    hiccup would make the file undeletable and keep the quota permanently occupied.
 
-    `media_store`'a KOPYALANMAZ: depo dosyalarını hiçbir uç lokal servis etmiyor
-    (Drive kanonik, önizleme/stream yok) — 5 GB'ı 21 gün diskte ikinci kez tutmanın
-    karşılığı olmaz."""
+    NOT COPIED to `media_store`: no endpoint serves depot files locally (Drive is
+    canonical, no preview/stream) — keeping 5 GB on disk a second time for 21 days
+    isn't worth it."""
     __tablename__ = 'depot_files'
     __table_args__ = (db.Index('ix_depot_files_uploaded', 'deleted_at', 'uploaded_at'),)
 
     id = db.Column(db.Integer, primary_key=True)
-    file_id = db.Column(db.String(128), nullable=False, unique=True)   # Drive dosya id
-    folder_id = db.Column(db.String(128))            # 'Videograf Deposu' klasör id (iz)
+    file_id = db.Column(db.String(128), nullable=False, unique=True)   # Drive file id
+    folder_id = db.Column(db.String(128))            # 'Videograf Deposu' folder id (trace)
     file_name = db.Column(db.String(512), nullable=False)
     mime_type = db.Column(db.String(128))
-    file_size = db.Column(db.BigInteger, nullable=False)   # kota aritmetiği — ASLA NULL
-    note = db.Column(db.String(300))                 # opsiyonel açıklama
+    file_size = db.Column(db.BigInteger, nullable=False)   # quota arithmetic — NEVER NULL
+    note = db.Column(db.String(300))                 # optional description
     uploaded_by = db.Column(db.String(64))           # SSO sub
     uploaded_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     deleted_at = db.Column(db.DateTime(timezone=True))
@@ -374,19 +378,19 @@ class DepotFile(db.Model):
 
 
 class VideographerIdea(db.Model):
-    """AI trend-öneri kartı (Faz 5, step 17): videografçıya `link + neden + çekim
-    fikri`. `videographer_ideas` handler küratörlü YouTube/Vimeo RSS trendlerini
-    (handler-içi Python çekme, `ai_claude` DIŞINDA) toplayıp `wrap_untrusted` ile
-    sararak `ai_claude.run`'a süzdürür; üretilen öneriler status='new' yazılır.
-    Videografçı beğenir (çekim listesine ShootTask olarak eklenir → status='accepted')
-    ya da atlar (status='skipped')."""
+    """AI trend-suggestion card (Phase 5, step 17): `link + reason + shoot idea` for
+    the videographer. The `videographer_ideas` handler gathers curated YouTube/Vimeo
+    RSS trends (fetched in-handler with Python, OUTSIDE `ai_claude`), wraps them
+    with `wrap_untrusted` and feeds them into `ai_claude.run`; generated suggestions
+    are written with status='new'. The videographer likes one (added to the shoot
+    list as a ShootTask → status='accepted') or skips it (status='skipped')."""
     __tablename__ = 'videographer_ideas'
     __table_args__ = (db.Index('ix_vg_ideas_client', 'client_id'),)
     id = db.Column(db.Integer, primary_key=True)
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), nullable=False)
-    reference_link = db.Column(db.Text)   # ilham veren trend videosunun linki
-    reason = db.Column(db.Text)           # neden bu müşteriye uygun
-    shoot_idea = db.Column(db.Text)       # somut çekim fikri
+    reference_link = db.Column(db.Text)   # link to the trend video that inspired this
+    reason = db.Column(db.Text)           # why it fits this client
+    shoot_idea = db.Column(db.Text)       # concrete shoot idea
     status = db.Column(db.String(16), nullable=False, default='new')  # new|accepted|skipped
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
 
@@ -398,29 +402,31 @@ class VideographerIdea(db.Model):
 
 
 class ImageGeneration(db.Model):
-    """AI görsel üretim izi (Faz 6, step 19). GATE 18 kararı (faz6-magnific-spike.md):
-    MCP-via-`claude -p` NO-GO (headless subprocess Magnific'e bağlanamıyor) → üretim
-    Magnific/Freepik REST API + `x-magnific-api-key` ile handler-içi `requests`
-    (videographer GATE 16 deseni; `ai_claude` savunması korunur). Opsiyonel prompt
-    rafinasyonu tek-atış `ai_claude.run` (MCP kapalı). Üretilen asset Drive/müşteri
-    klasörüne düşer, satır status='pending' (onay bekler) ile açılır; management onaylar
-    (status='approved') ya da yeniden üretir. KVKK (spike §5): yalnız müşteri onayı
-    (Client.brand_profile.ai_image_consent) verilmişse üretim yapılır — onaysız müşteride
-    Magnific'e görsel GÖNDERİLMEZ. Üretim izi (hangi görsel/müşteri/ne zaman) burada
-    tutulur (denetlenebilirlik)."""
+    """AI image generation trace (Phase 6, step 19). GATE 18 decision
+    (faz6-magnific-spike.md): MCP-via-`claude -p` is a NO-GO (a headless subprocess
+    can't connect to Magnific) → generation uses the Magnific/Freepik REST API +
+    `x-magnific-api-key` with in-handler `requests` (videographer GATE 16 pattern;
+    `ai_claude`'s defenses are preserved). Optional prompt refinement is a one-shot
+    `ai_claude.run` (MCP disabled). The generated asset lands in the client's Drive
+    folder, the row opens with status='pending' (awaiting approval); management
+    approves (status='approved') or regenerates. GDPR/KVKK (spike §5): generation
+    only happens if the client has given consent
+    (Client.brand_profile.ai_image_consent) — without consent, NO image is sent to
+    Magnific for that client. The generation trace (which image/client/when) is kept
+    here (auditability)."""
     __tablename__ = 'image_generations'
     __table_args__ = (db.Index('ix_imggen_client', 'client_id'),)
     id = db.Column(db.Integer, primary_key=True)
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), nullable=False)
-    brief_id = db.Column(db.Integer, db.ForeignKey('weekly_briefs.id'))  # opsiyonel onaylı brief girdisi
-    prompt = db.Column(db.Text)          # üretim için kullanılan (varsa rafine edilmiş) prompt
-    refs = db.Column(JSONB_)             # referans görsel id/URL listesi
+    brief_id = db.Column(db.Integer, db.ForeignKey('weekly_briefs.id'))  # optional linked approved-brief entry
+    prompt = db.Column(db.Text)          # the (possibly refined) prompt actually used for generation
+    refs = db.Column(JSONB_)             # list of reference image ids/URLs
     settings = db.Column(JSONB_)         # {type, model, effort, refine, prompt}
     asset_id = db.Column(db.String(128))  # Magnific creation id
     result_url = db.Column(db.Text)       # Magnific asset URL
     drive_file_id = db.Column(db.String(128))
     drive_file_name = db.Column(db.String(512))
-    # onay kapısı: yeni üretim status='pending' (onay bekler); management onaylar/yeniden üretir
+    # approval gate: new generation is status='pending' (awaiting approval); management approves/regenerates
     status = db.Column(db.String(16), nullable=False, default='pending')  # pending|approved|rejected
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     created_by = db.Column(db.String(64))
@@ -437,8 +443,8 @@ class ImageGeneration(db.Model):
 
 
 class WeeklyBrief(db.Model):
-    """Haftalık içerik brief'i (müşteri × hafta). Bir vault'tan senkronlanır;
-    içerik fikirleri + intro + ham markdown. Ekip okur (üretim değil)."""
+    """Weekly content brief (client × week). Synced from a vault; content ideas +
+    intro + raw markdown. Read by the team (not generation)."""
     __tablename__ = 'weekly_briefs'
     __table_args__ = (db.Index('ix_brief_client_week', 'client_id', 'week_iso'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -452,22 +458,27 @@ class WeeklyBrief(db.Model):
     frontmatter = db.Column(JSONB_)
     week_notes = db.Column(JSONB_)
     source_path = db.Column(db.String(512))
-    # AI brief'lerde (synced_at NULL) "en güncel" seçimi COALESCE(synced_at, created_at)
-    # ile created_at'e düşer → created_at boş kalmamalı. default=utcnow: handler ayrıca
-    # açıkça set etse de (step 13) diğer insert yolları için güvenli varsayılan. Import
-    # kayıtları created_at'i kendileri verir (geriye uyum bozulmaz).
+    # For AI briefs (synced_at NULL), the "most recent" pick falls back to created_at
+    # via COALESCE(synced_at, created_at) → created_at must never be empty.
+    # default=utcnow: even though the handler also sets it explicitly (step 13),
+    # this is a safe default for other insert paths. Import records supply their
+    # own created_at (backward compatibility isn't broken).
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     synced_at = db.Column(db.DateTime(timezone=True))
-    # ONAY KAPISI KALDIRILDI (2026-07-30, proje sahibi kararı: "brief'ler üretildikten sonra onay
-    # beklemesin, hepsi doğrudan işlensin"). Eskiden ORM default 'draft' idi → her AI brief'i
-    # elle onay bekliyordu ve onaylanana kadar caption bağlamına girmiyordu. Artık AI brief'i
-    # de doğar doğmaz 'approved' → caption/görsel akışı beklemeden okur.
-    # Kaldırmanın güvenli olmasının nedeni: brief HİÇBİR müşteri-facing yüzeyde görünmüyor
-    # (review.py / special_days.py / lente.py'de tek referans yok) — yalnız ekip içi + AI
-    # bağlamı. Düzeltme yolu onay değil YENİDEN ÜRETİM (`brief_handler` force, aynı satırı
-    # üzerine yazar). `generated_by` DEĞİŞMEDİ: 'ai' vs 'import' ayrımı hâlâ anlamlı (köken).
-    # Okuma tarafındaki approved-only süzgeç (sharing.brief) bilinçli olarak KALDI: artık
-    # taslak üretilmiyor, ama elde kalan/geri yüklenen bir taslak yanlışlıkla akışa girmesin.
+    # APPROVAL GATE REMOVED (2026-07-30, project owner decision: "briefs shouldn't
+    # wait for approval after being generated, all of them should be processed
+    # directly"). The ORM default used to be 'draft' → every AI brief waited for
+    # manual approval and didn't enter the caption context until approved. Now an
+    # AI brief is 'approved' the moment it's born → the caption/image flow reads it
+    # without waiting.
+    # Why removing this is safe: the brief is NOT visible on ANY customer-facing
+    # surface (no single reference in review.py / special_days.py / lente.py) —
+    # it's team-internal + AI context only. The fix path is not approval but
+    # REGENERATION (`brief_handler` force, overwrites the same row).
+    # `generated_by` DID NOT CHANGE: the 'ai' vs 'import' distinction is still
+    # meaningful (provenance). The approved-only filter on the read side
+    # (sharing.brief) deliberately STAYED: drafts aren't generated anymore, but a
+    # leftover/restored draft shouldn't slip into the flow by accident.
     status = db.Column(db.String(16), nullable=False, server_default='approved', default='approved')
     generated_by = db.Column(db.String(16), nullable=False, server_default='import', default='ai')
 
@@ -481,8 +492,8 @@ class WeeklyBrief(db.Model):
 
 
 class WeeklyCanvas(db.Model):
-    """Haftalık planlama canvas'ı — konumlanmış kart (parent_weekly_task) matrisi.
-    Yjs gerçek-zamanlı state ATILDI; kartlar JSONB (position/size/color/title)."""
+    """Weekly planning canvas — a matrix of positioned cards (parent_weekly_task).
+    Yjs real-time state was DROPPED; cards live in JSONB (position/size/color/title)."""
     __tablename__ = 'weekly_canvas'
     __table_args__ = (db.UniqueConstraint('week_iso'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -503,7 +514,8 @@ class WeeklyCanvas(db.Model):
 
 
 class DriveThumbnail(db.Model):
-    """Drive thumbnail kalıcı cache'i (eski Mongo drive_thumbnails yerine Postgres)."""
+    """Persistent Drive thumbnail cache (Postgres, replacing the old Mongo
+    drive_thumbnails)."""
     __tablename__ = 'drive_thumbnails'
     file_id = db.Column(db.String(128), primary_key=True)
     width = db.Column(db.Integer, primary_key=True)
@@ -513,9 +525,11 @@ class DriveThumbnail(db.Model):
 
 
 class LegacyCardStatus(db.Model):
-    """Terk edilmiş sharing_card_status arşivi (W20-W22 caption üretim geçmişi).
+    """Archive of the abandoned sharing_card_status (W20-W22 caption generation
+    history).
 
-    Canlı akışa KARIŞMAZ; yalnız veri kaybını önlemek için ham JSONB olarak saklanır.
+    Does NOT participate in the live flow; kept only as raw JSONB to prevent data
+    loss.
     """
     __tablename__ = 'legacy_card_status'
     id = db.Column(db.Integer, primary_key=True)
@@ -527,13 +541,13 @@ class LegacyCardStatus(db.Model):
 
 
 class UploadReview(db.Model):
-    """Müşterinin onay sayfasındaki **yükleme bazlı** kararı (2026-07-24).
+    """The client's **per-upload** decision on the approval page (2026-07-24).
 
-    Onay sayfası artık sharing board paylaşımlarını değil, tasarımcının o hafta
-    yüklediği post/video dosyalarını (`card_uploads`) gösterir; müşterinin
-    onay/revize kararı da burada tutulur. `upload_id` UNIQUE → yükleme başına tek
-    (en güncel) karar; müşteri fikrini değiştirirse üzerine yazılır. Eski
-    `Share.client_review` kayıtları OLDUĞU GİBİ kalır (geçmiş bozulmaz)."""
+    The approval page no longer shows sharing board shares, but the post/video
+    files (`card_uploads`) the designer uploaded that week; the client's
+    approve/revise decision is kept here too. `upload_id` is UNIQUE → one (most
+    recent) decision per upload; if the client changes their mind, it's overwritten.
+    Old `Share.client_review` records are left AS-IS (history isn't disturbed)."""
     __tablename__ = 'card_upload_reviews'
     id = db.Column(db.Integer, primary_key=True)
     upload_id = db.Column(db.Integer, db.ForeignKey('card_uploads.id'),
@@ -547,11 +561,13 @@ class UploadReview(db.Model):
 
 
 class ReviewExcludedUpload(db.Model):
-    """Onay sayfasından ELLE kaldırılan yükleme (yönetim/tasarımcı, 2026-07-24).
+    """Upload MANUALLY removed from the approval page (management/designer,
+    2026-07-24).
 
-    Müşteri kaldırılanı görmez; personel aynı sayfayı açtığında kaldırılmış olarak
-    görür ve geri alabilir (yıkıcı değil — `card_uploads` satırına dokunulmaz).
-    Kapsam yükleme bazlıdır: link iptal edilip yenisi üretilse de karar korunur."""
+    The client never sees a removed upload; staff opening the same page see it as
+    removed and can undo it (non-destructive — the `card_uploads` row is left
+    untouched). The scope is per-upload: even if the link is revoked and a new one
+    is generated, the decision is preserved."""
     __tablename__ = 'review_excluded_uploads'
     upload_id = db.Column(db.Integer, db.ForeignKey('card_uploads.id'), primary_key=True)
     excluded_by = db.Column(db.String(64))   # SSO sub
@@ -559,11 +575,13 @@ class ReviewExcludedUpload(db.Model):
 
 
 class PreApprovalLink(db.Model):
-    """Ön-onay linki (2026-07-24): tasarımcı üretir, YÖNETİME gönderir.
+    """Pre-approval link (2026-07-24): the designer generates it, sends it to
+    MANAGEMENT.
 
-    Müşteri onay linkinin (`ReviewLink`) iç muadili — aynı (client, week) kapsamı,
-    ama sayfayı yalnız personel açabilir ve kararı yalnız yönetim verir. Token
-    ayrı tablodadır; `/review/<token>` her iki token tipini de çözer."""
+    The internal counterpart of the client approval link (`ReviewLink`) — same
+    (client, week) scope, but only staff can open the page and only management can
+    make the decision. The token lives in a separate table;
+    `/review/<token>` resolves either token type."""
     __tablename__ = 'pre_approval_links'
     id = db.Column(db.Integer, primary_key=True)
     token = db.Column(db.String(64), unique=True, nullable=False, index=True)
@@ -575,14 +593,15 @@ class PreApprovalLink(db.Model):
 
 
 class UploadPreApproval(db.Model):
-    """Yöneticinin ön-onay kararı (2026-07-24) — yükleme bazında.
+    """Manager's pre-approval decision (2026-07-24) — per upload.
 
-    Müşteri kararından (`UploadReview`) AYRI tutulur: biri iç kapı, diğeri müşteri
-    geri bildirimi. `upload_id` UNIQUE → yükleme başına tek/en güncel karar.
+    Kept SEPARATE from the client's decision (`UploadReview`): one is an internal
+    gate, the other is client feedback. `upload_id` is UNIQUE → one/most-recent
+    decision per upload.
 
-    **Kademeli kapı:** bir (müşteri, hafta) için EN AZ BİR ön-onay kararı varsa,
-    müşteri onay linki yalnız `approved` olanları gösterir; hiç karar yoksa kapı
-    devrede değildir (eski haftalar ve alışılmış akış kırılmaz) — bkz.
+    **Gradual gate:** if a (client, week) has AT LEAST ONE pre-approval decision,
+    the client approval link shows only the `approved` ones; if there's no decision
+    at all, the gate is inactive (old weeks and the usual flow aren't broken) — see
     `sharing.review_visible_uploads`."""
     __tablename__ = 'card_upload_pre_approvals'
     id = db.Column(db.Integer, primary_key=True)
@@ -590,7 +609,7 @@ class UploadPreApproval(db.Model):
                           nullable=False, unique=True)
     status = db.Column(db.String(24), nullable=False)  # approved | revision_requested
     note = db.Column(db.Text)
-    decided_by = db.Column(db.String(64))              # SSO sub (yönetici)
+    decided_by = db.Column(db.String(64))              # SSO sub (manager)
     at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     def to_dict(self):
@@ -598,29 +617,31 @@ class UploadPreApproval(db.Model):
 
 
 class ClientApprovalLink(db.Model):
-    """Müşteri onay linki — **elle seçilmiş** yükleme listesi (2026-08-06).
+    """Client approval link — a **manually selected** list of uploads (2026-08-06).
 
-    `ReviewLink`'in ikizi DEĞİL, bilinçli olarak ayrı bir akış (proje sahibi kararı: eski
-    `/review/<token>` akışına dokunulmadı). İki temel fark:
+    NOT a twin of `ReviewLink`, deliberately a separate flow (project owner
+    decision: the old `/review/<token>` flow was left untouched). Two key
+    differences:
 
-    1. **Kapsam (client_id, week_iso) değil, açık liste:** `upload_ids` linkin
-       üretildiği anda dondurulur. Sonradan yüklenen dosya bu linke SIZMAZ —
-       müşteriye "şunları gönderdim" diyen kişi ne gönderdiğini bilir. Bu yüzden
-       hafta sınırı da yoktur: sharing board'daki hafta ± 1 hafta penceresinden
-       seçim yapılır, üç haftanın dosyaları tek linkte buluşabilir.
-    2. **Not defteri:** müşteri sayfanın sağındaki alana serbest not yazar
-       (`note`), otomatik kaydedilir. `note_notified_at` ilk yazımda bildirim
-       gönderildiğini işaretler — her tuş vuruşunda çan çalmasın diye.
+    1. **Not a (client_id, week_iso) scope, an explicit list:** `upload_ids` is
+       frozen at the moment the link is generated. A file uploaded later does NOT
+       leak into this link — whoever tells the client "I sent you these" knows
+       exactly what they sent. That's also why there's no week boundary: selection
+       is made from the sharing board's week ± 1 week window, so files from three
+       weeks can end up in a single link.
+    2. **Notebook:** the client writes a free-form note (`note`) in the area on the
+       right of the page, auto-saved. `note_notified_at` marks that a notification
+       was sent on the first write — so a bell doesn't ring on every keystroke.
 
-    Onay/revize kararları AYRI tutulmaz: `card_upload_reviews`'a (UploadReview)
-    yazılır → sharing board'daki ✅/📝 rozetleri ve mevcut `client_review`
-    bildirimleri bu akışta da olduğu gibi çalışır.
+    Approve/revise decisions are NOT kept separately: they're written to
+    `card_upload_reviews` (UploadReview) → the ✅/📝 badges on the sharing board and
+    the existing `client_review` notifications work the same way in this flow too.
     """
     __tablename__ = 'client_approval_links'
     id = db.Column(db.Integer, primary_key=True)
     token = db.Column(db.String(64), unique=True, nullable=False, index=True)
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), nullable=False)
-    upload_ids = db.Column(JSONB_, nullable=False)   # int listesi, seçim sırasıyla
+    upload_ids = db.Column(JSONB_, nullable=False)   # list of ints, in selection order
     note = db.Column(db.Text)
     note_at = db.Column(db.DateTime(timezone=True))
     note_notified_at = db.Column(db.DateTime(timezone=True))

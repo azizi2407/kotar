@@ -1,14 +1,15 @@
-// Kart ayrıntıları: temel alanlar + DOMAIN BAĞLARI (müşteri / çekim / kampanya).
+// Card details: base fields + DOMAIN LINKS (client / shoot / campaign).
 //
-// İki davranış değişikliği (2026-07-26):
-//  1. Yalnız DEĞİŞEN alanlar gönderilir. Eskiden her kaydetmede 7 alan birden
-//     gidiyordu; bu gereksiz çakışma yüzeyi üretiyordu — aynı kartı düzenleyen
-//     iki kişi hiç dokunmadıkları alanlar yüzünden `conflicts[]`'a düşüyordu.
-//     `InlineText` zaten "gerçekten değiştiyse commit" disiplinini uyguluyordu;
-//     burası ona hizalandı.
-//  2. Bağ seçicileri `useLinkables`'tan beslenir. Yetkisi olmayan bölüm sunucudan
-//     BOŞ dizi gelir → o seçici hiç render edilmez. Yani tasarımcı kampanya
-//     seçicisini görmez; rol farkı frontend'de `if (role===…)` yazmadan doğru olur.
+// Two behavior changes (2026-07-26):
+//  1. Only CHANGED fields are sent. It used to send all 7 fields on every save;
+//     that created an unnecessary conflict surface — two people editing the same
+//     card would land in `conflicts[]` over fields neither of them touched.
+//     `InlineText` already followed the "commit only if it actually changed"
+//     discipline; this was brought in line with that.
+//  2. Link pickers are fed from `useLinkables`. A section the user lacks permission
+//     for comes back as an EMPTY array from the server → that picker is never
+//     rendered. So a designer never sees the campaign picker; the role difference
+//     is correct without writing `if (role===…)` on the frontend.
 import { useMemo, useState } from "react"
 
 import { Button } from "@/components/ui/button"
@@ -16,7 +17,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { ITEM_STATUS_LABELS, useLinkables, type PlanningItem, type PlanningStatus } from "@/lib/planlama"
+import { useI18n } from "@/lib/i18n"
+import { itemStatusLabels, useLinkables, type PlanningItem, type PlanningStatus } from "@/lib/planlama"
 
 const NONE = "__none__"
 
@@ -26,8 +28,8 @@ interface Props {
   onClose: () => void
 }
 
-/** Form durumu — hepsi string; kaydederken tipine çevrilir ve taban ile
- *  karşılaştırılıp yalnız farklar gönderilir. */
+/** Form state — everything is a string; converted to its proper type on save and
+ *  compared against the baseline so only the differences are sent. */
 function snapshot(it: PlanningItem) {
   return {
     title: it.title ?? "",
@@ -55,6 +57,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 export function CardDetailDialog({ item, onSave, onClose }: Props) {
+  const { t } = useI18n()
+  const statusLabels = useMemo(() => itemStatusLabels(t), [t])
   const base = useMemo(() => snapshot(item), [item])
   const [f, setF] = useState(base)
   const [q, setQ] = useState("")
@@ -89,29 +93,29 @@ export function CardDetailDialog({ item, onSave, onClose }: Props) {
   return (
     <Dialog open onOpenChange={(o) => { if (!o) onClose() }}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader><DialogTitle>Kart ayrıntıları</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{t("components.planlama.cardDetailDialog.title")}</DialogTitle></DialogHeader>
 
         <div className="space-y-3">
-          <Field label="Başlık">
+          <Field label={t("components.planlama.cardDetailDialog.fieldTitle")}>
             <Input value={f.title} onChange={(e) => set("title", e.target.value)} />
           </Field>
 
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Durum">
+            <Field label={t("components.planlama.cardDetailDialog.fieldStatus")}>
               <select className={SELECT} value={f.status}
                 onChange={(e) => set("status", e.target.value as PlanningStatus)}>
-                {Object.entries(ITEM_STATUS_LABELS).map(([v, t]) => (
-                  <option key={v} value={v}>{t}</option>
+                {Object.entries(statusLabels).map(([v, label]) => (
+                  <option key={v} value={v}>{label}</option>
                 ))}
               </select>
             </Field>
-            <Field label="Son tarih">
+            <Field label={t("components.planlama.cardDetailDialog.fieldDueDate")}>
               <Input type="date" value={f.due_date} onChange={(e) => set("due_date", e.target.value)} />
             </Field>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Sorumlu">
+            <Field label={t("components.planlama.cardDetailDialog.fieldAssignee")}>
               <select className={SELECT} value={f.assignee_sub}
                 onChange={(e) => set("assignee_sub", e.target.value)}>
                 <option value={NONE}>—</option>
@@ -120,20 +124,20 @@ export function CardDetailDialog({ item, onSave, onClose }: Props) {
                 ))}
               </select>
             </Field>
-            <Field label="Etiket">
-              <Input value={f.label} placeholder="örn. Reels"
+            <Field label={t("components.planlama.cardDetailDialog.fieldLabel")}>
+              <Input value={f.label} placeholder={t("components.planlama.cardDetailDialog.labelPlaceholder")}
                 onChange={(e) => set("label", e.target.value)} />
             </Field>
           </div>
 
           <div className="rounded-lg border p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <span className="text-xs font-semibold text-muted-foreground">Bağlantılar</span>
-              <Input className="h-7 max-w-[11rem] text-xs" placeholder="Listede ara…"
+              <span className="text-xs font-semibold text-muted-foreground">{t("components.planlama.cardDetailDialog.linksHeading")}</span>
+              <Input className="h-7 max-w-[11rem] text-xs" placeholder={t("components.planlama.cardDetailDialog.searchPlaceholder")}
                 value={q} onChange={(e) => setQ(e.target.value)} />
             </div>
             <div className="space-y-3">
-              <Field label="Müşteri">
+              <Field label={t("components.planlama.cardDetailDialog.fieldClient")}>
                 <select className={SELECT} value={f.client_id}
                   onChange={(e) => set("client_id", e.target.value)}>
                   <option value={NONE}>—</option>
@@ -143,16 +147,16 @@ export function CardDetailDialog({ item, onSave, onClose }: Props) {
                 </select>
               </Field>
 
-              {/* Bölüm boş gelirse (rol yetmiyor VEYA kayıt yok) seçici render edilmez. */}
+              {/* If the section comes back empty (role lacks permission OR there are no records), the picker isn't rendered. */}
               {!!L?.shoot_tasks?.length && (
-                <Field label="Çekim görevi">
+                <Field label={t("components.planlama.cardDetailDialog.fieldShootTask")}>
                   <select className={SELECT} value={f.shoot_task_id}
                     onChange={(e) => set("shoot_task_id", e.target.value)}>
                     <option value={NONE}>—</option>
-                    {L.shoot_tasks.map((t) => (
-                      <option key={t.id} value={String(t.id)}>
-                        {t.title}{t.client_name ? ` · ${t.client_name}` : ""}
-                        {t.scheduled_date ? ` · ${t.scheduled_date}` : ""}
+                    {L.shoot_tasks.map((task) => (
+                      <option key={task.id} value={String(task.id)}>
+                        {task.title}{task.client_name ? ` · ${task.client_name}` : ""}
+                        {task.scheduled_date ? ` · ${task.scheduled_date}` : ""}
                       </option>
                     ))}
                   </select>
@@ -160,7 +164,7 @@ export function CardDetailDialog({ item, onSave, onClose }: Props) {
               )}
 
               {!!L?.ad_campaigns?.length && (
-                <Field label="Reklam kampanyası">
+                <Field label={t("components.planlama.cardDetailDialog.fieldAdCampaign")}>
                   <select className={SELECT} value={f.ad_campaign_id}
                     onChange={(e) => set("ad_campaign_id", e.target.value)}>
                     <option value={NONE}>—</option>
@@ -175,18 +179,18 @@ export function CardDetailDialog({ item, onSave, onClose }: Props) {
             </div>
           </div>
 
-          <Field label="Bağlantı (link)">
+          <Field label={t("components.planlama.cardDetailDialog.fieldLink")}>
             <Input value={f.link} placeholder="https://…"
               onChange={(e) => set("link", e.target.value)} />
           </Field>
-          <Field label="Açıklama">
+          <Field label={t("components.planlama.cardDetailDialog.fieldDescription")}>
             <Textarea rows={3} value={f.text} onChange={(e) => set("text", e.target.value)} />
           </Field>
         </div>
 
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="outline" onClick={onClose}>Vazgeç</Button>
-          <Button onClick={save}>Kaydet</Button>
+          <Button variant="outline" onClick={onClose}>{t("components.planlama.cardDetailDialog.cancel")}</Button>
+          <Button onClick={save}>{t("components.planlama.cardDetailDialog.save")}</Button>
         </div>
       </DialogContent>
     </Dialog>

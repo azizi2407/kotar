@@ -1,10 +1,10 @@
-"""Agency domain modelleri — clients modülü + users_ref projeksiyonu.
+"""Agency domain models — clients module + users_ref projection.
 
-Kimlik SSO'da yaşar; buradaki `user_id`/`*_by` alanları SSO `sub` (string) tutar.
-users_ref, isim/rol göstermek için hafif bir SSO projeksiyonudur (login'de upsert,
-göçte tohumlanır) — yetkili kaynak DEĞİLDİR.
+Identity lives in SSO; the `user_id`/`*_by` fields here hold the SSO `sub` (string).
+users_ref is a lightweight SSO projection for displaying name/role (upserted at
+login, seeded during migration) — it is NOT the source of truth.
 
-Eski Mongo'dan taşınan kayıtlarda `legacy_mongo_id` idempotent import anahtarıdır.
+On records migrated from the old Mongo, `legacy_mongo_id` is the idempotent import key.
 """
 from datetime import datetime, timezone
 
@@ -12,8 +12,8 @@ from sqlalchemy import text
 
 from extensions import db
 
-# none_as_null=True: Python None → SQL NULL (JSON 'null' skaleri değil).
-# TypeEngine örneği kolonlar arası paylaşılabilir.
+# none_as_null=True: Python None → SQL NULL (not the JSON 'null' scalar).
+# The TypeEngine instance can be shared across columns.
 JSON_ = db.JSON(none_as_null=True)
 
 
@@ -38,7 +38,7 @@ class UserRef(db.Model):
 
 
 def upsert_user_ref(claims):
-    """JWT claim'lerinden users_ref satırını ekle/güncelle (commit çağıranın işi)."""
+    """Insert/update the users_ref row from JWT claims (commit is the caller's job)."""
     ref = db.session.get(UserRef, str(claims['sub']))
     if ref is None:
         ref = UserRef(sub=str(claims['sub']))
@@ -61,16 +61,16 @@ class Client(db.Model):
     instagram_url = db.Column(db.String(512))
     google_drive_url = db.Column(db.String(512))
     special_days_token = db.Column(db.String(128))
-    sharing_playbook = db.Column(JSON_)   # Sharing Board girdisi (Faz 2'de tabloya açılabilir)
-    drive_meta = db.Column(JSON_)         # kök klasör linkleri + nadir video/photo klasörleri
-    brand_profile = db.Column(JSON_)      # AI akışları için marka bağlamı + müşteri "Ayar" otoritesi:
+    sharing_playbook = db.Column(JSON_)   # Sharing Board input (could get its own table in Phase 2)
+    drive_meta = db.Column(JSON_)         # root folder links + occasional video/photo folders
+    brand_profile = db.Column(JSON_)      # brand context for AI flows + client "Settings" authority:
                                           # brand_voice, target_audience, forbidden, cta, guide_md,
                                           # color_palette, content_mix, content_pillars, hashtags,
-                                          # posting_days, ideas_per_week (hepsi opsiyonel)
-    caption_settings = db.Column(JSON_)   # caption üretim müşteri-varsayılanı (Faz 1b): model, tone,
-                                          # emoji_limit, hashtag_count, lang, use_brief, char_limit (opsiyonel)
-    # brief aç/kapa (Faz 3): False → rutin/catch-up bu müşteriye otomatik brief üretmez
-    # (brief-pasif). server_default=true: mevcut satırlar ALTER sonrası açık kalır.
+                                          # posting_days, ideas_per_week (all optional)
+    caption_settings = db.Column(JSON_)   # per-client caption generation defaults (Phase 1b): model, tone,
+                                          # emoji_limit, hashtag_count, lang, use_brief, char_limit (optional)
+    # brief on/off (Phase 3): False → routine/catch-up won't auto-generate briefs for
+    # this client (brief-inactive). server_default=true: existing rows stay on after the ALTER.
     brief_enabled = db.Column(db.Boolean, nullable=False,
                               server_default=text('true'), default=True)
 
@@ -96,15 +96,15 @@ class Client(db.Model):
                                    backref='client', order_by='ClientWeekFolder.week_number')
 
     def to_dict(self, full=False, sensitive=True):
-        """`sensitive=False` → ticari ve iletişim alanları yanıttan TAMAMEN düşer.
+        """`sensitive=False` → commercial and contact fields are COMPLETELY dropped from the response.
 
-        Üretim rolleri (designer/content_creator/videographer) müşteri kaydını
-        marka rehberi bağlamında okuyabiliyor (2026-07-27, Marka Rehberi sayfası);
-        KDV/ücret (`contract`), müşteri iletişim bilgisi (`client_email`,
-        `contacts`), adresler (`locations`), iç notlar ve public sayfa token'ı
-        onlara ait değil. Alan gizlenmez, HİÇ konmaz — panelin `undefined`
-        okuması "yetkin yok" ile "boş" arasında ayrım gerektirmiyor.
-        Rol kararı api.py `_client_json()`'da tek yerde verilir."""
+        Production roles (designer/content_creator/videographer) can read the client
+        record in the brand guide context (2026-07-27, Brand Guide page); VAT/fee
+        (`contract`), client contact info (`client_email`, `contacts`), addresses
+        (`locations`), internal notes and the public page token aren't theirs to see.
+        The field isn't hidden, it's simply NOT included — the panel reading
+        `undefined` doesn't need to distinguish "no permission" from "empty".
+        The role decision is made in one place, in api.py `_client_json()`."""
         d = {
             'id': self.id, 'name': self.name, 'status': self.status,
             'sector': self.sector,
@@ -138,7 +138,7 @@ class Client(db.Model):
 
 
 class ClientContract(db.Model):
-    """Anlaşma şartları (1:1): sözleşme + çekim + mali alanlar."""
+    """Contract terms (1:1): agreement + shoot + financial fields."""
     __tablename__ = 'client_contracts'
     id = db.Column(db.Integer, primary_key=True)
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), nullable=False, unique=True)
@@ -192,8 +192,8 @@ class ClientLocation(db.Model):
 
 
 class ClientTeamAssignment(db.Model):
-    """Sabit rol slotları: videographer_shoot / videographer_edit / content_creator / designer /
-    manager (yönetici board'unda "Müşterilerim" işareti; yalnız sahip yönetici koyar)."""
+    """Fixed role slots: videographer_shoot / videographer_edit / content_creator / designer /
+    manager (the "My Clients" marker on the management board; only the assigned manager sets it)."""
     __tablename__ = 'client_team_assignments'
     __table_args__ = (db.UniqueConstraint('client_id', 'role_slot'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -203,25 +203,26 @@ class ClientTeamAssignment(db.Model):
 
 
 class UserHiddenClient(db.Model):
-    """Kişisel "bu müşteriyi bu sayfada göstermeme" tercihi (2026-07-25).
+    """Personal "don't show this client on this page" preference (2026-07-25).
 
-    Satırın VARLIĞI = gizli. Soft-delete BİLEREK YOK — `client_tracking_entries` ile
-    aynı gerekçe: UNIQUE slotu işgal eder, geri açma aynı satırı yeniden yazınca
-    IntegrityError verir. "Geri aç" = satırı SİL.
+    The EXISTENCE of the row = hidden. Soft-delete is DELIBERATELY absent — same
+    rationale as `client_tracking_entries`: it occupies the UNIQUE slot, and
+    unhiding by rewriting the same row raises IntegrityError. "Unhide" = DELETE the row.
 
-    NEDEN tek-satır-JSON-dizi DEĞİL: `planning.py`'nin öğrettiği ders — tek kolonu
-    topluca yeniden yazan model, iki sekme/iki istek aynı anda toggle ettiğinde birini
-    sessizce kaybeder (read-modify-write). Satır modeli her toggle'ı atomik yapar,
-    UNIQUE yarışı emniyete alır ve filtre tek `IN` sorgusuna dönüşür.
+    WHY NOT a single-row JSON array: the lesson `planning.py` taught — a model that
+    rewrites a single column wholesale silently loses one write when two tabs/two
+    requests toggle at the same time (read-modify-write). The row model makes each
+    toggle atomic, makes the UNIQUE constraint guard the race, and turns the filter
+    into a single `IN` query.
 
-    NEDEN `AppSetting` DEĞİL: o GLOBAL key/value deposu (`key` String(64));
-    `vg_hidden:<sub>` anahtarlamak semantiği bozar, uzun sub'da taşma riski taşır ve
-    değeri sorgulanamaz bir JSON blob'a çevirir. NEDEN `users_ref` kolonu DEĞİL:
-    users_ref SSO projeksiyonudur (login'de üzerine yazılır) + yeni kolon prod'da
-    elle ALTER ister.
+    WHY NOT `AppSetting`: that's a GLOBAL key/value store (`key` String(64));
+    keying it as `vg_hidden:<sub>` breaks the semantics, risks overflow on a long sub,
+    and turns the value into an unqueryable JSON blob. WHY NOT a `users_ref` column:
+    users_ref is an SSO projection (overwritten at login) + a new column would need
+    a manual ALTER in prod.
 
-    `scope`: ileride başka bir sayfa (ör. designer board) da gizleme isterse ikinci
-    tablo açmak yerine aynı tablo farklı scope ile hizmet eder."""
+    `scope`: if another page (e.g. designer board) wants hiding in the future, the
+    same table serves it with a different scope instead of opening a second table."""
     __tablename__ = 'user_hidden_clients'
     __table_args__ = (
         db.UniqueConstraint('owner_sub', 'scope', 'client_id',
@@ -230,17 +231,17 @@ class UserHiddenClient(db.Model):
     )
 
     id = db.Column(db.Integer, primary_key=True)
-    owner_sub = db.Column(db.String(64), nullable=False)   # SSO sub — FK DEĞİL (kimlik SSO'da)
+    owner_sub = db.Column(db.String(64), nullable=False)   # SSO sub — NOT an FK (identity lives in SSO)
     scope = db.Column(db.String(32), nullable=False, default='videographer_upload')
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), nullable=False)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
 
 
 class ClientAsset(db.Model):
-    """Müşteri marka görselleri: logo + sabit standart görseller (ör. ürün etiketleri).
-    AI görsel üretiminde referans olarak seçilir; dosya Drive'da 'Marka Görselleri'
-    alt klasöründe. kind='logo' müşteri başına TEK aktif satır (yenisi eskisini
-    soft-delete eder); kind='standard' çoklu."""
+    """Client brand images: logo + fixed standard images (e.g. product labels).
+    Selected as a reference in AI image generation; the file sits in the 'Brand Images'
+    subfolder on Drive. kind='logo' has ONE active row per client (a new one
+    soft-deletes the old one); kind='standard' is multiple."""
     __tablename__ = 'client_assets'
     __table_args__ = (db.Index('ix_client_assets_client', 'client_id'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -250,7 +251,7 @@ class ClientAsset(db.Model):
     file_name = db.Column(db.String(512))
     mime_type = db.Column(db.String(128))
     file_size = db.Column(db.BigInteger)
-    label = db.Column(db.String(256))  # panelde görünen ad (ör. "Beyaz peynir etiketi")
+    label = db.Column(db.String(256))  # display name in the panel (e.g. "White cheese label")
     uploaded_by = db.Column(db.String(64))
     uploaded_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     deleted_at = db.Column(db.DateTime(timezone=True))
@@ -264,7 +265,7 @@ class ClientAsset(db.Model):
 
 
 class ClientWeekFolder(db.Model):
-    """Hafta bazlı Drive klasörleri (eski week_folders.{1..52} map'inin yerine)."""
+    """Per-week Drive folders (replacing the old week_folders.{1..52} map)."""
     __tablename__ = 'client_week_folders'
     __table_args__ = (db.UniqueConstraint('client_id', 'week_number'),)
     id = db.Column(db.Integer, primary_key=True)
@@ -280,17 +281,17 @@ class ClientWeekFolder(db.Model):
 
 
 class Notification(db.Model):
-    """Panel-içi bildirim. Ops Digest (Faz 4) ve revizyon/onay bildirimleri bu
-    tablodan akar; panel bell okur. **2026-08-05:** ntfy geri geldi ama bu tablonun
-    YERİNE değil — `severity` alanı hangi satırın ayrıca telefona gideceğini
-    belirler (karar `notify_rules.should_push_ntfy`, teslimat `ntfy_gateway`)."""
+    """In-panel notification. Ops Digest (Phase 4) and revision/approval notifications
+    flow from this table; the panel bell reads it. **2026-08-05:** ntfy came back but
+    NOT in place of this table — the `severity` field determines which rows also go
+    to the phone (decision in `notify_rules.should_push_ntfy`, delivery in `ntfy_gateway`)."""
     __tablename__ = 'notifications'
     __table_args__ = (db.Index('ix_notifications_recipient', 'recipient_sub', 'read_at'),)
     id = db.Column(db.Integer, primary_key=True)
     recipient_sub = db.Column(db.String(64), nullable=False)
     kind = db.Column(db.String(32), nullable=False)
-    # kritik | normal | bilgi — varsayılan katalogdan gelir (notifications.CATALOG).
-    # server_default: mevcut satırlar ALTER sonrası NULL kalmasın (2026-08-05).
+    # kritik | normal | bilgi — default comes from the catalog (notifications.CATALOG).
+    # server_default: so existing rows don't stay NULL after the ALTER (2026-08-05).
     severity = db.Column(db.String(16), nullable=False, default='normal',
                          server_default='normal')
     title = db.Column(db.String(255), nullable=False)
@@ -307,18 +308,18 @@ class Notification(db.Model):
 
 
 class NotificationPref(db.Model):
-    """Kişi başına bildirim tercihi (2026-08-05). Kayıt YOKSA telefona hiçbir şey
-    gitmez — ntfy bilinçli olarak OPT-IN (panel-içi çan zaten herkeste çalışıyor).
+    """Per-person notification preference (2026-08-05). If there's NO record, nothing
+    goes to the phone — ntfy is deliberately OPT-IN (the in-panel bell already works for everyone).
 
-    `ntfy_topic` 32-hex rastgele: ntfy'de okuma yetkisi topic adının gizliliğine
-    dayanıyor (yazma token'lı, bkz. ntfy_gateway), o yüzden topic tahmin edilebilir
-    olmamalı ve yalnız sahibine gösterilir."""
+    `ntfy_topic` is a random 32-hex string: in ntfy, read access relies on the topic
+    name's secrecy (writes are token-based, see ntfy_gateway), so the topic must not
+    be guessable and is only shown to its owner."""
     __tablename__ = 'notification_prefs'
     user_sub = db.Column(db.String(64), primary_key=True)
     ntfy_topic = db.Column(db.String(64), nullable=False)
     ntfy_enabled = db.Column(db.Boolean, nullable=False, default=False)
     min_severity = db.Column(db.String(16), nullable=False, default='kritik')
-    # Sessiz saat aralığı (0-23, saran aralık serbest: 22→08). NULL = yok.
+    # Quiet-hours range (0-23, wrapping range is fine: 22→08). NULL = none.
     quiet_start = db.Column(db.Integer)
     quiet_end = db.Column(db.Integer)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
@@ -331,25 +332,25 @@ class NotificationPref(db.Model):
 
 
 class RateWindow(db.Model):
-    """Paylaşımlı fixed-window hız sınırı sayacı (Postgres/sqlite; worker'lar arası
-    ortak — eski in-memory per-worker yerine). bucket ör. 'review:<token>'."""
+    """Shared fixed-window rate limit counter (Postgres/sqlite; shared across
+    workers — replaces the old in-memory per-worker one). bucket e.g. 'review:<token>'."""
     __tablename__ = 'rate_limits'
     bucket = db.Column(db.String(160), primary_key=True)
-    window_start = db.Column(db.Integer, primary_key=True)  # unix pencere başı
+    window_start = db.Column(db.Integer, primary_key=True)  # unix window start
     count = db.Column(db.Integer, nullable=False, default=0)
 
 
 class Job(db.Model):
-    """Asenkron iş kuyruğu (Postgres SKIP LOCKED). type:
-    caption|media|special_days|brief|ops_digest|videographer_ideas|image_gen|codex_image|similarity|magnific_credits|prompt_examples|prompt_convert. Worker
-    (proje sahibi bağlamı) çeker, işler, sonucu yazar. Panel poll'lar. priority: yüksek sayı
-    önce claim edilir (interaktif caption=10, batch=0)."""
+    """Async job queue (Postgres SKIP LOCKED). type:
+    caption|media|special_days|brief|ops_digest|videographer_ideas|image_gen|codex_image|similarity|magnific_credits|prompt_examples|prompt_convert. The worker
+    (running as the project owner) claims, processes, and writes the result. The panel polls. priority: a higher number
+    is claimed first (interactive caption=10, batch=0)."""
     __tablename__ = 'jobs'
     __table_args__ = (db.Index('ix_jobs_status_type', 'status', 'type'),)
     id = db.Column(db.Integer, primary_key=True)
     type = db.Column(db.String(32), nullable=False)
     status = db.Column(db.String(16), nullable=False, default='queued')  # queued|running|done|failed
-    priority = db.Column(db.Integer, nullable=False, server_default='0', default=0)  # yüksek=önce claim
+    priority = db.Column(db.Integer, nullable=False, server_default='0', default=0)  # higher=claimed first
     payload = db.Column(JSON_)
     result = db.Column(JSON_)
     attempts = db.Column(db.Integer, nullable=False, default=0)
@@ -357,7 +358,7 @@ class Job(db.Model):
     created_by = db.Column(db.String(64))
     claimed_at = db.Column(db.DateTime(timezone=True))
     finished_at = db.Column(db.DateTime(timezone=True))
-    available_at = db.Column(db.DateTime(timezone=True), nullable=True)  # backoff/retry: bu andan önce claim edilmez
+    available_at = db.Column(db.DateTime(timezone=True), nullable=True)  # backoff/retry: not claimed before this moment
 
     def to_dict(self):
         return {'id': self.id, 'type': self.type, 'status': self.status,
@@ -366,9 +367,9 @@ class Job(db.Model):
 
 
 class AppSetting(db.Model):
-    """Basit key/value global ayar deposu (panelden düzenlenebilir). İlk kullanım:
-    `caption_global_rules` — tüm müşteriler için ortak caption/hashtag kuralları
-    (vault snapshot'tan seed edilir, bkz. scripts/seed_brand_profiles.py)."""
+    """Simple global key/value settings store (editable from the panel). First use:
+    `caption_global_rules` — caption/hashtag rules shared across all clients
+    (seeded from a vault snapshot, see scripts/seed_brand_profiles.py)."""
     __tablename__ = 'app_settings'
     key = db.Column(db.String(64), primary_key=True)
     value = db.Column(db.Text)
@@ -390,10 +391,10 @@ class AppSetting(db.Model):
 
 
 class AiUsage(db.Model):
-    """claude -p çağrı başına token/maliyet izi (Sunucu Ayarları token paneli).
+    """Per-call token/cost trace for `claude -p` (Server Settings token panel).
 
-    `ai_claude.run` her başarılı çağrıda bir satır yazar (usage_sink üzerinden).
-    Sır/prompt İÇERMEZ — yalnız sayaç. `source` = job tipi (attribution)."""
+    `ai_claude.run` writes one row per successful call (via usage_sink).
+    Does NOT contain secrets/prompts — counters only. `source` = job type (attribution)."""
     __tablename__ = 'ai_usage'
     id = db.Column(db.Integer, primary_key=True)
     at = db.Column(db.DateTime(timezone=True), default=utcnow, index=True)
@@ -407,13 +408,13 @@ class AiUsage(db.Model):
 
 
 class AdCampaign(db.Model):
-    """Reklam takibi (2026-07-24) — müşteri başına reklam çıkışları: tarih aralığı,
-    harcanan tutar (₺), platform, durum, sonuç metrikleri ve notlar.
+    """Ad tracking (2026-07-24) — ad spends per client: date range, amount spent (₺),
+    platform, status, result metrics and notes.
 
-    Yalnız `management` görür/düzenler (mali bilgi). Silme SOFT (`deleted_at`) —
-    kayıt geçmişi korunur, listelerden düşer. Tutar `Numeric(12,2)`: para kuruş
-    hassasiyetiyle tutulur (Float yuvarlama hatası istemiyoruz); `to_dict` float'a
-    çevirir (JSON'da Decimal serialize edilemez)."""
+    Only `management` sees/edits it (financial data). Deletion is SOFT (`deleted_at`) —
+    record history is preserved, dropped from lists. Amount is `Numeric(12,2)`: kept
+    with cent precision (we don't want Float rounding errors); `to_dict` converts to
+    float (Decimal can't be serialized to JSON)."""
     __tablename__ = 'ad_campaigns'
     __table_args__ = (db.Index('ix_ad_campaigns_client_start', 'client_id', 'start_date'),)
 
@@ -425,11 +426,11 @@ class AdCampaign(db.Model):
     title = db.Column(db.String(255))
     platform = db.Column(db.String(16), nullable=False, default='meta')
     start_date = db.Column(db.Date, nullable=False)
-    end_date = db.Column(db.Date)                      # NULL = devam ediyor / tek gün
+    end_date = db.Column(db.Date)                      # NULL = ongoing / single day
     amount_spent = db.Column(db.Numeric(12, 2), nullable=False, default=0)
     status = db.Column(db.String(16), nullable=False, default='active')
-    reach = db.Column(db.Integer)                      # erişim (elle girilir)
-    clicks = db.Column(db.Integer)                     # tıklama (elle girilir)
+    reach = db.Column(db.Integer)                      # reach (entered manually)
+    clicks = db.Column(db.Integer)                     # clicks (entered manually)
     notes = db.Column(db.Text)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -454,28 +455,28 @@ class AdCampaign(db.Model):
 
 
 class TrackingItem(db.Model):
-    """Müşteri Takip kalem kataloğu (2026-07-25) — ajansın müşteriye satabileceği iş
-    kalemlerinin YÖNETİLEBİLİR tanımı (panelden ekle/düzenle/sırala; kod değişmeden).
+    """Client Tracking item catalog (2026-07-25) — the MANAGEABLE definition of work
+    items the agency can sell to a client (add/edit/reorder from the panel; no code changes).
 
-    İKİ AYRI KAPATMA MEKANİZMASI, kasıtlı:
-      * active=False → katalogdan gizler ama MEVCUT müşteri kayıtları
-        (client_tracking_entries) durur; "artık satmıyoruz ama geçmiş dursun".
-      * deleted_at   → soft-delete; hiçbir yerde listelenmez, satır korunur.
+    TWO SEPARATE deactivation mechanisms, deliberately:
+      * active=False → hides it from the catalog but EXISTING client records
+        (client_tracking_entries) stay put; "we don't sell this anymore but keep the history".
+      * deleted_at   → soft-delete; not listed anywhere, row is preserved.
 
-    `key` yalnız TOHUMLANAN kalemlerde dolu (seed idempotans anahtarı); panelden
-    eklenende NULL'dır. `name` üzerinde DB unique YOK — kısmi index
-    (WHERE deleted_at IS NULL) Postgres/sqlite arasında ayrışırdı; tekillik uçta
-    Türkçe-duyarlı normalize (client_tracking._fold) ile zorlanır."""
+    `key` is only populated on SEEDED items (seed idempotency key); it's NULL for
+    ones added from the panel. There's NO DB unique on `name` — a partial index
+    (WHERE deleted_at IS NULL) would diverge between Postgres/sqlite; uniqueness is
+    enforced at the endpoint via Turkish-aware normalization (client_tracking._fold)."""
     __tablename__ = 'tracking_items'
     __table_args__ = (db.Index('ix_tracking_items_order', 'position', 'id'),)
 
     CATEGORIES = ('hukuki', 'dijital', 'tasarim', 'uretim', 'reklam', 'diger')
 
     id = db.Column(db.Integer, primary_key=True)
-    key = db.Column(db.String(48), unique=True)         # seed anahtarı; elle eklenende NULL
+    key = db.Column(db.String(48), unique=True)         # seed key; NULL when manually added
     name = db.Column(db.String(120), nullable=False)
     category = db.Column(db.String(24), nullable=False, default='diger')
-    icon = db.Column(db.String(40))                     # lucide ikon adı (panel beyaz-listeyle çözer)
+    icon = db.Column(db.String(40))                     # lucide icon name (panel resolves it via allowlist)
     position = db.Column(db.Integer, nullable=False, default=0)
     active = db.Column(db.Boolean, nullable=False, server_default=text('true'), default=True)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
@@ -491,13 +492,14 @@ class TrackingItem(db.Model):
 
 
 class ClientTrackingEntry(db.Model):
-    """Müşteri × kalem DURUM HÜCRESİ (2026-07-25). UNIQUE(client_id, item_id) →
-    hücre upsert edilir, asla çoğaltılmaz.
+    """Client × item STATUS CELL (2026-07-25). UNIQUE(client_id, item_id) →
+    the cell is upserted, never duplicated.
 
-    NEDEN SOFT-DELETE YOK: unique kısıt + `deleted_at` birlikte çalışmaz (silinmiş
-    satır slotu işgal eder, yeniden kayıt IntegrityError verir; çözümü kısmi index =
-    dialect ayrışması). Bu satır bir belge değil bir HAL; "silmek" = status'ü 'yok'a
-    çekmek. Tarihçe `client_activity_notes`'ta yaşar."""
+    WHY THERE'S NO SOFT-DELETE: a unique constraint + `deleted_at` don't work together
+    (a deleted row still occupies the slot, re-recording raises IntegrityError; the fix
+    would be a partial index = dialect divergence). This row is a STATE, not a
+    document; "deleting" = setting status back to 'yok'. History lives in
+    `client_activity_notes`."""
     __tablename__ = 'client_tracking_entries'
     __table_args__ = (
         db.UniqueConstraint('client_id', 'item_id', name='uq_client_tracking_entry'),
@@ -510,9 +512,9 @@ class ClientTrackingEntry(db.Model):
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), nullable=False)
     item_id = db.Column(db.Integer, db.ForeignKey('tracking_items.id'), nullable=False)
     status = db.Column(db.String(16), nullable=False, default='yok')
-    status_date = db.Column(db.Date)          # durumun geçerli olduğu gün (ör. tescil tarihi)
+    status_date = db.Column(db.Date)          # day the status applies to (e.g. registration date)
     note = db.Column(db.Text)
-    url = db.Column(db.String(1024))          # http(s) zorunlu (doğrulama uçta)
+    url = db.Column(db.String(1024))          # http(s) required (validated at the endpoint)
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
     created_by = db.Column(db.String(64))
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -527,23 +529,24 @@ class ClientTrackingEntry(db.Model):
 
 
 class ClientActivityNote(db.Model):
-    """Tarihli serbest aktivite günlüğü (2026-07-25) — "en son neler yapılmış".
+    """Dated free-text activity log (2026-07-25) — "what's been done lately".
 
-    Append-only akış; silme SOFT. Durum hücresinden AYRI tablo olmasının nedeni iki
-    verinin farklı şekilde olması: "web sitesi var mı" tek/üzerine-yazılan bir hal,
-    "en son ne yapıldı" birikimli bir akış. `item_id` opsiyonel: not bir kaleme
-    bağlanabilir ("katalog basıldı" → katalog kalemi) ama bağsız da olabilir."""
+    Append-only stream; deletion is SOFT. The reason it's a SEPARATE table from the
+    status cell is that the two kinds of data behave differently: "is there a website"
+    is a single/overwritable state, "what was last done" is a cumulative stream.
+    `item_id` is optional: a note can be tied to an item ("catalog printed" → catalog
+    item) but can also stand alone."""
     __tablename__ = 'client_activity_notes'
     __table_args__ = (db.Index('ix_client_activity_notes_client_date',
                                'client_id', 'happened_on'),)
 
     id = db.Column(db.Integer, primary_key=True)
     client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), nullable=False)
-    happened_on = db.Column(db.Date, nullable=False)   # olay günü (varsayılan bugün)
+    happened_on = db.Column(db.Date, nullable=False)   # event day (defaults to today)
     text = db.Column(db.Text, nullable=False)
     item_id = db.Column(db.Integer, db.ForeignKey('tracking_items.id'))
     created_at = db.Column(db.DateTime(timezone=True), default=utcnow)
-    created_by = db.Column(db.String(64))              # "yazan" — SSO sub
+    created_by = db.Column(db.String(64))              # "author" — SSO sub
     updated_at = db.Column(db.DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     updated_by = db.Column(db.String(64))
     deleted_at = db.Column(db.DateTime(timezone=True))

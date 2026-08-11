@@ -11,9 +11,10 @@ interface State {
 }
 
 /**
- * Uygulama geneli hata siperi. Bir bileşen render sırasında hata fırlatırsa
- * React tüm ağacı söker ve ekran BEYAZ kalır; bu sınır o hatayı yakalayıp
- * okunur bir mesaja çevirir (tüm panel çökmez). Konsola tam stack'i de basar.
+ * App-wide error shield. If a component throws during render, React tears
+ * down the whole tree and the screen goes BLANK; this boundary catches that
+ * error and turns it into a readable message (the whole panel doesn't crash).
+ * Also logs the full stack trace to the console.
  */
 class ErrorBoundaryClass extends Component<Props, State> {
   state: State = { error: null }
@@ -23,7 +24,7 @@ class ErrorBoundaryClass extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: unknown) {
-    // Teşhis için konsola bırak (prod'da da görülebilir).
+    // Left in the console for diagnosis (visible in prod too).
     console.error("Yakalanan render hatası:", error, info)
   }
 
@@ -51,8 +52,8 @@ class ErrorBoundaryClass extends Component<Props, State> {
   }
 }
 
-// Fonksiyonel sarmalayıcı: useI18n hook'unu class component'e prop olarak taşır
-// (class'lar hook kullanamaz).
+// Functional wrapper: passes the useI18n hook to the class component as a prop
+// (classes can't use hooks).
 export function ErrorBoundary({ children }: { children: ReactNode }) {
   const { t } = useI18n()
   return <ErrorBoundaryClass t={t}>{children}</ErrorBoundaryClass>

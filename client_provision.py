@@ -1,16 +1,17 @@
-"""Yeni müşteri Drive klasör ağacı provizyonu (Cutover C2).
+"""New client Drive folder tree provisioning (Cutover C2).
 
-Yeni müşteri oluşturulunca Drive'da klasör ağacı idempotent kurulur:
+When a new client is created, a folder tree is idempotently set up in Drive:
 
-    <içerik kökü>/<Müşteri Adı>/{1 .. 52}
+    <content root>/<Client Name>/{1 .. 52}
 
-Kök içerik klasörü ve Drive kimlikleri Infisical/env'den gelir
-(`DRIVE_CONTENT_ROOT_ID`, `GOOGLE_SA_JSON`, `GOOGLE_DRIVE_TOKEN_JSON`); repoda
-sır YOKTUR. Provizyon **best-effort**: Drive erişilemez veya hata verirse
-müşteri oluşturma BLOKLANMAZ — hata yutulur, log düşer ve yönetime panel-içi
-bildirim gider. `drive_gateway.ensure_subfolder` zaten bul-veya-oluştur
-(idempotent) olduğundan var olan klasör yeniden oluşturulmaz; ClientWeekFolder
-satırları da tekilleştirilir → çağrı tekrarı güvenlidir (eksik klasörü tamamla).
+The root content folder and Drive credentials come from Infisical/env
+(`DRIVE_CONTENT_ROOT_ID`, `GOOGLE_SA_JSON`, `GOOGLE_DRIVE_TOKEN_JSON`); there
+are NO secrets in the repo. Provisioning is **best-effort**: if Drive is
+unreachable or errors out, client creation is NOT BLOCKED — the error is
+swallowed, logged, and an in-panel notification goes to management. Since
+`drive_gateway.ensure_subfolder` is already find-or-create (idempotent), an
+existing folder isn't recreated; ClientWeekFolder rows are deduplicated too
+-> repeating the call is safe (fills in a missing folder).
 """
 import logging
 import os
@@ -23,16 +24,18 @@ from models import ClientWeekFolder
 
 log = logging.getLogger('agency.provision')
 
-# Kaç haftalık alt klasör kurulacağı (eski ensure_client_drive_tree ile aynı: 1..52).
+# How many weekly subfolders to set up (same as the old
+# ensure_client_drive_tree: 1..52).
 PROVISION_WEEKS = 52
 
-# Müşteri kökünü drive_meta içinden çözerken denenen link anahtarları
-# (sharing._extract_folder_id ile tutarlı — göçen müşterilerde kök zaten dolu).
+# Link keys tried when resolving the client root from drive_meta (consistent
+# with sharing._extract_folder_id — for migrated clients the root is already
+# populated).
 _ROOT_KEYS = ('client_folder_link', 'content_root_folder_link', 'video_root')
 
 
 def _content_root_id():
-    """Kök içerik klasör id'si (env/Infisical). Yoksa None → provizyon atlanır."""
+    """Root content folder id (env/Infisical). None if missing -> provisioning is skipped."""
     return (os.environ.get('DRIVE_CONTENT_ROOT_ID') or '').strip() or None
 
 
@@ -41,8 +44,9 @@ def _folder_link(folder_id):
 
 
 def _existing_root(client):
-    """Müşteri kök klasörü drive_meta'da zaten kayıtlıysa id'sini döndür (göç/tekrar
-    provizyon durumunda içerik kökü altında YENİ bir kök yaratmamak için)."""
+    """If the client's root folder is already recorded in drive_meta, return
+    its id (so migration/re-provisioning doesn't create a NEW root under the
+    content root)."""
     meta = client.drive_meta if isinstance(client.drive_meta, dict) else {}
     for k in _ROOT_KEYS:
         link = meta.get(k)
@@ -54,14 +58,14 @@ def _existing_root(client):
 
 
 def provision_client_folders(client, notify=True):
-    """Müşteri kök klasörü + hafta alt klasörlerini idempotent kur (best-effort).
+    """Idempotently set up the client root folder + weekly subfolders (best-effort).
 
-    Başarılıysa `client.drive_meta['client_folder_link']` set edilir, eksik
-    ClientWeekFolder satırları eklenir ve TEK commit atılır. Drive erişilemez
-    (kimlik/kök yok) veya API hata verirse sessizce atlar (log + opsiyonel
-    bildirim) ve müşteri oluşturmayı ETKİLEMEZ.
+    On success, `client.drive_meta['client_folder_link']` is set, missing
+    ClientWeekFolder rows are added, and a SINGLE commit is issued. If Drive
+    is unreachable (no credentials/root) or the API errors, it silently
+    skips (log + optional notification) and does NOT AFFECT client creation.
 
-    Dönüş: `{'client_folder_id', 'weeks_created'}` özeti, atlandı/başarısızsa None.
+    Returns: a `{'client_folder_id', 'weeks_created'}` summary, or None if skipped/failed.
     """
     if not dg.available():
         log.info('Drive kimliği yok — müşteri #%s klasör provizyonu atlandı', client.id)
@@ -71,12 +75,12 @@ def provision_client_folders(client, notify=True):
         log.warning('DRIVE_CONTENT_ROOT_ID yok — müşteri #%s klasör provizyonu atlandı', client.id)
         return None
     try:
-        # 1) Müşteri kök klasörü: varsa mevcut kökü kullan, yoksa kök klasör altında oluştur.
+        # 1) Client root folder: use the existing root if there is one, otherwise create under the content root.
         client_root = _existing_root(client) or dg.ensure_subfolder(root, client.name)
         meta = dict(client.drive_meta or {})
         meta['client_folder_link'] = _folder_link(client_root)
         client.drive_meta = meta
-        # 2) Hafta alt klasörleri 1..PROVISION_WEEKS (idempotent; var olanı atla).
+        # 2) Weekly subfolders 1..PROVISION_WEEKS (idempotent; skip existing ones).
         existing = {w.week_number for w in
                     ClientWeekFolder.query.filter_by(client_id=client.id).all()}
         created = 0
@@ -89,17 +93,17 @@ def provision_client_folders(client, notify=True):
         db.session.commit()
         log.info('Müşteri #%s klasör ağacı hazır (%d yeni hafta klasörü)', client.id, created)
         return {'client_folder_id': client_root, 'weeks_created': created}
-    except Exception as e:  # best-effort: hiçbir Drive hatası müşteri create'i bloklamaz
+    except Exception as e:  # best-effort: no Drive error should block client creation
         db.session.rollback()
         log.warning('Müşteri #%s klasör provizyonu başarısız: %s', client.id, e)
         if notify:
             try:
                 notifications._push_to_client_team(
                     'provision_failed', client.id,
-                    'Drive klasörü kurulamadı',
-                    f'{client.name} için Drive klasör ağacı otomatik oluşturulamadı. '
-                    'Elle "Drive klasörünü tamamla" ile tekrar deneyin.',
+                    'Could not set up Drive folder',
+                    f'The Drive folder tree could not be created automatically for '
+                    f'{client.name}. Retry manually with "Complete Drive folder".',
                     link=f'/panel/clients/{client.id}')
-            except Exception:  # bildirim de patlarsa yut (best-effort)
+            except Exception:  # swallow if the notification also fails (best-effort)
                 db.session.rollback()
         return None

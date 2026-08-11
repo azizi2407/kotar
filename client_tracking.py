@@ -1,26 +1,27 @@
-"""Müşteri Takip — `/api/client-tracking/*` [Blueprint: /api/client-tracking].
-YALNIZ management (ticari/satış bilgisi).
+"""Client Tracking — `/api/client-tracking/*` [Blueprint: /api/client-tracking].
+management ONLY (commercial/sales info).
 
-Ajansın müşteriye satabileceği iş kalemlerini (marka tescili, katalog, web sitesi,
-özel proje…) müşteri bazında takip eder. Üç parça:
+Tracks, per client, the work items the agency can sell to them (trademark
+registration, catalog, website, custom project...). Three parts:
 
-  * `tracking_items`          — YÖNETİLEBİLİR kalem kataloğu (panelden ekle/sırala)
-  * `client_tracking_entries` — müşteri × kalem durum hücresi (upsert, soft-delete YOK)
-  * `client_activity_notes`   — tarihli serbest aktivite günlüğü ("en son ne yapıldı")
+  * `tracking_items`          — MANAGEABLE item catalog (add/reorder from the panel)
+  * `client_tracking_entries` — client × item status cell (upsert, NO soft-delete)
+  * `client_activity_notes`   — dated free-text activity log ("what was last done")
 
-Buna ek olarak liste ucu üç sinyali MEVCUT verilerden TÜRETİR (elle girilmez, hiçbir
-uçtan yazılamaz): son reklam (`ad_campaigns`), son/sıradaki çekim (`shoot_tasks`),
-sorumlu ekip (`client_team_assignments`).
+In addition, the list endpoint DERIVES three signals from EXISTING data (not
+entered manually, not writable from any endpoint): last ad (`ad_campaigns`),
+last/next shoot (`shoot_tasks`), responsible team (`client_team_assignments`).
 
-LİSTE UCU İNVARYANTI: sorgu sayısı müşteri sayısından BAĞIMSIZ (sabit ~9). Hiçbir
-yerde `client.ad_campaigns` / `entry.item` gibi lazy erişim yoktur — her şey toplu
-sorgu + Python birleştirme. `tests/test_musteri_takip.py::test_list_query_count_*`
-bunu sorgu sayarak zorlar; serializer'a lazy erişim eklenirse o test kırılır.
+LIST ENDPOINT INVARIANT: query count is INDEPENDENT of client count (fixed ~9).
+There is no lazy access anywhere like `client.ad_campaigns` / `entry.item` — it's
+all bulk queries + merging in Python. `tests/test_musteri_takip.py::test_list_query_count_*`
+enforces this by counting queries; adding lazy access to the serializer breaks that test.
 
-⚠️ Sayfa ileride management dışına açılırsa: detay ucu kampanya bilgisi döndürüyor.
-Mali alan (`amount_spent`) BİLEREK dışarıda bırakıldı — açmadan önce gözden geçir.
+Warning: if this page is ever opened up beyond management: the detail endpoint
+returns campaign info. The financial field (`amount_spent`) was DELIBERATELY left
+out — review before opening it up.
 
-CSRF `api.csrf_protect` ile paylaşılır (ads.py/sharing.py deseni).
+CSRF is shared via `api.csrf_protect` (the ads.py/sharing.py pattern).
 """
 import datetime as dt
 from collections import defaultdict
@@ -37,43 +38,44 @@ from models_sharing import ShootTask
 from sso_client import current_user
 
 bp = Blueprint('client_tracking', __name__)
-bp.before_request(csrf_protect)  # api ile aynı CSRF (session token)
+bp.before_request(csrf_protect)  # same CSRF as api (session token)
 
-# Katalog tohumu — ajansın tipik satış kalemleri. Sıra = panelde görünen sıra.
-# (key, ad, kategori, lucide ikon adı). `key` yalnız tohumda dolu, idempotans anahtarı.
+# Catalog seed — the agency's typical sales items. Order = order shown in the panel.
+# (key, name, category, lucide icon name). `key` is only populated by the seed, an idempotency key.
 SEED_ITEMS = (
-    ('marka_tescili',         'Marka Tescili',           'hukuki',  'ShieldCheck'),
-    ('logo_kurumsal_kimlik',  'Logo / Kurumsal Kimlik',  'tasarim', 'Palette'),
-    ('web_sitesi',            'Web Sitesi',              'dijital', 'Globe'),
-    ('e_ticaret',             'E-Ticaret Sitesi',        'dijital', 'ShoppingCart'),
-    ('google_isletme',        'Google İşletme Profili',  'dijital', 'MapPin'),
-    ('sosyal_medya_yonetimi', 'Sosyal Medya Yönetimi',   'dijital', 'Share2'),
-    ('reklam_yonetimi',       'Reklam Yönetimi',         'reklam',  'Megaphone'),
-    ('katalog',               'Katalog',                 'tasarim', 'BookOpen'),
-    ('matbaa_baski',          'Matbaa / Baskı',          'uretim',  'Printer'),
-    ('fotograf_cekimi',       'Fotoğraf Çekimi',         'uretim',  'Camera'),
-    ('video_cekimi',          'Video Çekimi',            'uretim',  'Clapperboard'),
-    ('ozel_proje',            'Özel Proje',              'diger',   'Sparkles'),
+    ('marka_tescili',         'Trademark Registration',  'hukuki',  'ShieldCheck'),
+    ('logo_kurumsal_kimlik',  'Logo / Corporate Identity', 'tasarim', 'Palette'),
+    ('web_sitesi',            'Website',                 'dijital', 'Globe'),
+    ('e_ticaret',             'E-Commerce Site',         'dijital', 'ShoppingCart'),
+    ('google_isletme',        'Google Business Profile', 'dijital', 'MapPin'),
+    ('sosyal_medya_yonetimi', 'Social Media Management', 'dijital', 'Share2'),
+    ('reklam_yonetimi',       'Ad Management',           'reklam',  'Megaphone'),
+    ('katalog',               'Catalog',                 'tasarim', 'BookOpen'),
+    ('matbaa_baski',          'Printing',                'uretim',  'Printer'),
+    ('fotograf_cekimi',       'Photo Shoot',             'uretim',  'Camera'),
+    ('video_cekimi',          'Video Shoot',             'uretim',  'Clapperboard'),
+    ('ozel_proje',            'Custom Project',          'diger',   'Sparkles'),
 )
 
 
 def _require_management():
-    """(user, err) döner — takip verisi yalnız yönetime açık."""
+    """Returns (user, err) — tracking data is management-only."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='no active session'), 401)
     if u.get('role') != 'management':
-        return None, (jsonify(error='bu sayfa yalnız yönetim içindir'), 403)
+        return None, (jsonify(error='this page is management only'), 403)
     return u, None
 
 
 def _ensure_seed_items():
-    """İlk kullanımda kataloğu tohumla.
+    """Seed the catalog on first use.
 
-    YALNIZ tablo TAMAMEN boşsa çalışır — tek tek anahtar kontrolü yapmaz, çünkü o
-    zaman kullanıcının bilerek sildiği kalem her istekte geri dirilirdi. Çok worker'lı
-    gunicorn'da yarış olabilir: `key` unique olduğu için ikinci INSERT IntegrityError
-    verir ve yutulur (diğer worker zaten tohumlamıştır)."""
+    Only runs when the table is COMPLETELY empty — it doesn't check keys one by
+    one, because then an item the user deliberately deleted would come back on
+    every request. There can be a race under multi-worker gunicorn: since `key` is
+    unique, the second INSERT raises IntegrityError and it's swallowed (another
+    worker already seeded it)."""
     if db.session.query(TrackingItem.id).first() is not None:
         return
     for i, (key, name, category, icon) in enumerate(SEED_ITEMS):
@@ -81,38 +83,38 @@ def _ensure_seed_items():
                                     icon=icon, position=i, active=True))
     try:
         db.session.commit()
-    except IntegrityError:      # başka worker aynı anda tohumladı — sorun değil
+    except IntegrityError:      # another worker seeded it at the same time — fine
         db.session.rollback()
 
 
-# --- Doğrulama yardımcıları (ValueError → çağıran 400'e çevirir) ---
+# --- Validation helpers (ValueError → caller converts to 400) ---
 
 def _parse_date(value, field, required=False):
-    """'YYYY-MM-DD' → date. Hatalıysa ValueError."""
+    """'YYYY-MM-DD' → date. Raises ValueError if invalid."""
     if value in (None, ''):
         if required:
-            raise ValueError(f'{field} zorunlu')
+            raise ValueError(f'{field} is required')
         return None
     try:
         return dt.date.fromisoformat(str(value)[:10])
     except ValueError:
-        raise ValueError(f'{field} geçersiz tarih (YYYY-MM-DD bekleniyor)')
+        raise ValueError(f'{field} is not a valid date (expected YYYY-MM-DD)')
 
 
 def _clean_text(value, field, required=False, limit=None):
     text_value = (value or '').strip() if isinstance(value, str) else ''
     if not text_value:
         if required:
-            raise ValueError(f'{field} zorunlu')
+            raise ValueError(f'{field} is required')
         return None
     if limit and len(text_value) > limit:
-        raise ValueError(f'{field} en fazla {limit} karakter olabilir')
+        raise ValueError(f'{field} can be at most {limit} characters')
     return text_value
 
 
-# Türkçe-duyarlı karşılaştırma tablosu (frontend `lib/week.ts` trFold'un backend eşi).
-# Python'un casefold()'u 'İ'yi i+U+0307'ye çevirir → 'web SİTESİ' ile 'Web Sitesi'
-# eşleşmez. Bu yüzden TR harfleri önce sadeleştirilir, sonra lower() uygulanır.
+# Turkish-aware comparison table (backend counterpart of the frontend `lib/week.ts` trFold).
+# Python's casefold() turns 'İ' into i+U+0307 → 'web SİTESİ' doesn't match 'Web Sitesi'.
+# So Turkish letters are folded first, then lower() is applied.
 _TR_FOLD = str.maketrans({
     'İ': 'i', 'I': 'i', 'ı': 'i', 'Ş': 's', 'ş': 's', 'Ğ': 'g', 'ğ': 'g',
     'Ü': 'u', 'ü': 'u', 'Ö': 'o', 'ö': 'o', 'Ç': 'c', 'ç': 'c',
@@ -120,47 +122,47 @@ _TR_FOLD = str.maketrans({
 
 
 def _fold(value):
-    """Kalem adı tekilliği için normalize anahtar."""
+    """Normalized key for item-name uniqueness."""
     return (value or '').translate(_TR_FOLD).lower()
 
 
 def _clean_url(value):
     url = _clean_text(value, 'link', limit=1024)
     if url and not url.lower().startswith(('http://', 'https://')):
-        raise ValueError('geçersiz link (http/https bekleniyor)')
+        raise ValueError('invalid link (expected http/https)')
     return url
 
 
 def _live_item(item_id):
-    """Silinmemiş kalemi getir; yoksa ValueError."""
+    """Fetch a non-deleted item; raises ValueError if not found."""
     item = TrackingItem.query.filter_by(id=item_id, deleted_at=None).first()
     if item is None:
-        raise ValueError('kalem bulunamadı')
+        raise ValueError('item not found')
     return item
 
 
 def _live_client(client_id):
-    """Aktif müşteriyi getir; yoksa ValueError (ads.py deseni)."""
+    """Fetch the active client; raises ValueError if not found (ads.py pattern)."""
     client = db.session.get(Client, client_id or 0)
     if client is None or client.status != 'active':
-        raise ValueError('geçerli bir müşteri seçin')
+        raise ValueError('select a valid client')
     return client
 
 
 def _apply_item(item, data, user, creating=False):
-    """Katalog kalemini doğrula + uygula. Ad tekilliği Türkçe-duyarlı _fold() ile
-    burada zorlanır (DB'de kısmi unique index yok — dialect ayrışmasını istemiyoruz)."""
+    """Validate + apply a catalog item. Name uniqueness is enforced here with the
+    Turkish-aware _fold() (there's no partial unique index in the DB — we want to avoid dialect divergence)."""
     if creating or 'name' in data:
-        name = _clean_text(data.get('name'), 'kalem adı', required=True, limit=120)
+        name = _clean_text(data.get('name'), 'item name', required=True, limit=120)
         clash = (TrackingItem.query.filter(TrackingItem.deleted_at.is_(None))
                  .filter(TrackingItem.id != (item.id or 0)).all())
         if any(_fold(c.name) == _fold(name) for c in clash):
-            raise ValueError('bu adda kalem zaten var')
+            raise ValueError('an item with this name already exists')
         item.name = name
     if creating or 'category' in data:
         category = (data.get('category') or 'diger').strip().lower()
         if category not in TrackingItem.CATEGORIES:
-            raise ValueError(f'geçersiz kategori: {category}')
+            raise ValueError(f'invalid category: {category}')
         item.category = category
     if creating or 'icon' in data:
         item.icon = _clean_text(data.get('icon'), 'ikon', limit=40)
@@ -175,16 +177,16 @@ def _apply_item(item, data, user, creating=False):
 
 
 def _apply_entry(entry, data, user, creating=False):
-    """Durum hücresini doğrula + uygula."""
+    """Validate + apply a status cell."""
     if creating or 'status' in data:
         status = (data.get('status') or 'yok').strip().lower()
         if status not in ClientTrackingEntry.STATUSES:
-            raise ValueError(f'geçersiz durum: {status}')
+            raise ValueError(f'invalid status: {status}')
         entry.status = status
     if creating or 'status_date' in data:
-        entry.status_date = _parse_date(data.get('status_date'), 'tarih')
+        entry.status_date = _parse_date(data.get('status_date'), 'date')
     if creating or 'note' in data:
-        entry.note = _clean_text(data.get('note'), 'not')
+        entry.note = _clean_text(data.get('note'), 'note')
     if creating or 'url' in data:
         entry.url = _clean_url(data.get('url'))
     if creating:
@@ -194,11 +196,11 @@ def _apply_entry(entry, data, user, creating=False):
 
 
 def _apply_note(note, data, user, creating=False):
-    """Aktivite notunu doğrula + uygula."""
+    """Validate + apply an activity note."""
     if creating or 'text' in data:
-        note.text = _clean_text(data.get('text'), 'not metni', required=True)
+        note.text = _clean_text(data.get('text'), 'note text', required=True)
     if creating or 'happened_on' in data:
-        note.happened_on = _parse_date(data.get('happened_on'), 'tarih') or dt.date.today()
+        note.happened_on = _parse_date(data.get('happened_on'), 'date') or dt.date.today()
     if creating or 'item_id' in data:
         item_id = data.get('item_id')
         note.item_id = _live_item(item_id).id if item_id else None
@@ -208,24 +210,25 @@ def _apply_note(note, data, user, creating=False):
     return note
 
 
-# --- Türetilmiş sinyaller (toplu sorgular; hepsi tek GROUP BY) ---
+# --- Derived signals (bulk queries; each a single GROUP BY) ---
 
 def _ad_signals(client_ids, today):
-    """{client_id: (last_date, count, active_flag)} — tek GROUP BY.
+    """{client_id: (last_date, count, active_flag)} — one GROUP BY.
 
-    `last_date` = reklamın FİİLEN yayında olduğu en son gün ve BUGÜNÜ GEÇMEZ:
-      * henüz başlamamış (start_date > bugün)  → sayılmaz (reklam çıkılmadı)
-      * devam ediyor / ileride bitecek         → bugün ("hâlâ yayında")
-      * bitmiş                                 → end_date
-      * bitiş tarihi yok ve başlamış           → bugün
-    Ham MAX(COALESCE(end_date, start_date)) kullanılmaz: gelecekte biten bir kampanya
-    "son reklam 27 Tem" gibi İLERİ TARİH gösterirdi (canlı veride görüldü, 2026-07-25).
-    Bugünle sınırlamak hem doğru okunur hem de bayatlık hesabını (daysSince) tutarlı kılar.
-    CASE kullanılıyor çünkü LEAST/MIN skaleri Postgres ile sqlite arasında ayrışır."""
+    `last_date` = the latest day the ad was ACTUALLY live, and NEVER EXCEEDS today:
+      * not started yet (start_date > today)    → not counted (the ad hasn't run)
+      * ongoing / ends in the future             → today ("still live")
+      * ended                                    → end_date
+      * no end date and already started          → today
+    Raw MAX(COALESCE(end_date, start_date)) is not used: a campaign ending in the
+    future would show a FUTURE date like "last ad Jul 27" (seen in live data,
+    2026-07-25). Capping at today reads correctly and also keeps the staleness
+    calculation (daysSince) consistent. CASE is used because LEAST/MIN semantics
+    diverge between Postgres and sqlite."""
     effective_day = case(
-        (AdCampaign.start_date > today, None),          # henüz yayına girmemiş
-        (AdCampaign.end_date.is_(None), today),         # devam ediyor
-        (AdCampaign.end_date > today, today),           # ileride bitecek → hâlâ yayında
+        (AdCampaign.start_date > today, None),          # not live yet
+        (AdCampaign.end_date.is_(None), today),         # ongoing
+        (AdCampaign.end_date > today, today),           # ends in the future → still live
         else_=AdCampaign.end_date,
     )
     rows = (db.session.query(
@@ -241,11 +244,12 @@ def _ad_signals(client_ids, today):
 
 
 def _shoot_signals(client_ids, today):
-    """{client_id: (last_past_date, next_future_date)} — tek GROUP BY.
+    """{client_id: (last_past_date, next_future_date)} — one GROUP BY.
 
-    `status='completed'` filtresi BİLEREK kullanılmaz: sahada bu alan işaretlenmiyor
-    (2026-07-25 canlı veri: 76 kayıttan 3'ü completed). Bu yüzden "son çekim" =
-    tarihi geçmiş en yeni plan, "sıradaki çekim" = gelecekteki en yakın plan."""
+    The `status='completed'` filter is DELIBERATELY not used: this field isn't
+    marked in practice (2026-07-25 live data: 3 of 76 records were completed). So
+    "last shoot" = the most recent plan whose date has passed, "next shoot" = the
+    nearest plan in the future."""
     rows = (db.session.query(
         ShootTask.client_id,
         func.max(case((ShootTask.scheduled_date <= today, ShootTask.scheduled_date))),
@@ -256,7 +260,7 @@ def _shoot_signals(client_ids, today):
 
 
 def _team_signals(client_ids):
-    """{client_id: [{role_slot, user_id, name}]} — iki sorgu (atamalar + isim tablosu)."""
+    """{client_id: [{role_slot, user_id, name}]} — two queries (assignments + name table)."""
     rows = (ClientTeamAssignment.query
             .filter(ClientTeamAssignment.client_id.in_(client_ids)).all())
     names = {u.sub: (u.name or u.email)
@@ -269,8 +273,8 @@ def _team_signals(client_ids):
 
 
 def _last_notes(client_ids):
-    """{client_id: note_dict} — müşteri başına EN SON not, tek sorgu (window function).
-    ROW_NUMBER() Postgres'te ve test sqlite'ında (>=3.25) çalışır."""
+    """{client_id: note_dict} — the LATEST note per client, one query (window function).
+    ROW_NUMBER() works on Postgres and in the test sqlite (>=3.25)."""
     rn = func.row_number().over(
         partition_by=ClientActivityNote.client_id,
         order_by=(ClientActivityNote.happened_on.desc(), ClientActivityNote.id.desc()),
@@ -295,9 +299,10 @@ def _last_notes(client_ids):
 
 
 def _summary(entries_by_item, active_item_ids):
-    """Durum sayacı + `opportunity`: AKTİF kalemler arasında durumu 'yok' olan VEYA
-    hiç kaydı olmayanların sayısı = "bu müşteriye satılabilecek kalem sayısı".
-    Sayfanın iş değeri bu sayıda; liste bu kolona göre sıralanabilir."""
+    """Status counts + `opportunity`: among ACTIVE items, the count of those whose
+    status is 'yok' (none) OR that have no record at all = "how many items could
+    be sold to this client". The page's business value is in this number; the
+    list can be sorted by this column."""
     counts = {s: 0 for s in ClientTrackingEntry.STATUSES}
     opportunity = 0
     for item_id in active_item_ids:
@@ -306,7 +311,7 @@ def _summary(entries_by_item, active_item_ids):
         counts[status] = counts.get(status, 0) + 1
         if status == 'yok':
             opportunity += 1
-    # aktif olmayan (arşiv) kalemlerdeki kayıtlar sayaca girer ama fırsata girmez
+    # records on inactive (archived) items count toward the total but not toward opportunity
     for key, entry in entries_by_item.items():
         if int(key) not in active_item_ids:
             counts[entry['status']] = counts.get(entry['status'], 0) + 1
@@ -314,20 +319,20 @@ def _summary(entries_by_item, active_item_ids):
     return counts
 
 
-# --- Uçlar ---
+# --- Endpoints ---
 
 @bp.get('')
 @bp.get('/')
 def tracking_list():
-    """Takip listesi: katalog + müşteri satırları (durum hücreleri, türetilmiş
-    sinyaller, son not, özet). Sorgu sayısı müşteri sayısından bağımsızdır."""
+    """Tracking list: catalog + client rows (status cells, derived signals, last
+    note, summary). Query count is independent of client count."""
     _, err = _require_management()
     if err:
         return err
     _ensure_seed_items()
     today = dt.date.today()
 
-    # (1) müşteriler — yalnız aktif, sadece gereken kolonlar
+    # (1) clients — active only, only the needed columns
     cq = (db.session.query(Client.id, Client.name, Client.sector)
           .filter(Client.status == 'active'))
     term = (request.args.get('q') or '').strip()
@@ -335,7 +340,7 @@ def tracking_list():
         cq = cq.filter(Client.name.ilike(f'%{term}%'))
     clients = cq.order_by(Client.name.asc()).all()
 
-    # (2) katalog — silinmemiş kalemler (pasifler de döner, panel işaretler)
+    # (2) catalog — non-deleted items (inactive ones are also returned, the panel flags them)
     items = (TrackingItem.query.filter(TrackingItem.deleted_at.is_(None))
              .order_by(TrackingItem.position.asc(), TrackingItem.id.asc()).all())
     active_item_ids = {i.id for i in items if i.active}
@@ -344,14 +349,14 @@ def tracking_list():
         return jsonify(items=[i.to_dict() for i in items], clients=[])
     ids = [c.id for c in clients]
 
-    # (3) tüm durum hücreleri — tek sorgu, Python'da müşteriye grupla
+    # (3) all status cells — one query, group by client in Python
     entries = defaultdict(dict)
     for e in ClientTrackingEntry.query.filter(ClientTrackingEntry.client_id.in_(ids)).all():
-        # ANAHTAR STRING: JSON nesne anahtarları zaten string olur; frontend
-        # `entries[String(item.id)]` ile erişmeli (entries[item.id] runtime'da patlar).
+        # KEY IS A STRING: JSON object keys become strings anyway; the frontend
+        # must access via `entries[String(item.id)]` (entries[item.id] blows up at runtime).
         entries[e.client_id][str(e.item_id)] = e.to_dict()
 
-    # (4-7) türetilmiş sinyaller — her biri toplu
+    # (4-7) derived signals — each bulk
     ads = _ad_signals(ids, today)
     shoots = _shoot_signals(ids, today)
     teams = _team_signals(ids)
@@ -380,15 +385,15 @@ def tracking_list():
 
 @bp.get('/clients/<int:client_id>')
 def tracking_detail(client_id):
-    """Müşteri detayı: tüm aktivite notları + son kampanyalar + son/sıradaki çekimler.
-    Expand açıldığında çekilir. Kampanyalarda `amount_spent` BİLEREK yok — bu uç
-    ileride başka role açılırsa mali veri sızmasın."""
+    """Client detail: all activity notes + recent campaigns + last/next shoots.
+    Fetched when expand is opened. `amount_spent` is DELIBERATELY absent from
+    campaigns — so financial data doesn't leak if this endpoint is opened to another role later."""
     _, err = _require_management()
     if err:
         return err
     client = db.session.get(Client, client_id)
     if client is None:
-        return jsonify(error='müşteri bulunamadı'), 404
+        return jsonify(error='client not found'), 404
 
     note_rows = (ClientActivityNote.query
                  .filter_by(client_id=client_id, deleted_at=None)
@@ -417,8 +422,8 @@ def tracking_detail(client_id):
 
 @bp.put('/clients/<int:client_id>/entries/<int:item_id>')
 def entry_upsert(client_id, item_id):
-    """Durum hücresini yaz — UPSERT. Kaynağın kimliği (client_id, item_id) olduğu için
-    PUT: aynı gövdeyle tekrar çağırmak aynı sonucu verir, satır çoğalmaz."""
+    """Write a status cell — UPSERT. Since the resource's identity is (client_id,
+    item_id), it's PUT: calling it again with the same body gives the same result, no row duplication."""
     u, err = _require_management()
     if err:
         return err
@@ -467,7 +472,7 @@ def note_update(note_id):
         return err
     note = ClientActivityNote.query.filter_by(id=note_id, deleted_at=None).first()
     if note is None:
-        return jsonify(error='not bulunamadı'), 404
+        return jsonify(error='note not found'), 404
     try:
         _apply_note(note, request.get_json(silent=True) or {}, u)
     except ValueError as e:
@@ -479,13 +484,13 @@ def note_update(note_id):
 
 @bp.delete('/notes/<int:note_id>')
 def note_delete(note_id):
-    """Soft-delete — günlük geçmişi korunur, listelerden düşer."""
+    """Soft-delete — the log history is preserved, it just drops out of lists."""
     u, err = _require_management()
     if err:
         return err
     note = ClientActivityNote.query.filter_by(id=note_id, deleted_at=None).first()
     if note is None:
-        return jsonify(error='not bulunamadı'), 404
+        return jsonify(error='note not found'), 404
     note.deleted_at = utcnow()
     note.updated_by = u.get('sub')
     db.session.commit()
@@ -525,7 +530,7 @@ def items_update(item_id):
         return err
     item = TrackingItem.query.filter_by(id=item_id, deleted_at=None).first()
     if item is None:
-        return jsonify(error='kalem bulunamadı'), 404
+        return jsonify(error='item not found'), 404
     try:
         _apply_item(item, request.get_json(silent=True) or {}, u)
     except ValueError as e:
@@ -537,14 +542,14 @@ def items_update(item_id):
 
 @bp.delete('/items/<int:item_id>')
 def items_delete(item_id):
-    """Soft-delete. Müşteri kayıtları (entries) DB'de kalır ama listede görünmez —
-    kalemi geri getirmek yerine gizlemek isteniyorsa `active=false` kullanılmalı."""
+    """Soft-delete. Client records (entries) stay in the DB but don't show in the
+    list — if the intent is to hide an item rather than delete it, use `active=false` instead."""
     u, err = _require_management()
     if err:
         return err
     item = TrackingItem.query.filter_by(id=item_id, deleted_at=None).first()
     if item is None:
-        return jsonify(error='kalem bulunamadı'), 404
+        return jsonify(error='item not found'), 404
     item.deleted_at = utcnow()
     item.updated_by = u.get('sub')
     db.session.commit()
@@ -553,17 +558,17 @@ def items_delete(item_id):
 
 @bp.post('/items/reorder')
 def items_reorder():
-    """Katalog sırasını topluca yaz: {order: [id, id, ...]}."""
+    """Write the catalog order in bulk: {order: [id, id, ...]}."""
     u, err = _require_management()
     if err:
         return err
     order = (request.get_json(silent=True) or {}).get('order')
     if not isinstance(order, list) or not order:
-        return jsonify(error='order listesi zorunlu'), 400
+        return jsonify(error='order list is required'), 400
     rows = {i.id: i for i in TrackingItem.query.filter(TrackingItem.deleted_at.is_(None)).all()}
     unknown = [i for i in order if i not in rows]
     if unknown:
-        return jsonify(error=f'bilinmeyen kalem: {unknown[0]}'), 400
+        return jsonify(error=f'unknown item: {unknown[0]}'), 400
     for position, item_id in enumerate(order):
         rows[item_id].position = position
         rows[item_id].updated_by = u.get('sub')

@@ -1,6 +1,6 @@
-"""İngilizce JSON prompt + zorunlu logo (2026-08-10).
+"""English JSON prompt + mandatory logo (2026-08-10).
 
-Gerçek `claude -p` ve gerçek Codex CLI hiçbir testte çağrılmaz — ikisi de mock'lanır.
+The real `claude -p` and the real Codex CLI are never called in any test — both are mocked.
 """
 from conftest import MANAGER, login_as
 from extensions import db
@@ -35,7 +35,7 @@ def test_prompt_json_kolonu_yazilir_ve_okunur(client):
 
 
 def test_prompt_json_varsayilan_bos(client):
-    """Tekil üretim yolu bu kolonu doldurmaz — nullable olmalı."""
+    """The single-generation path doesn't fill this column — must be nullable."""
     from models_imagegen import ImageJob
     c = _musteri()
     j = ImageJob(client_id=c.id, requested_by="u1", provider="codex_exec",
@@ -45,7 +45,7 @@ def test_prompt_json_varsayilan_bos(client):
     assert j.prompt_json is None
 
 
-# --- Şema doğrulama ve URL temizliği (imagegen_prompt) ---
+# --- Schema validation and URL stripping (imagegen_prompt) ---
 
 def test_url_temizle_linkleri_atar():
     import imagegen_prompt
@@ -77,7 +77,7 @@ def test_validate_ic_dictleri_beyaz_listeler():
 
 
 def test_validate_bos_degerleri_cikarir():
-    """Boş alan JSON'a GİRMEZ — model uydurmaya zorlanmasın (spec §2)."""
+    """An empty field does NOT go into the JSON — don't force the model to make things up (spec §2)."""
     import imagegen_prompt
     out = imagegen_prompt.validate_prompt_json({
         "subject": "cup", "environment": "", "mood": None,
@@ -101,7 +101,7 @@ def test_validate_listeleri_string_listesine_zorlar():
 
 
 def test_validate_bozuk_girdide_bos_doner():
-    """Boş sonuç 'geçersiz' demektir — çağıran üretimi durdurur (spec §6)."""
+    """An empty result means 'invalid' — the caller stops generation (spec §6)."""
     import imagegen_prompt
     assert imagegen_prompt.validate_prompt_json(None) == {}
     assert imagegen_prompt.validate_prompt_json("düz metin") == {}
@@ -117,10 +117,10 @@ def test_parse_json_cikti_aciklama_metniyle_sarilmis_jsonu_bulur():
     assert imagegen_prompt.parse_json_cikti(None) is None
 
 
-# --- Claude çeviri talimatı (ai_context.image_json_instruction) ---
+# --- Claude translation instruction (ai_context.image_json_instruction) ---
 
 def _idea():
-    """Gerçek AF HUKUK brief yapısının sadeleştirilmiş kopyası."""
+    """A simplified copy of the real AF HUKUK brief structure."""
     return {
         "başlık": "Kampanyanız TTK'ya Uygun mu?",
         "içerik": "TTK madde 54-55 haksız rekabet sınırları anlatılıyor.",
@@ -150,7 +150,7 @@ def test_ceviri_talimati_dokunulmaz_ve_turetilen_ayrimini_tasir(client):
 
 
 def test_ceviri_talimatinda_link_yok(client):
-    """Prompt'a link gönderilmez (kullanıcı kuralı) — pinterest alanı da sızmamalı."""
+    """No links are sent to the prompt (user rule) — the pinterest field must not leak either."""
     import ai_context
     c = _musteri()
     t = ai_context.image_json_instruction(c, _idea())
@@ -158,7 +158,7 @@ def test_ceviri_talimatinda_link_yok(client):
 
 
 def test_ceviri_talimati_varyant_almaz(client):
-    """Çeviri varyanttan BAĞIMSIZ (spec §3) — imzada variant parametresi yok."""
+    """Translation is INDEPENDENT of variant (spec §3) — no variant parameter in the signature."""
     import inspect
 
     import ai_context
@@ -166,7 +166,7 @@ def test_ceviri_talimati_varyant_almaz(client):
     assert params == ["client", "idea"]
 
 
-# --- Codex promptunun JSON'dan kurulması (build_codex_prompt) ---
+# --- Building the Codex prompt from JSON (build_codex_prompt) ---
 
 def _pj():
     return {"prompt": "legal poster", "subject": "scales of justice",
@@ -176,7 +176,7 @@ def _pj():
 
 
 def test_codex_promptu_tamamen_ingilizce_metin_haric():
-    """Prompt'un tamamı İngilizce; Türkçe kalan TEK şey text_elements içeriği."""
+    """The entire prompt is in English; the ONLY thing that stays in Turkish is the text_elements content."""
     import imagegen_prompt
     p = imagegen_prompt.build_codex_prompt(_pj(), "with_text", "social_post_4_5", True)
     assert p.startswith("$imagegen")
@@ -199,7 +199,7 @@ def test_metinsiz_varyant_metin_yasaklar_ve_text_elements_bosalir():
     import imagegen_prompt
     p = imagegen_prompt.build_codex_prompt(_pj(), "clean", "social_post_4_5", False)
     assert "Do NOT add any text" in p
-    # başlık JSON'dan da çıkarıldı — model onu okuyup yazmasın
+    # title was also stripped from the JSON — don't let the model read and write it
     assert "Kampanyanız TTK'ya Uygun mu?" not in p
 
 
@@ -229,12 +229,12 @@ def test_json_bloklari_okunabilir_bicimde_gomulur():
     p = imagegen_prompt.build_codex_prompt(_pj(), "clean", "square_1_1", False)
     govde = p[p.index("[IMAGE SPECIFICATION]") + len("[IMAGE SPECIFICATION]"):
               p.index("[MANDATORY CONSTRAINTS]")].strip()
-    veri = json.loads(govde)                    # geçerli JSON olmalı
+    veri = json.loads(govde)                    # must be valid JSON
     assert veri["subject"] == "scales of justice"
-    assert "text_elements" not in veri          # clean varyantında çıkarıldı
+    assert "text_elements" not in veri          # stripped out in the clean variant
 
 
-# --- Handler'ın çeviri adımı ---
+# --- The handler's translation step ---
 
 def _brief(client_id, week_iso="2026-W35", ideas=None, status="approved"):
     from models_sharing import WeeklyBrief
@@ -282,7 +282,7 @@ def test_handler_ceviri_yapar_ve_prompt_json_kaydeder(client, tmp_path, monkeypa
 
 
 def test_handler_ikinci_varyant_ceviriyi_yeniden_kullanir(client, tmp_path, monkeypatch):
-    """Fikir başına TEK claude çağrısı (spec §4)."""
+    """A SINGLE claude call per idea (spec §4)."""
     import ai_claude
     import ai_worker
     monkeypatch.setenv("CODEX_IMAGE_DIR", str(tmp_path / "depo"))
@@ -300,13 +300,13 @@ def test_handler_ikinci_varyant_ceviriyi_yeniden_kullanir(client, tmp_path, monk
     monkeypatch.setattr(ai_claude, "run", sahte)
     ai_worker.run_once()
     ai_worker.run_once()
-    assert cagri["n"] == 1                      # ikinci iş çeviriyi yeniden kullandı
+    assert cagri["n"] == 1                      # second job reused the translation
     from models_imagegen import ImageJob
     assert ImageJob.query.filter(ImageJob.prompt_json.isnot(None)).count() == 2
 
 
 def test_handler_bozuk_ceviride_uretim_yapmaz(client, tmp_path, monkeypatch):
-    """Claude JSON döndüremezse iş kapanır, Codex ÇAĞRILMAZ (spec §6)."""
+    """If Claude fails to return JSON, the job is closed and Codex is NOT CALLED (spec §6)."""
     import ai_claude
     import ai_worker
     import image_providers
@@ -329,7 +329,7 @@ def test_handler_bozuk_ceviride_uretim_yapmaz(client, tmp_path, monkeypatch):
 
 
 def test_bozuk_ceviri_kalici_hata_retry_edilmez(client, tmp_path, monkeypatch):
-    """Aynı brief metniyle tekrar çevirmek yine JSON üretmez — 3 deneme boşa gider."""
+    """Retrying translation with the same brief text still won't produce JSON — 3 attempts wasted."""
     import ai_claude
     import ai_worker
     from models import Job
@@ -340,7 +340,7 @@ def test_bozuk_ceviri_kalici_hata_retry_edilmez(client, tmp_path, monkeypatch):
     _is(c.id, b)
     monkeypatch.setattr(ai_claude, "run", lambda *a, **k: "JSON yok")
     ai_worker.run_once()
-    assert Job.query.first().status == "failed"      # requeue YOK
+    assert Job.query.first().status == "failed"      # NO requeue
 
 
 def test_handler_metinsiz_varyantta_baslik_promptta_yok(client, tmp_path, monkeypatch):
@@ -377,7 +377,7 @@ def test_handler_logo_varsa_kisit_yazilir(client, tmp_path, monkeypatch):
     assert "brand logo" in ij.resolved_prompt
 
 
-# --- Logo referansı ve panel uyarısı ---
+# --- Logo reference and panel warning ---
 
 def test_parti_her_ise_logoyu_referans_ekler(client):
     import imagegen_batch
@@ -400,7 +400,7 @@ def test_logosuz_musteride_parti_calisir_referans_bos(client):
     plan = imagegen_batch.parti_plani(b)
     isler = imagegen_batch.uygulanacaklar(plan, {})
     sonuc = imagegen_batch.parti_uygula(c, b, isler, "u1")
-    assert len(sonuc["created"]) == 2           # üretim engellenmedi
+    assert len(sonuc["created"]) == 2           # generation was not blocked
     for ij in ImageJob.query.all():
         assert ij.reference_asset_ids == []
 
@@ -441,12 +441,13 @@ def test_batch_ucu_logo_varsa_missing_false(client):
 
 
 def test_logo_indirilemezse_promptta_logo_kisiti_olmaz(client, tmp_path, monkeypatch):
-    """REGRESYON (2026-08-10 canlı bulgu): `has_logo` DB'deki id listesine bakıyordu,
-    dosyanın GERÇEKTEN verilip verilmediğine değil.
+    """REGRESSION (found live on 2026-08-10): `has_logo` was checking the id list in
+    the DB, not whether the file was ACTUALLY provided.
 
-    Logo indirilemeyince (worker'da Drive sırrı yok) prompt "The attached image is the
-    brand logo" diyor ama Codex'e hiç dosya gitmiyordu; Codex logoyu arayıp bulamayınca
-    üretimi DURDURUYORDU — 4 metinli işten 3'ü `invalid_output` ile düştü."""
+    When the logo can't be downloaded (worker has no Drive secret), the prompt says
+    "The attached image is the brand logo" but no file ever reached Codex; when Codex
+    looked for the logo and couldn't find it, it HALTED generation — 3 out of 4
+    text-variant jobs failed with `invalid_output`."""
     import ai_claude
     import ai_worker
     monkeypatch.setenv("CODEX_IMAGE_DIR", str(tmp_path / "depo"))
@@ -458,21 +459,21 @@ def test_logo_indirilemezse_promptta_logo_kisiti_olmaz(client, tmp_path, monkeyp
     ij.reference_asset_ids = [logo.id]
     db.session.commit()
     monkeypatch.setattr(ai_claude, "run", lambda *a, **k: _SAHTE_JSON)
-    # Drive erişimi yok → referans çözülemiyor
+    # No Drive access → reference can't be resolved
     monkeypatch.setattr(ai_worker, "_resolve_reference_bytes",
                         lambda ref: (_ for _ in ()).throw(RuntimeError("DriveAuthError")))
     ai_worker.run_once()
     db.session.refresh(ij)
-    assert ij.status == "completed"                 # üretim DURMADI
-    assert "brand logo" not in ij.resolved_prompt   # yalan söylemiyor
+    assert ij.status == "completed"                 # generation did NOT halt
+    assert "brand logo" not in ij.resolved_prompt   # doesn't lie about it
 
 
 def test_cikti_olusmazsa_codexin_mesaji_kaydedilir(client, tmp_path, monkeypatch):
-    """Codex 'üretemedim' dediğinde SEBEBİ kaydedilmeli.
+    """When Codex says 'I couldn't generate it', the REASON must be recorded.
 
-    Canlı teşhiste `error_internal` yalnız 'çıktı dosyası oluşmadı' diyordu; Codex'in
-    asıl cevabı ('Please attach the brand logo image...') kayboluyordu ve kök nedeni
-    bulmak elle yeniden çalıştırmayı gerektirdi."""
+    In live diagnosis, `error_internal` only said 'output file was not created'; Codex's
+    actual response ('Please attach the brand logo image...') was lost, and finding the
+    root cause required a manual re-run."""
     import codex_runner
     import image_providers
     import imagegen_store
@@ -489,4 +490,4 @@ def test_cikti_olusmazsa_codexin_mesaji_kaydedilir(client, tmp_path, monkeypatch
         p.generate(req)
         raise AssertionError("OutputError bekleniyordu")
     except imagegen_store.OutputError as e:
-        assert "attach the brand logo" in str(e)    # Codex'in cevabı hatada
+        assert "attach the brand logo" in str(e)    # Codex's response is in the error

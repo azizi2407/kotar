@@ -1,9 +1,10 @@
-"""Mail servis katmanı — yetki + Fernet + IMAP→DB senkron + gönderim orkestrasyonu.
+"""Mail service layer — authorization + Fernet + IMAP→DB sync + send orchestration.
 
-HTTP uçları (mail_api) ve poller (mail_sync_worker) buradan geçer; ikisi de aynı
-mail_gateway'i kullanır. Parola Fernet'le saklanır/çözülür (mail_crypto). Yetki:
-sahip yalnız kendi + is_shared görünür hesap; is_shared/başkası adına/poll_enabled
-yalnız superadmin. Domain allowlist config'ten (MAIL_ALLOWED_DOMAINS)."""
+HTTP endpoints (mail_api) and the poller (mail_sync_worker) both go through here;
+both use the same mail_gateway. Passwords are stored/decrypted with Fernet
+(mail_crypto). Authorization: an owner sees only their own + is_shared accounts;
+is_shared/on someone else's behalf/poll_enabled is superadmin only. Domain
+allowlist comes from config (MAIL_ALLOWED_DOMAINS)."""
 import logging
 
 from flask import current_app
@@ -20,14 +21,14 @@ log = logging.getLogger('agency.mail')
 
 
 class MailAccessError(Exception):
-    """Kullanıcının bu hesaba/işleme erişim yetkisi yok (→ 403/404)."""
+    """The user isn't authorized for this account/operation (→ 403/404)."""
 
 
 class MailConfigError(Exception):
-    """Geçersiz yapılandırma (domain dışı, eksik alan → 400)."""
+    """Invalid configuration (domain not allowed, missing field → 400)."""
 
 
-# --- yetki & erişim ---------------------------------------------------------
+# --- authorization & access ---------------------------------------------------------
 def _allowed_domains():
     return current_app.config.get('MAIL_ALLOWED_DOMAINS') or set()
 
@@ -37,7 +38,7 @@ def _can_see(user, acc):
 
 
 def accessible_accounts(user):
-    """Kullanıcının görebildiği hesaplar: kendi + ortak (is_shared)."""
+    """Accounts the user can see: their own + shared (is_shared)."""
     sub = user.get('sub')
     return (MailAccount.query
             .filter(db.or_(MailAccount.owner_sub == sub, MailAccount.is_shared.is_(True)))
@@ -47,19 +48,20 @@ def accessible_accounts(user):
 
 
 def require_account(user, account_id, *, write=False):
-    """Hesabı getir + erişim doğrula. write=True ortak hesapta superadmin ister."""
+    """Fetch the account + verify access. write=True requires superadmin on a
+    shared account."""
     acc = db.session.get(MailAccount, account_id)
     if acc is None or not acc.active:
-        raise MailAccessError('hesap bulunamadı')
+        raise MailAccessError('account not found')
     if not _can_see(user, acc):
-        raise MailAccessError('bu hesaba erişiminiz yok')
+        raise MailAccessError('you do not have access to this account')
     if write and acc.is_shared and not (acc.owner_sub == user.get('sub') or is_superadmin(user)):
-        raise MailAccessError('ortak hesabı değiştirmek için yetki gerekli')
+        raise MailAccessError('permission required to modify a shared account')
     return acc
 
 
 def conn_for(acc):
-    """MailAccount → gw.MailConn (secret_enc çözülür)."""
+    """MailAccount → gw.MailConn (secret_enc is decrypted)."""
     return gw.MailConn(
         email=acc.email, imap_host=acc.imap_host, imap_port=acc.imap_port,
         imap_ssl=acc.imap_ssl, smtp_host=acc.smtp_host, smtp_port=acc.smtp_port,
@@ -67,38 +69,40 @@ def conn_for(acc):
         password=mail_crypto.decrypt(acc.secret_enc))
 
 
-# --- hesap CRUD -------------------------------------------------------------
+# --- account CRUD -------------------------------------------------------------
 def create_account(user, data):
-    """Self-servis hesap bağla. Domain allowlist + gw.test_connection; başarılıysa kaydet.
-    is_shared/başkası adına yalnız superadmin. data: email, password, display_name?,
-    imap_host?, imap_port?, smtp_host?, smtp_port?, smtp_security?, is_shared?, poll_enabled?"""
+    """Self-service account linking. Domain allowlist + gw.test_connection; saved on
+    success. is_shared/on someone else's behalf is superadmin only. data: email,
+    password, display_name?, imap_host?, imap_port?, smtp_host?, smtp_port?,
+    smtp_security?, is_shared?, poll_enabled?"""
     email = (data.get('email') or '').strip().lower()
     password = data.get('password') or ''
     if not email or not password:
-        raise MailConfigError('e-posta ve parola zorunlu')
+        raise MailConfigError('email and password are required')
     domain = email.rsplit('@', 1)[-1]
     if domain not in _allowed_domains():
-        raise MailConfigError(f'yalnız şu alan adları: {", ".join(sorted(_allowed_domains()))}')
+        raise MailConfigError(f'allowed domains only: {", ".join(sorted(_allowed_domains()))}')
 
     is_shared = bool(data.get('is_shared'))
     poll_enabled = bool(data.get('poll_enabled'))
     owner_sub = data.get('owner_sub') or user.get('sub')
     superadmin = is_superadmin(user)
     if (is_shared or poll_enabled or owner_sub != user.get('sub')) and not superadmin:
-        raise MailAccessError('ortak hesap / poller / başkası adına yalnız superadmin')
+        raise MailAccessError('shared account / poller / on behalf of another user is superadmin-only')
 
-    # Aynı (owner_sub, email) zaten varsa `uq_mail_owner_email` ihlali → ham
-    # IntegrityError 500. Panel bunu "Bağlanamadı (e-posta/şifre?)" diye
-    # gösteriyordu, yani parola DOĞRUYKEN bile tam ters yönü işaret ediyordu
-    # (2026-07-31 vakası: parola değişince "Şifreyi güncelle" bu yola giriyordu).
-    # Aktif satır → anlaşılır hata; PASİF satır (soft-delete) → canlandır, çünkü
-    # `delete_account` satırı silmiyor ve "kaldır, yeniden bağla" yolu aksi halde
-    # kalıcı olarak kısıta çarpardı.
+    # If (owner_sub, email) already exists, `uq_mail_owner_email` is violated → a raw
+    # IntegrityError 500. The panel used to show this as "Couldn't connect
+    # (email/password?)", i.e. it pointed in exactly the wrong direction even when
+    # the password was CORRECT (2026-07-31 incident: "Update password" hit this
+    # path when the password changed). An active row → clear error; an INACTIVE row
+    # (soft-deleted) → revive it, because `delete_account` doesn't delete the row
+    # and the "remove, reconnect" path would otherwise permanently hit the
+    # constraint.
     mevcut = MailAccount.query.filter_by(owner_sub=owner_sub, email=email).first()
     if mevcut is not None and mevcut.active:
         raise MailConfigError(
-            f'{email} zaten bağlı — parolası değiştiyse hesap kartındaki '
-            '"Şifreyi güncelle" ile yenileyin.')
+            f'{email} is already connected — if the password changed, refresh it with '
+            '"Update password" on the account card.')
 
     cfg = current_app.config
     acc = mevcut or MailAccount(owner_sub=owner_sub, email=email)
@@ -108,30 +112,31 @@ def create_account(user, data):
     acc.is_shared, acc.poll_enabled, acc.active = is_shared, poll_enabled, True
     acc.last_error = None
 
-    # IMAP zorunlu (okuma) — yanlış parola/erişim erken yakalanır.
+    # IMAP is mandatory (reading) — a wrong password/access issue is caught early.
     conn = conn_for(acc)
     gw.test_imap(conn)
     acc.last_ok_at = utcnow()
-    # SMTP yumuşak: erişilemese bile hesap kurulur (okuma çalışır), uyarı yazılır.
-    # AMA kimlik hatası ile erişim hatası AYRI raporlanır: `MailAuthError`
-    # `MailError`'ın alt sınıfı olduğu için tek `except` ikisini de yakalıyordu ve
-    # yanlış SMTP parolası "gönderim şimdilik kapalı" (ağ engeli) gibi görünüyordu.
-    # Ağ engeli kalktıktan sonra bu metin aktif olarak yanlış yönlendirir:
-    # düzeltilebilir bir parola sorununu "sunucu engeli" sanıp kimse dokunmaz.
+    # SMTP is soft: the account is set up even if it's unreachable (reading works),
+    # a warning is written. BUT an auth error and an access error are reported
+    # SEPARATELY: since `MailAuthError` is a subclass of `MailError`, a single
+    # `except` was catching both and a wrong SMTP password looked like "sending is
+    # currently disabled" (network block). Once the network block is lifted, this
+    # text actively misdirects: a fixable password issue gets mistaken for a
+    # "server block" and nobody touches it.
     try:
         gw.test_smtp(conn)
     except gw.MailAuthError as e:
-        acc.last_error = f'IMAP OK · SMTP kimliği reddedildi (parolayı kontrol edin): {e}'
+        acc.last_error = f'IMAP OK · SMTP credentials rejected (check the password): {e}'
     except gw.MailError as e:
-        acc.last_error = f'IMAP OK · SMTP sunucusuna erişilemedi (gönderim kapalı): {e}'
+        acc.last_error = f'IMAP OK · SMTP server unreachable (sending disabled): {e}'
     db.session.add(acc)
     db.session.commit()
     return acc
 
 
 def _apply_conn_fields(acc, data, cfg):
-    """Bağlantı alanlarını data + varsayılanlardan doldurur (yeni ve canlandırılan
-    hesap aynı yolu kullansın diye ayrıldı)."""
+    """Fill connection fields from data + defaults (split out so a new account and a
+    revived account use the same path)."""
     acc.imap_host = data.get('imap_host') or cfg['MAIL_DEFAULT_IMAP_HOST']
     acc.imap_port = int(data.get('imap_port') or cfg['MAIL_DEFAULT_IMAP_PORT'])
     acc.imap_ssl = bool(data.get('imap_ssl', True))
@@ -141,9 +146,9 @@ def _apply_conn_fields(acc, data, cfg):
 
 
 def update_account(user, account_id, data):
-    """Hesabı güncelle. `password` verilirse **IMAP ile doğrulanır** ve ancak
-    geçerse kaydedilir — yanlış parolayı sessizce yazmak kullanıcıyı tam olarak
-    düzeltmeye çalıştığı bozuk durumda bırakırdı (2026-07-31)."""
+    """Update the account. If `password` is given it's **verified against IMAP**
+    and only saved if it's valid — silently writing a wrong password would leave
+    the user in exactly the broken state they were trying to fix (2026-07-31)."""
     acc = require_account(user, account_id, write=True)
     superadmin = is_superadmin(user)
     for f in ('display_name', 'imap_host', 'smtp_host', 'smtp_security'):
@@ -158,16 +163,17 @@ def update_account(user, account_id, data):
         try:
             gw.test_imap(conn_for(acc))
         except gw.MailError:
-            acc.secret_enc = eski          # doğrulanmayan parola kaydedilmez
+            acc.secret_enc = eski          # an unverified password isn't saved
             db.session.rollback()
             raise
-        # Parola düzeldi → eski sağlık notu artık yalan; şerit `last_error`'a
-        # bakıyor, temizlenmezse hesap düzeldikten sonra da "bozuk" görünürdü.
+        # The password is fixed → the old health note is now a lie; the badge
+        # looks at `last_error`, if it isn't cleared the account would still look
+        # "broken" after it's fixed.
         acc.last_ok_at = utcnow()
         acc.last_error = None
     if 'is_shared' in data or 'poll_enabled' in data:
         if not superadmin:
-            raise MailAccessError('is_shared/poll_enabled yalnız superadmin')
+            raise MailAccessError('is_shared/poll_enabled is superadmin-only')
         if 'is_shared' in data:
             acc.is_shared = bool(data['is_shared'])
         if 'poll_enabled' in data:
@@ -183,13 +189,15 @@ def delete_account(user, account_id):
 
 
 def test_account(user, account_id):
-    """Bağlantıyı test et; IMAP ve SMTP kanallarını ayrı raporla. IMAP zorunlu; SMTP
-    engelliyse (giden port bloğu) imap_ok=True, smtp_ok=False döner. Döner: dict."""
+    """Test the connection; report the IMAP and SMTP channels separately. IMAP is
+    mandatory; if SMTP is blocked (outbound port block), returns imap_ok=True,
+    smtp_ok=False. Returns: dict."""
     acc = require_account(user, account_id)
     conn = conn_for(acc)
     result = {'imap_ok': False, 'smtp_ok': False, 'imap_error': None, 'smtp_error': None,
-              # Hatanın SINIFI: 'auth' (parola) / 'connect' (erişim). Panelde
-              # "parolayı düzelt" ile "sunucuya ulaşılamıyor" farklı işler.
+              # The error's CLASS: 'auth' (password) / 'connect' (access). In the
+              # panel, "fix the password" and "can't reach the server" trigger
+              # different actions.
               'imap_error_kind': None, 'smtp_error_kind': None}
     try:
         gw.test_imap(conn)
@@ -210,7 +218,7 @@ def test_account(user, account_id):
     return result
 
 
-# --- senkron ----------------------------------------------------------------
+# --- sync ----------------------------------------------------------------
 def _upsert_folders(acc, conn):
     remote = gw.list_folders(conn)
     by_path = {f.path: f for f in MailFolder.query.filter_by(account_id=acc.id).all()}
@@ -230,19 +238,19 @@ def _upsert_folders(acc, conn):
 
 
 def sync_folder(acc, folder_path, limit=100):
-    """Bir klasörü IMAP→DB senkronla. UIDVALIDITY değişimi → tam yeniden. Idempotent
-    (unique kısıt). Döner: yeni eklenen mesaj sayısı."""
+    """Sync one folder IMAP→DB. A UIDVALIDITY change → full resync. Idempotent
+    (unique constraint). Returns: number of newly added messages."""
     conn = conn_for(acc)
     folders = _upsert_folders(acc, conn)
     folder = folders.get(folder_path)
     if folder is None:
-        raise MailConfigError(f'klasör yok: {folder_path}')
+        raise MailConfigError(f'folder not found: {folder_path}')
 
     remote_uidval = folder.uidvalidity
     existing = (MailMessage.query
                 .filter_by(account_id=acc.id, folder_id=folder.id)
                 .all())
-    # UIDVALIDITY değiştiyse bu klasörün yerel mesajlarını sil, sıfırdan çek
+    # If UIDVALIDITY changed, delete this folder's local messages, refetch from scratch
     if existing and remote_uidval is not None and existing[0].uidvalidity != remote_uidval:
         for m in existing:
             db.session.delete(m)
@@ -274,26 +282,26 @@ def sync_folder(acc, folder_path, limit=100):
 
 
 def refresh_folders(acc):
-    """Klasör listesini IMAP'ten tazele (upsert) ve MailFolder satırlarını döner.
+    """Refresh (upsert) the folder list from IMAP and return the MailFolder rows.
 
-    IMAP hatası **sağlık kaydına da yazılır** (2026-07-31): parola sunucuda
-    değişince ilk belirti bu ucun 502 vermesi, ama `last_error` yazılmadığı için
-    hesap şeridi "Bağlantı sorunu bildirilmedi" (yeşil) demeye devam ediyordu →
-    "Şifreyi güncelle" düğmesi hiç görünmüyor, kullanıcı elle test etmek zorunda
-    kalıyordu."""
+    An IMAP error **is also written to the health record** (2026-07-31): when the
+    password changes on the server, the first symptom is this endpoint returning
+    502, but since `last_error` wasn't written, the account badge kept saying "No
+    connection issue reported" (green) → the "Update password" button never
+    showed up, the user had to test manually."""
     self_conn = conn_for(acc)
     try:
         _upsert_folders(acc, self_conn)
     except gw.MailError as e:
         db.session.rollback()
-        # Sınıfı metne gömüyoruz: panel şeridi "parola sorunu" ile "sunucuya
-        # ulaşılamıyor"u ayırt etmek için `last_error` metnine bakıyor ve
-        # gateway'in ham "IMAP giriş başarısız" metni o ayrımı vermiyordu
-        # (kolon eklemek elle ALTER gerektirir; metin sözleşmesi `create_account`
-        # ile aynı kelimeleri kullanıyor).
-        acc.last_error = (f'IMAP kimliği reddedildi (parolayı kontrol edin): {e}'
+        # We embed the class in the text: the panel badge looks at the
+        # `last_error` text to distinguish "password issue" from "can't reach the
+        # server", and the gateway's raw "IMAP login failed" text didn't make that
+        # distinction (adding a column would require a manual ALTER; the text
+        # contract uses the same wording as `create_account`).
+        acc.last_error = (f'IMAP credentials rejected (check the password): {e}'
                           if isinstance(e, gw.MailAuthError)
-                          else f'IMAP sunucusuna erişilemedi: {e}')
+                          else f'IMAP server unreachable: {e}')
         db.session.commit()
         raise
     acc.last_ok_at = utcnow()
@@ -304,11 +312,11 @@ def refresh_folders(acc):
 
 
 def list_messages(acc, folder_id, page=1, per_page=50, q=None):
-    """Klasördeki mesajlar (DB — snippet listesi). q verilirse konu/gönderen/snippet arar.
-    Döner: (items, total)."""
+    """Messages in the folder (DB — snippet list). If q is given, searches
+    subject/sender/snippet. Returns: (items, total)."""
     folder = db.session.get(MailFolder, folder_id)
     if folder is None or folder.account_id != acc.id:
-        raise MailAccessError('klasör bulunamadı')
+        raise MailAccessError('folder not found')
     query = MailMessage.query.filter_by(account_id=acc.id, folder_id=folder_id)
     if q:
         like = f'%{q.strip()}%'
@@ -322,10 +330,10 @@ def list_messages(acc, folder_id, page=1, per_page=50, q=None):
 
 
 def get_message(acc, message_id, mark_seen=True):
-    """Tam mesaj (lazy gövde) + okundu işaretle. Döner: MailMessage."""
+    """Full message (lazy body) + mark as read. Returns: MailMessage."""
     m = db.session.get(MailMessage, message_id)
     if m is None or m.account_id != acc.id:
-        raise MailAccessError('mesaj bulunamadı')
+        raise MailAccessError('message not found')
     load_message_body(acc, m)
     if mark_seen and not m.seen:
         folder = db.session.get(MailFolder, m.folder_id)
@@ -341,7 +349,7 @@ def get_message(acc, message_id, mark_seen=True):
 def set_message_flags(acc, message_id, *, seen=None, flagged=None):
     m = db.session.get(MailMessage, message_id)
     if m is None or m.account_id != acc.id:
-        raise MailAccessError('mesaj bulunamadı')
+        raise MailAccessError('message not found')
     folder = db.session.get(MailFolder, m.folder_id)
     add, remove = [], []
     if seen is not None:
@@ -356,20 +364,20 @@ def set_message_flags(acc, message_id, *, seen=None, flagged=None):
 
 
 def get_attachment(acc, message_id, part_id):
-    """Ek baytları (data, filename, content_type) — on-demand IMAP."""
+    """Attachment bytes (data, filename, content_type) — on-demand IMAP."""
     m = db.session.get(MailMessage, message_id)
     if m is None or m.account_id != acc.id:
-        raise MailAccessError('mesaj bulunamadı')
+        raise MailAccessError('message not found')
     folder = db.session.get(MailFolder, m.folder_id)
     return gw.fetch_attachment(conn_for(acc), folder.path, m.uid, part_id)
 
 
-# --- taslak -----------------------------------------------------------------
+# --- draft -----------------------------------------------------------------
 def save_draft(acc, data, draft_id=None):
     if draft_id:
         d = db.session.get(MailDraft, draft_id)
         if d is None or d.account_id != acc.id:
-            raise MailAccessError('taslak bulunamadı')
+            raise MailAccessError('draft not found')
     else:
         d = MailDraft(account_id=acc.id)
         db.session.add(d)
@@ -390,13 +398,14 @@ def list_drafts(acc):
 def delete_draft(acc, draft_id):
     d = db.session.get(MailDraft, draft_id)
     if d is None or d.account_id != acc.id:
-        raise MailAccessError('taslak bulunamadı')
+        raise MailAccessError('draft not found')
     db.session.delete(d)
     db.session.commit()
 
 
 def load_message_body(acc, message):
-    """Mesajın gövdesi/ekleri DB'de yoksa IMAP'ten çekip kalıcı yaz (lazy). Döner: message."""
+    """If the message's body/attachments aren't in the DB, fetch them from IMAP and
+    persist them (lazy). Returns: message."""
     if message.body_text is not None or message.body_html is not None:
         return message
     folder = db.session.get(MailFolder, message.folder_id)
@@ -414,11 +423,12 @@ def load_message_body(acc, message):
 
 
 def sync_account(acc):
-    """Poller: INBOX + izlenmeye değer klasörler. Yeni mailde bildirim. Döner: yeni sayısı."""
+    """Poller: INBOX + folders worth watching. Notification on new mail. Returns:
+    count of new messages."""
     conn = conn_for(acc)
     folders = _upsert_folders(acc, conn)
     total = 0
-    # INBOX (special_use=inbox) öncelik; yoksa 'INBOX' path
+    # INBOX (special_use=inbox) takes priority; otherwise the 'INBOX' path
     inbox_paths = [p for p, f in folders.items() if f.special_use == 'inbox'] or ['INBOX']
     for path in inbox_paths:
         if path not in folders:
@@ -426,7 +436,7 @@ def sync_account(acc):
         n = sync_folder(acc, path)
         total += n
         if n:
-            notifications.push(acc.owner_sub, 'mail', f'{n} yeni e-posta',
+            notifications.push(acc.owner_sub, 'mail', f'{n} new emails',
                                f'{acc.email} · {path}', link='/posta')
     if total:
         db.session.commit()
@@ -436,14 +446,15 @@ def sync_account(acc):
     return total
 
 
-# --- gönderim ---------------------------------------------------------------
+# --- sending ---------------------------------------------------------------
 def send_message(user, account_id, payload):
-    """SMTP gönder + Sent APPEND + DB kayıt. payload: to[], cc[], subject, body_text,
-    body_html?, in_reply_to?, reply_to_message_id? (yerel MailMessage.id → \\Answered)."""
+    """Send via SMTP + Sent APPEND + DB record. payload: to[], cc[], subject,
+    body_text, body_html?, in_reply_to?, reply_to_message_id? (local MailMessage.id
+    → \\Answered)."""
     acc = require_account(user, account_id)
     to = [a.strip() for a in (payload.get('to') or []) if a.strip()]
     if not to:
-        raise MailConfigError('en az bir alıcı (to) gerekli')
+        raise MailConfigError('at least one recipient (to) is required')
     cc = [a.strip() for a in (payload.get('cc') or []) if a.strip()]
     conn = conn_for(acc)
 
@@ -455,11 +466,12 @@ def send_message(user, account_id, payload):
             in_reply_to = reply_src.message_id
     references = reply_src.references if reply_src else None
 
-    # Gönderim sonucu hesabın SAĞLIK DURUMUNU günceller. Eskiden bunu yalnız
-    # `test_account` yapıyordu ve o uç panelden hiç çağrılmıyor → SMTP ağ engeli
-    # döneminde yazılan "gönderim kapalı" notu, gönderim çalışmaya başladıktan
-    # sonra da kayıtta kalıyordu (kendiliğinden temizlenen bir yol yoktu).
-    # Artık ilk başarılı gönderim notu siler, başarısız gönderim gerçek sebebi yazar.
+    # The send result updates the account's HEALTH STATUS. This used to be done
+    # only by `test_account`, and that endpoint is never called from the panel →
+    # the "sending disabled" note written during an SMTP network block stayed in
+    # the record even after sending started working again (there was no
+    # self-clearing path). Now the first successful send clears the note, a failed
+    # send writes the real reason.
     try:
         mid, raw = gw.send(conn, to=to, cc=cc, subject=payload.get('subject', ''),
                            body_text=payload.get('body_text', ''),
@@ -468,9 +480,9 @@ def send_message(user, account_id, payload):
                            attachments=payload.get('attachments') or ())
     except gw.MailError as e:
         acc.last_error = (
-            f'Gönderim başarısız — SMTP kimliği reddedildi (parolayı kontrol edin): {e}'
+            f'Send failed — SMTP credentials rejected (check the password): {e}'
             if isinstance(e, gw.MailAuthError)
-            else f'Gönderim başarısız — SMTP sunucusuna erişilemedi: {e}')
+            else f'Send failed — SMTP server unreachable: {e}')
         db.session.commit()
         raise
     acc.last_error = None

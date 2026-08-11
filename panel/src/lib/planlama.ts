@@ -1,6 +1,6 @@
-// Planlama Panosu veri hook'ları — /api/planning.
-// Panolar kişi eksenli: 'management' (yönetim ortak) + 'user:<sub>' (kişi başına).
-// Yazma DELTA'dır: {base_version, upsert:[...], delete:[...]} — tam dizi gönderilmez.
+// Planning Board data hooks — /api/planning.
+// Boards are person-centric: 'management' (shared management space) + 'user:<sub>' (per-person).
+// Writes are DELTAS: {base_version, upsert:[...], delete:[...]} — the full array is never sent.
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 
 import { apiGet, apiJson, apiUpload } from "@/lib/api"
@@ -27,8 +27,8 @@ export interface PlanningItem {
   due_date: string | null
   assignee_sub: string | null
   assignee_name: string | null
-  // Domain bağları — id'yi panel yazar, `*_name`/`*_title` sunucuda toplu sorguyla
-  // çözülür (öğe başına lazy erişim N+1 muhafızını kırardı).
+  // Domain links — the panel writes the id, `*_name`/`*_title` are resolved server-side
+  // with a batch query (a per-item lazy lookup would break the N+1 guard).
   client_id: number | null
   client_name: string | null
   shoot_task_id: number | null
@@ -72,9 +72,13 @@ export interface PatchResult {
 
 export const MANAGEMENT_KEY = "management"
 
-export const ITEM_STATUS_LABELS: Record<string, string> = {
-  open: "Açık",
-  done: "Bitti",
+/** Status labels — translated per language, so it's produced via `t()` (not a fixed
+ *  Record). Callers pass in the `t` they got from `useI18n()`. */
+export function itemStatusLabels(t: (key: string) => string): Record<PlanningStatus, string> {
+  return {
+    open: t("pages.planning.status.open"),
+    done: t("pages.planning.status.done"),
+  }
 }
 
 export const COLORS = [
@@ -90,10 +94,10 @@ export const DEFAULT_SIZE: Record<PlanningItemType, { width: number; height: num
   image: { width: 260, height: 200 },
 }
 
-// --- pano görselleri (2026-07-28) ----------------------------------------
-// Dosya SUNUCUDA (`data/planning-images/<board_id>/`), öğe ona `extra.image`
-// ile işaret eder. `link` kolonu kullanılmadı: orada http(s) doğrulaması var,
-// bu ise bir dosya adı.
+// --- board images (2026-07-28) ----------------------------------------
+// The file lives ON THE SERVER (`data/planning-images/<board_id>/`), and the item
+// points to it via `extra.image`. The `link` column wasn't used: it has http(s)
+// validation, while this is just a file name.
 
 export interface PlanningImage {
   name: string
@@ -101,23 +105,23 @@ export interface PlanningImage {
   height: number
 }
 
-/** Öğenin görsel bilgisi (yoksa null). `extra` jsonb'de yaşar → ALTER gerekmedi. */
+/** The item's image info (null if none). Lives in `extra` jsonb → no ALTER needed. */
 export function imageOf(it: PlanningItem): PlanningImage | null {
   const im = it.extra?.image as PlanningImage | undefined
   return im && typeof im.name === "string" && im.name ? im : null
 }
 
-/** Görselin servis URL'i — oturumlu uç, `<img src>` cookie ile çeker. */
+/** The image's serving URL — a session-gated endpoint, fetched by `<img src>` with the cookie. */
 export function planningImageUrl(boardKey: string, name: string): string {
   return `/api/planning/boards/${encodeURIComponent(boardKey)}/images/${encodeURIComponent(name)}`
 }
 
 export const IMAGE_MAX_BYTES = 10 * 1024 * 1024
-// Sunucunun kabul ettiği türler (`planning_images.ALLOWED`). SVG bilerek yok.
+// Types accepted by the server (`planning_images.ALLOWED`). SVG is deliberately excluded.
 export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"]
 
-/** Panoya yapıştırılan/sürüklenen dosyayı yükler → `{name,width,height,size}`.
- *  Öğe yazımı AYRI: normal delta akışıyla (undo/çakışma) gider. */
+/** Uploads a file pasted/dragged onto the board → `{name,width,height,size}`.
+ *  Writing the item is SEPARATE: it goes through the normal delta flow (undo/conflict). */
 export async function uploadPlanningImage(
   boardKey: string, file: File,
 ): Promise<PlanningImage & { size: number }> {
@@ -127,44 +131,44 @@ export async function uploadPlanningImage(
   return d.image
 }
 
-/** Yeni görsel öğesinin tuval boyutu — en-boy oranını korur, ekrana sığdırır. */
+/** Canvas size for a new image item — preserves aspect ratio, fits it on screen. */
 export function imageBoxSize(w: number, h: number, max = 360): { width: number; height: number } {
   if (!w || !h) return DEFAULT_SIZE.image
   const scale = Math.min(1, max / Math.max(w, h))
   return { width: Math.max(SNAP, Math.round(w * scale)), height: Math.max(SNAP, Math.round(h * scale)) }
 }
 
-// Tuval sabitleri. Eskiden `planlama-geometry.ts`'te yaşıyorlardı; o dosya React
-// Flow'a geçişte silindi (zoom/pan/culling matematiğinin tamamını RF sağlıyor).
-// Korunan tek sözleşme bu üç değer + 8 px ızgara.
+// Canvas constants. Used to live in `planlama-geometry.ts`; that file was deleted during
+// the React Flow migration (RF handles all zoom/pan/culling math now).
+// The only preserved contract is these three values + the 8 px grid.
 export const SNAP = 8
 export const MIN_ZOOM = 0.2
 export const MAX_ZOOM = 2.5
 
-// Kilit ve gruplama `extra` jsonb'de taşınır — YENİ KOLON GEREKTİRMEZ.
-// `extra` 2026-07-26'dan beri sunucuda shallow-MERGE edildiği için bir anahtarı
-// yazmak diğerlerini silmez; bu iki bayrak bu yüzden güvenle orada yaşayabiliyor.
-// (Kaldırmak için değeri `null` gönderilir.)
+// Lock and grouping are carried in the `extra` jsonb — NO NEW COLUMN NEEDED.
+// Since `extra` has been shallow-MERGED on the server since 2026-07-26, writing one
+// key doesn't delete the others; that's why these two flags can safely live there.
+// (To remove one, send its value as `null`.)
 
-/** Kilitli öğe: taşınamaz, boyutlandırılamaz, silinemez, bağlanamaz. */
+/** Locked item: cannot be moved, resized, deleted, or connected. */
 export function isLocked(it: PlanningItem): boolean {
   return it.extra?.locked === true
 }
 
-/** Bu öğe bir gruba (bölgeye) ait mi — aitse ebeveynin item_key'i.
- *  Grup içindeki öğenin `x`/`y`'si EBEVEYNE GÖRELİDİR (React Flow sözleşmesi). */
+/** Whether this item belongs to a group (region) — if so, the parent's item_key.
+ *  An item's `x`/`y` inside a group is RELATIVE TO THE PARENT (React Flow contract). */
 export function parentKeyOf(it: PlanningItem): string | null {
   const p = it.extra?.parent_key
   return typeof p === "string" && p ? p : null
 }
 
-/** 8 px ızgaraya hizala — sürükleme boyunca DEĞİL, yalnız bırakınca uygulanır
- *  (RF'in `snapToGrid`'i sürükleme boyunca hizalar, o his daha katı). */
+/** Snap to the 8 px grid — applied only on drop, NOT during dragging
+ *  (RF's `snapToGrid` snaps during dragging, which feels stricter). */
 export function snap8(v: number): number {
   return Math.round(v / SNAP) * SNAP
 }
 
-/** Son tarih rozeti tonu — geçmiş kırmızı, 2 gün içinde amber (musteri-takip sınıf dili). */
+/** Due-date badge tone — overdue is red, within 2 days is amber (same class language as musteri-takip). */
 export function dueTone(due: string | null, status: PlanningStatus): string {
   if (!due || status === "done") return "bg-muted text-muted-foreground"
   const today = new Date()
@@ -182,15 +186,15 @@ export function fmtDay(iso: string | null): string {
   return new Date(iso).toLocaleDateString("tr-TR", { day: "2-digit", month: "short" })
 }
 
-/** Çakışmayan öğe anahtarı. crypto.randomUUID varsa onu kullanır (eski kod
- *  Date.now()^performance.now() ile teorik çakışma riski taşıyordu). */
+/** A non-colliding item key. Uses crypto.randomUUID when available (the old code
+ *  used Date.now()^performance.now(), which had a theoretical collision risk). */
 export function newItemKey(): string {
   const uuid = globalThis.crypto?.randomUUID?.()
   if (uuid) return "i" + uuid.replace(/-/g, "").slice(0, 20)
   return "i" + Math.random().toString(36).slice(2, 12) + Date.now().toString(36)
 }
 
-// --- hook'lar ------------------------------------------------------------
+// --- hooks ------------------------------------------------------------
 
 export function useBoards() {
   return useQuery<PlanningBoard[]>({
@@ -207,14 +211,14 @@ export function useBoard(boardKey: string) {
   return useQuery<{ board: PlanningBoard; items: PlanningItem[] }>({
     queryKey: boardQueryKey(boardKey),
     queryFn: () => apiGet(`/planning/boards/${encodeURIComponent(boardKey)}`),
-    // Tazeleme ucuz /version ucundan sürülür; bu sorgu kendiliğinden yenilenmez ki
-    // sürükleme sırasında altımızdan veri değişmesin.
+    // Refreshing is driven by the cheap /version endpoint; this query doesn't refetch on
+    // its own so that data doesn't change out from under us mid-drag.
     staleTime: Infinity,
     refetchOnMount: true,
   })
 }
 
-/** Ucuz sürüm yoklaması — tam panoyu (600 öğe) çekmeden "biri yazdı mı?" sorar. */
+/** Cheap version poll — asks "did someone write?" without fetching the whole board (600 items). */
 export function useBoardVersion(boardKey: string, enabled: boolean) {
   return useQuery<BoardVersion>({
     queryKey: ["planning-version", boardKey],
@@ -231,7 +235,7 @@ export interface PlanningDelta {
   delete?: string[]
 }
 
-// --- domain bağları ------------------------------------------------------
+// --- domain links ------------------------------------------------------
 
 export interface Linkables {
   clients: { id: number; name: string }[]
@@ -240,10 +244,10 @@ export interface Linkables {
   ad_campaigns: { id: number; title: string; platform: string; client_name: string | null }[]
 }
 
-/** Karta bağlanabilecek kayıtlar — TEK uç, TEK rol kapısı.
- *  Yetkisi olmayan bölüm BOŞ DİZİ döner (403 değil) → panel yalnız dolu bölümü
- *  render eder, rol farkı kendiliğinden doğru olur. Tasarımcı kampanya bölümünü
- *  hiç görmez çünkü dizi boş gelir. */
+/** Records a card can link to — ONE endpoint, ONE role gate.
+ *  A section the user isn't authorized for returns an EMPTY ARRAY (not 403) → the panel
+ *  just renders the non-empty sections, so the role difference is automatically correct.
+ *  A designer never sees the campaign section at all because the array comes back empty. */
 export function useLinkables(q: string) {
   return useQuery<Linkables>({
     queryKey: ["planning-linkables", q],
@@ -267,9 +271,9 @@ export interface AssignedItem {
   campaign_title: string | null
 }
 
-/** Bir kişiye atanmış kartlar — PANO SINIRINI AŞAR, salt-okunur.
- *  Yönetim panosundaki kart da döner: bilinçli yetki gediği (bkz. planning.py
- *  `assigned_items` docstring'i). Düzenleme yalnız kartın kendi panosundan. */
+/** Cards assigned to a person — CROSSES BOARD BOUNDARIES, read-only.
+ *  Also returns cards from the management board: a deliberate authorization gap (see
+ *  planning.py's `assigned_items` docstring). Editing is only possible from the card's own board. */
 export function useAssigned(assigneeSub: string | null, enabled = true) {
   return useQuery<{ items: AssignedItem[] }>({
     queryKey: ["planning-assigned", assigneeSub],
@@ -279,13 +283,13 @@ export function useAssigned(assigneeSub: string | null, enabled = true) {
   })
 }
 
-/** Delta yazma — HOOK DEĞİL, düz fonksiyon.
+/** Delta write — NOT A HOOK, a plain function.
  *
- *  `boardKey` argüman olarak gelir, bir closure'a SABİTLENMEZ. `usePlanningStore`
- *  bunu doğrudan çağırıyor: mutation nesnesini ref'te taşımak pano değişiminde
- *  yazmayı YANLIŞ PANOYA gönderiyordu (unmount temizliği eski `flush`'ı çağırır
- *  ama ref o an çoktan yeni panonun mutation'ını tutar). Tek gerçek kaynak burası;
- *  `usePlanningPatch` de bunu sarar. */
+ *  `boardKey` comes in as an argument, it is NOT CAPTURED in a closure. `usePlanningStore`
+ *  calls this directly: carrying the mutation object in a ref sent writes to the WRONG
+ *  BOARD on a board switch (unmount cleanup calls the old `flush`, but by then the ref
+ *  already holds the new board's mutation). This is the single source of truth;
+ *  `usePlanningPatch` just wraps it. */
 export async function patchBoardItems(qc: QueryClient, boardKey: string,
                                       delta: PlanningDelta): Promise<PatchResult> {
   const res = await apiJson(

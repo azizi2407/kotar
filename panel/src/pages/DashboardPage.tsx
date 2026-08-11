@@ -1,48 +1,51 @@
 import { Link } from "react-router-dom"
 
 import { useAuth } from "@/lib/auth"
+import { useI18n } from "@/lib/i18n"
 import {
   Card, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card"
 
-// roles: undefined = herkes; aksi halde yalnız listedeki roller. Nav tablosuyla tutarlı
-// tutulur — kullanıcı yalnız erişebileceği modül kartlarını görür.
+// roles: undefined = everyone; otherwise only the roles in the list. Kept consistent
+// with the nav table — the user only sees module cards they can actually access.
+// title/desc are translation keys — the label text is produced by t() in the component.
 const modules = [
-  { title: "Müşteriler", desc: "Müşteri kartları ve anlaşmalar", to: "/clients", roles: ["management"] },
-  { title: "Sharing Board", desc: "Haftalık paylaşım takvimi", to: "/sharing", roles: ["management"] },
-  { title: "Tasarım", desc: "Tasarımcı board'u", to: "/designer", roles: ["management", "designer"] },
-  { title: "Çekim Planı", desc: "Videografçı çekim planı", to: "/videographer", roles: ["management", "videographer"] },
-  { title: "Fotoğraflar", desc: "Çekim fotoğrafları kütüphanesi", to: "/videographer/photos", roles: ["management", "videographer"] },
-  { title: "Öneriler", desc: "AI trend-öneri kartları", to: "/videographer/ideas", roles: ["management", "videographer"] },
-  { title: "Brief", desc: "Haftalık içerik brief'leri", to: "/brief",
+  { titleKey: "pages.dashboard.module.clients.title", descKey: "pages.dashboard.module.clients.desc", to: "/clients", roles: ["management"] },
+  { titleKey: "pages.dashboard.module.sharing.title", descKey: "pages.dashboard.module.sharing.desc", to: "/sharing", roles: ["management"] },
+  { titleKey: "pages.dashboard.module.designer.title", descKey: "pages.dashboard.module.designer.desc", to: "/designer", roles: ["management", "designer"] },
+  { titleKey: "pages.dashboard.module.shootPlan.title", descKey: "pages.dashboard.module.shootPlan.desc", to: "/videographer", roles: ["management", "videographer"] },
+  { titleKey: "pages.dashboard.module.photos.title", descKey: "pages.dashboard.module.photos.desc", to: "/videographer/photos", roles: ["management", "videographer"] },
+  { titleKey: "pages.dashboard.module.ideas.title", descKey: "pages.dashboard.module.ideas.desc", to: "/videographer/ideas", roles: ["management", "videographer"] },
+  { titleKey: "pages.dashboard.module.brief.title", descKey: "pages.dashboard.module.brief.desc", to: "/brief",
     roles: ["management", "designer", "content_creator", "videographer"] },
-  { title: "Tasarımcı Atamaları", desc: "Müşteri-tasarımcı atamaları", to: "/designer-assignments",
+  { titleKey: "pages.dashboard.module.designerAssignments.title", descKey: "pages.dashboard.module.designerAssignments.desc", to: "/designer-assignments",
     roles: ["management", "designer"] },
-  { title: "Özel Günler", desc: "Aylık özel gün takvimi", to: "/special-days",
+  { titleKey: "pages.dashboard.module.specialDays.title", descKey: "pages.dashboard.module.specialDays.desc", to: "/special-days",
     roles: ["management", "designer"] },
-  { title: "Müşteri Takip", desc: "İş kalemleri ve satış fırsatları", to: "/musteri-takip",
+  { titleKey: "pages.dashboard.module.clientTracking.title", descKey: "pages.dashboard.module.clientTracking.desc", to: "/musteri-takip",
     roles: ["management"] },
 ]
 
 export function DashboardPage() {
+  const { t } = useI18n()
   const { user } = useAuth()
   const role = user?.role || ""
   const visible = modules.filter((m) => !m.roles || m.roles.includes(role))
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Panel</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("pages.dashboard.title")}</h1>
         <p className="text-muted-foreground">
-          Hoş geldin, {user?.name || user?.email}.
+          {t("pages.dashboard.welcome", { name: user?.name || user?.email || "" })}
         </p>
       </div>
 
       {user?.role === "pending" && (
         <Card className="border-amber-500/40 bg-amber-500/5">
           <CardHeader>
-            <CardTitle className="text-base">Rolün henüz atanmadı</CardTitle>
+            <CardTitle className="text-base">{t("pages.dashboard.pendingRoleTitle")}</CardTitle>
             <CardDescription>
-              Bir yönetici sana rol atayana kadar modüllere erişemezsin.
+              {t("pages.dashboard.pendingRoleDesc")}
             </CardDescription>
           </CardHeader>
         </Card>
@@ -53,14 +56,14 @@ export function DashboardPage() {
           const card = (
             <Card className={m.to ? "transition-colors hover:border-primary/50" : "opacity-70"}>
               <CardHeader>
-                <CardTitle className="text-base">{m.title}</CardTitle>
-                <CardDescription>{m.desc}</CardDescription>
+                <CardTitle className="text-base">{t(m.titleKey)}</CardTitle>
+                <CardDescription>{t(m.descKey)}</CardDescription>
               </CardHeader>
             </Card>
           )
           return m.to
-            ? <Link key={m.title} to={m.to}>{card}</Link>
-            : <div key={m.title}>{card}</div>
+            ? <Link key={m.titleKey} to={m.to}>{card}</Link>
+            : <div key={m.titleKey}>{card}</div>
         })}
       </div>
     </div>

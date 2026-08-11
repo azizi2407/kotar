@@ -1,5 +1,6 @@
-// Videografçı çekim planı — dnd-kit Kanban. Havuz kolonundan müşteri sürükle→gün
-// = plan oluştur; kartı başka güne sürükle = yeniden tarihle; kolon içi = sırala.
+// Videographer shoot plan — dnd-kit Kanban. Drag a client from the pool column
+// onto a day = create a plan; drag a card to another day = reschedule; within a
+// column = reorder.
 import { useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
@@ -18,6 +19,7 @@ import {
   useBusinesses, useMarkBusiness, useShootPlan, useShootMutations,
   type ShootPlan, type ShootTask,
 } from "@/lib/sharing"
+import { useI18n } from "@/lib/i18n"
 import { currentWeekIso, localDateStr, shiftWeek, trFold, weekRangeLabel } from "@/lib/week"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -27,7 +29,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
 import { LogoButton } from "@/components/sharing/LogoButton"
 
-const DAY_NAMES = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
 const PRIO_DOT: Record<string, string> = { urgent: "bg-red-500", high: "bg-amber-500", normal: "bg-muted-foreground/40" }
 
 type Cols = Record<string, string[]> // container -> item ids (p:<clientId> | t:<taskId>)
@@ -52,6 +53,7 @@ function PoolChip({ id, name }: { id: string; name: string }) {
 function TaskCard({ id, task, onDone, onDelete, disabled }: {
   id: string; task: ShootTask; onDone: () => void; onDelete: () => void; disabled?: boolean
 }) {
+  const { t } = useI18n()
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id, disabled })
   return (
     <div ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }}
@@ -60,7 +62,7 @@ function TaskCard({ id, task, onDone, onDelete, disabled }: {
       <div className="flex items-center gap-1.5">
         <span className={cn("h-2 w-2 shrink-0 rounded-full", PRIO_DOT[task.priority] || PRIO_DOT.normal)} />
         <span className="flex-1 cursor-grab font-medium" {...attributes} {...listeners}>
-          {task.client_name || task.title || "Ad-hoc"}
+          {task.client_name || task.title || t("pages.videographerBoard.adHocLabel")}
         </span>
       </div>
       {(task.start_time || task.location_note) && (
@@ -70,10 +72,13 @@ function TaskCard({ id, task, onDone, onDelete, disabled }: {
       )}
       <div className="mt-1.5 flex gap-1">
         <Button variant="ghost" size="icon-sm" className="h-6 w-6" onClick={onDone}
-          title={task.status === "completed" ? "Geri al" : "Tamamlandı"}>
+          title={task.status === "completed"
+            ? t("pages.videographerBoard.undoTitle")
+            : t("pages.videographerBoard.completeTitle")}>
           <Check className={cn("h-3.5 w-3.5", task.status === "completed" && "text-emerald-600")} />
         </Button>
-        <Button variant="ghost" size="icon-sm" className="h-6 w-6 text-destructive" onClick={onDelete} title="Sil">
+        <Button variant="ghost" size="icon-sm" className="h-6 w-6 text-destructive" onClick={onDelete}
+          title={t("pages.videographerBoard.deleteTitle")}>
           <Trash2 className="h-3.5 w-3.5" />
         </Button>
       </div>
@@ -98,22 +103,30 @@ function Column({ id, title, subtitle, children, highlight }: {
   )
 }
 
-// İmleç neyin üstündeyse önce onu seç (kolonlara güvenilir bırakma); imleç boşa
-// düşerse rect kesişimine düş. closestCorners küçük chip'i güne bırakırken yine
-// havuz öğesini seçip drop'u yutuyordu — bu yüzden pointerWithin öncelikli.
+// Prefer whatever's directly under the cursor (reliable drops onto columns); fall
+// back to rect intersection if the cursor lands on empty space. closestCorners kept
+// picking the pool item and swallowing the drop when dropping a small chip onto a
+// day — hence pointerWithin takes priority.
 const collision: CollisionDetection = (args) => {
   const hits = pointerWithin(args)
   return hits.length ? hits : rectIntersection(args)
 }
 
 function ShootPlanBoard() {
+  const { t } = useI18n()
+  const dayNames = [
+    t("pages.videographerBoard.day.mon"), t("pages.videographerBoard.day.tue"),
+    t("pages.videographerBoard.day.wed"), t("pages.videographerBoard.day.thu"),
+    t("pages.videographerBoard.day.fri"), t("pages.videographerBoard.day.sat"),
+    t("pages.videographerBoard.day.sun"),
+  ]
   const [params, setParams] = useSearchParams()
   const weekIso = params.get("week") || currentWeekIso()
   const { data, isLoading, isError } = useShootPlan(weekIso)
   const m = useShootMutations(weekIso)
   const [cols, setCols] = useState<Cols>({})
   const [activeId, setActiveId] = useState<string | null>(null)
-  // Optimistik geçici kartlar (create henüz dönmeden görünsün): colId -> task
+  // Optimistic temporary cards (so they show before create returns): colId -> task
   const [temp, setTemp] = useState<Record<string, ShootTask>>({})
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -124,7 +137,7 @@ function ShootPlanBoard() {
     for (const c of data?.pool ?? []) map[c.id] = c.name
     return map
   }, [data])
-  // Kart id'sine (t:<id> | t:tmp-...) göre görev: gerçek + geçici
+  // Task keyed by card id (t:<id> | t:tmp-...): real + temporary
   const itemTasks = useMemo(() => {
     const map: Record<string, ShootTask> = {}
     for (const d of data?.days ?? []) for (const t of d.tasks) map[`t:${t.id}`] = t
@@ -150,7 +163,7 @@ function ShootPlanBoard() {
     const to = findContainer(overId)
     if (!from || !to) return
 
-    // havuzdan gün'e → oluştur (optimistik geçici kart)
+    // pool → day: create (optimistic temporary card)
     if (activeId.startsWith("p:")) {
       if (to === "pool") return
       const clientId = Number(activeId.slice(2))
@@ -161,15 +174,15 @@ function ShootPlanBoard() {
       setCols((c) => ({ ...c, [to]: [...(c[to] ?? []), tmpId] }))
       m.create.mutate({ client_id: clientId, scheduled_date: to },
         { onError: () => {
-            toast.error("Plan oluşturulamadı")
+            toast.error(t("pages.videographerBoard.createFailed"))
             setCols((c) => ({ ...c, [to]: (c[to] ?? []).filter((i) => i !== tmpId) }))
-            setTemp((t) => { const n = { ...t }; delete n[tmpId]; return n })
+            setTemp((prev) => { const n = { ...prev }; delete n[tmpId]; return n })
           } })
       return
     }
-    // görev
+    // task
     const taskId = Number(activeId.slice(2))
-    if (Number.isNaN(taskId)) return  // geçici kart, henüz kalıcı değil
+    if (Number.isNaN(taskId)) return  // temporary card, not yet persisted
     if (from === to) {
       const oldI = cols[from].indexOf(activeId)
       let newI = cols[to].indexOf(overId)
@@ -182,11 +195,11 @@ function ShootPlanBoard() {
       if (to === "pool") return
       setCols({ ...cols, [from]: cols[from].filter((i) => i !== activeId), [to]: [...cols[to], activeId] })
       m.reschedule.mutate({ id: taskId, date: to },
-        { onError: () => toast.error("Tarih güncellenemedi") })
+        { onError: () => toast.error(t("pages.videographerBoard.rescheduleFailed")) })
     }
   }
 
-  if (isError) return <p className="text-destructive">Çekim planı yüklenemedi.</p>
+  if (isError) return <p className="text-destructive">{t("pages.videographerBoard.loadError")}</p>
 
   const dayCols = data?.days.map((d) => d.date) ?? []
   const today = localDateStr()
@@ -195,7 +208,7 @@ function ShootPlanBoard() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted-foreground">Müşteriyi güne sürükleyerek çekim planla.</p>
+        <p className="text-sm text-muted-foreground">{t("pages.videographerBoard.shootPlanHint")}</p>
         <WeekNav weekIso={weekIso} setWeek={setWeek} />
       </div>
 
@@ -206,7 +219,7 @@ function ShootPlanBoard() {
           onDragStart={(e: DragStartEvent) => setActiveId(String(e.active.id))}
           onDragCancel={() => setActiveId(null)} onDragEnd={onDragEnd}>
           <div className="flex gap-3 overflow-x-auto pb-4">
-            <Column id="pool" title="Müşteriler" subtitle="sürükle →">
+            <Column id="pool" title={t("pages.videographerBoard.poolTitle")} subtitle={t("pages.videographerBoard.poolSubtitle")}>
               <SortableContext items={cols.pool ?? []} strategy={verticalListSortingStrategy}>
                 {(cols.pool ?? []).map((id) => (
                   <PoolChip key={id} id={id} name={poolNames[Number(id.slice(2))] || "?"} />
@@ -215,7 +228,7 @@ function ShootPlanBoard() {
             </Column>
 
             {dayCols.map((date, i) => (
-              <Column key={date} id={date} title={DAY_NAMES[i]}
+              <Column key={date} id={date} title={dayNames[i]}
                 subtitle={date.slice(5)} highlight={date === today}>
                 <SortableContext items={cols[date] ?? []} strategy={verticalListSortingStrategy}>
                   {(cols[date] ?? []).map((id) => {
@@ -240,7 +253,7 @@ function ShootPlanBoard() {
               </div>
             ) : activeTask ? (
               <div className="rounded-md border bg-card p-2 text-xs shadow-lg">
-                {activeTask.client_name || activeTask.title || "Ad-hoc"}
+                {activeTask.client_name || activeTask.title || t("pages.videographerBoard.adHocLabel")}
               </div>
             ) : null}
           </DragOverlay>
@@ -250,8 +263,9 @@ function ShootPlanBoard() {
   )
 }
 
-// Haftalar arası gezinme — Çekim Planı + İşletmeler sekmeleri paylaşır.
+// Navigation between weeks — shared by the Shoot Plan + Businesses tabs.
 function WeekNav({ weekIso, setWeek }: { weekIso: string; setWeek: (w: string) => void }) {
+  const { t, lang } = useI18n()
   return (
     <div className="flex items-center gap-1 rounded-lg border p-1">
       <Button variant="ghost" size="icon" onClick={() => setWeek(shiftWeek(weekIso, -1))}>
@@ -259,18 +273,21 @@ function WeekNav({ weekIso, setWeek }: { weekIso: string; setWeek: (w: string) =
       </Button>
       <div className="min-w-[9rem] text-center">
         <div className="text-sm font-medium">{weekIso}</div>
-        <div className="text-xs text-muted-foreground">{weekRangeLabel(weekIso)}</div>
+        <div className="text-xs text-muted-foreground">{weekRangeLabel(weekIso, lang)}</div>
       </div>
       <Button variant="ghost" size="icon" onClick={() => setWeek(shiftWeek(weekIso, 1))}>
         <ChevronRight className="h-4 w-4" />
       </Button>
-      <Button variant="outline" size="sm" className="ml-1" onClick={() => setWeek(currentWeekIso())}>Bugün</Button>
+      <Button variant="outline" size="sm" className="ml-1" onClick={() => setWeek(currentWeekIso())}>
+        {t("pages.videographerBoard.todayBtn")}
+      </Button>
     </div>
   )
 }
 
-// İşletmeler — bu hafta hangi müşterilerde video çekimi var? Videografçı işaretler.
+// Businesses — which clients have a video shoot this week? Marked by the videographer.
 function BusinessesTab() {
+  const { t } = useI18n()
   const [params, setParams] = useSearchParams()
   const weekIso = params.get("week") || currentWeekIso()
   const setWeek = (w: string) => setParams((p) => { p.set("week", w); return p }, { replace: true })
@@ -284,12 +301,12 @@ function BusinessesTab() {
     return nq ? list.filter((b) => trFold(b.client_name).includes(nq)) : list
   }, [data, q])
 
-  if (isError) return <p className="text-destructive">İşletmeler yüklenemedi.</p>
+  if (isError) return <p className="text-destructive">{t("pages.videographerBoard.businessesLoadError")}</p>
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <Input placeholder="İşletme ara…" value={q} onChange={(e) => setQ(e.target.value)}
+        <Input placeholder={t("pages.videographerBoard.businessSearchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)}
           className="max-w-xs" />
         <WeekNav weekIso={weekIso} setWeek={setWeek} />
       </div>
@@ -297,7 +314,7 @@ function BusinessesTab() {
       {isLoading ? (
         <div className="space-y-2">{[...Array(6)].map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}</div>
       ) : rows.length === 0 ? (
-        <p className="text-muted-foreground">İşletme yok.</p>
+        <p className="text-muted-foreground">{t("pages.videographerBoard.noBusinesses")}</p>
       ) : (
         <div className="divide-y rounded-lg border">
           {rows.map((b) => (
@@ -307,12 +324,12 @@ function BusinessesTab() {
                 <LogoButton clientId={b.client_id} />
               </div>
               <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                <span>Video çekimi</span>
+                <span>{t("pages.videographerBoard.hasVideoLabel")}</span>
                 <Switch checked={b.has_video}
                   disabled={mark.isPending}
                   onCheckedChange={(v) =>
                     mark.mutate({ client_id: b.client_id, has_video: v },
-                      { onError: () => toast.error("İşaretlenemedi") })} />
+                      { onError: () => toast.error(t("pages.videographerBoard.markFailed")) })} />
               </label>
             </div>
           ))}
@@ -323,17 +340,18 @@ function BusinessesTab() {
 }
 
 export function VideographerBoardPage() {
+  const { t } = useI18n()
   const [params, setParams] = useSearchParams()
   const tab = params.get("tab") || "shoot"
-  const setTab = (t: string) => setParams((p) => { p.set("tab", t); return p }, { replace: true })
+  const setTab = (v: string) => setParams((p) => { p.set("tab", v); return p }, { replace: true })
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Videografçı Panosu</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">{t("pages.videographerBoard.title")}</h1>
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
-          <TabsTrigger value="shoot">Çekim Planı</TabsTrigger>
-          <TabsTrigger value="businesses">İşletmeler</TabsTrigger>
+          <TabsTrigger value="shoot">{t("pages.videographerBoard.shootPlanTab")}</TabsTrigger>
+          <TabsTrigger value="businesses">{t("pages.videographerBoard.businessesTab")}</TabsTrigger>
         </TabsList>
         <TabsContent value="shoot" className="mt-4"><ShootPlanBoard /></TabsContent>
         <TabsContent value="businesses" className="mt-4"><BusinessesTab /></TabsContent>

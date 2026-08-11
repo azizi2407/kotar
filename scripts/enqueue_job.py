@@ -1,17 +1,17 @@
-"""Genel enqueue script'i — periyodik AI işlerini (brief/özel gün/Ops Digest/...)
-Postgres kuyruğuna atar. systemd `--user` (proje sahibi) timer'ları bunu çağırır;
-kuyruktan `ai_worker.py` çeker.
+"""Generic enqueue script — pushes periodic AI jobs (brief/special day/Ops
+Digest/...) onto the Postgres queue. systemd `--user` (project owner)
+timers call this; `ai_worker.py` pulls from the queue.
 
-Ekstra resident süreç YOK: her timer tetiklendiğinde bu script bir kez koşar,
-bir `Job` satırı ekler ve çıkar (`Type=oneshot` service).
+NO extra resident process: whenever a timer fires, this script runs once,
+adds a `Job` row, and exits (`Type=oneshot` service).
 
-Kullanım:
+Usage:
     venv/bin/python scripts/enqueue_job.py brief
     venv/bin/python scripts/enqueue_job.py ops_digest --payload-json '{"slot": "09:00"}'
     venv/bin/python scripts/enqueue_job.py special_days --created-by systemd-timer
 
-`run()` DB'ye gerçekten yazan test edilebilir çekirdek — testler bunu doğrudan
-import edip çağırır (subprocess YOK).
+`run()` is the testable core that actually writes to the DB — tests import
+and call it directly (NO subprocess).
 """
 import argparse
 import json
@@ -20,21 +20,22 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import app  # noqa: E402  (env yüklü olmalı)
+from app import app  # noqa: E402  (env must be loaded)
 import jobqueue  # noqa: E402
 
 
 def run(job_type, payload_json=None, created_by=None):
-    """Verilen tip+payload ile bir `Job` satırı oluşturur, oluşan `Job`'u döner.
+    """Creates a `Job` row with the given type+payload, returns the created `Job`.
 
-    `payload_json`: JSON string ya da None/boş — eksikse payload `{}` olur.
-    Geçersiz JSON verilirse `ValueError` fırlatır (net hata, sessiz yutmaz).
+    `payload_json`: a JSON string, or None/empty — if missing, payload becomes `{}`.
+    Raises `ValueError` on invalid JSON (a clear error, not silently swallowed).
 
-    NOT: app context AÇMAZ — çağıranın sorumluluğu (bkz. `main()`). Testler
-    zaten conftest'in autouse context'i içinde doğrudan çağırır; burada
-    ekstra `with app.app_context()` açılırsa iç context kapanışında
-    Flask-SQLAlchemy scoped session'ı teardown edip döndürülen `Job`'u
-    detach eder (DetachedInstanceError) — bu yüzden bilerek yok.
+    NOTE: does NOT open an app context — that's the caller's responsibility
+    (see `main()`). Tests already call this directly inside conftest's
+    autouse context; opening an extra `with app.app_context()` here would,
+    on the inner context's exit, tear down the Flask-SQLAlchemy scoped
+    session and detach the returned `Job` (DetachedInstanceError) — which is
+    why it's deliberately absent.
     """
     if payload_json:
         try:

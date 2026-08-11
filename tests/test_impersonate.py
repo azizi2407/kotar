@@ -1,5 +1,5 @@
-"""Impersonation ("kullanıcı gözünden bak") — yalnız superadmin; yetki gerçek kimlik
-üzerinden; start/stop; impersonate edilen kullanıcı yetki yükseltemez."""
+"""Impersonation ("look through the user's eyes") — superadmin only; authorization is
+based on the real identity; start/stop; the impersonated user cannot escalate privileges."""
 from conftest import DESIGNER, MANAGER, login_as
 from test_session_csrf import csrf_headers
 
@@ -24,18 +24,18 @@ def test_superadmin_impersonate_baslatir(client):
     assert d["impersonating"] is True
     assert d["user"]["sub"] == "2" and d["user"]["role"] == "designer"
     assert d["real_user"]["email"] == "superadmin@example.com"
-    # /session artık hedef kullanıcı + impersonation durumu döner
+    # /session now returns the target user + impersonation status
     s = client.get("/api/session").get_json()
     assert s["user"]["role"] == "designer"
     assert s["impersonating"] is True
     assert s["real_user"]["email"] == "superadmin@example.com"
-    assert s["can_impersonate"] is True  # gerçek kimlik hâlâ superadmin
+    assert s["can_impersonate"] is True  # real identity is still superadmin
 
 
 def test_non_superadmin_impersonate_403(client):
-    """management rolü olsa bile superadmin e-postası değilse impersonate EDEMEZ."""
+    """Even with the management role, if the email isn't a superadmin email, impersonation is NOT allowed."""
     _seed_users()
-    login_as(client, MANAGER)  # management ama superadmin değil
+    login_as(client, MANAGER)  # management but not superadmin
     r = client.post("/api/impersonate", json={"sub": "2"}, headers=csrf_headers(client))
     assert r.status_code == 403
     s = client.get("/api/session").get_json()
@@ -43,11 +43,11 @@ def test_non_superadmin_impersonate_403(client):
 
 
 def test_impersonate_edilen_yetki_yukseltemez(client):
-    """Superadmin, designer'ı impersonate ederken bile /impersonate GERÇEK kimlikle
-    yetkilenir (session['user']=designer olsa da real=superadmin). Designer'ın kendi
-    oturumundan (impersonator YOK) ise 403."""
+    """Even when the superadmin is impersonating a designer, /impersonate is authorized
+    with the REAL identity (session['user']=designer, but real=superadmin). From the
+    designer's own session (NO impersonator), it's 403."""
     _seed_users()
-    # düz designer oturumu (impersonation yok) → 403
+    # plain designer session (no impersonation) → 403
     login_as(client, DESIGNER)
     r = client.post("/api/impersonate", json={"sub": "99"}, headers=csrf_headers(client))
     assert r.status_code == 403
@@ -76,6 +76,6 @@ def test_impersonate_kendini_veya_yok_404(client):
     _seed_users()
     login_as(client, SUPERADMIN)
     assert client.post("/api/impersonate", json={"sub": "99"},
-                       headers=csrf_headers(client)).status_code == 404  # kendisi
+                       headers=csrf_headers(client)).status_code == 404  # self
     assert client.post("/api/impersonate", json={"sub": "yok"},
-                       headers=csrf_headers(client)).status_code == 404  # yok
+                       headers=csrf_headers(client)).status_code == 404  # nonexistent

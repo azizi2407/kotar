@@ -1,6 +1,6 @@
-// Müşteri "Marka Görselleri" sekmesi: logo (tekil) + sabit standart görseller (çoklu;
-// ör. ürün etiketleri). Drive'da 'Marka Görselleri' klasöründe saklanır; AI görsel
-// üretiminde referans olarak seçilir (ImageGenPage → ReferencePicker).
+// Client "Brand Assets" tab: logo (single) + fixed standard images (multiple;
+// e.g. product labels). Stored in the 'Brand Assets' folder in Drive; selected as a
+// reference in AI image generation (ImageGenPage → ReferencePicker).
 import { useRef, useState } from "react"
 import { Download, Image as ImageIcon, Loader2, Trash2, Upload } from "lucide-react"
 import { toast } from "sonner"
@@ -9,6 +9,7 @@ import {
   downloadClientAsset, thumbnailUrl, useClientAssets, useDeleteClientAsset,
   useUploadClientAsset, type ClientAsset,
 } from "@/lib/sharing"
+import { useI18n } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -17,6 +18,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 function AssetThumb({ asset, onDelete, deleting }: {
   asset: ClientAsset; onDelete: () => void; deleting: boolean
 }) {
+  const { t } = useI18n()
   return (
     <div className="group relative overflow-hidden rounded-md border">
       <img
@@ -29,7 +31,7 @@ function AssetThumb({ asset, onDelete, deleting }: {
       <button
         type="button"
         onClick={() => downloadClientAsset(asset.client_id, asset.id)}
-        title="İndir"
+        title={t("components.clients.brandAssetsTab.download")}
         className="absolute left-1 top-1 hidden rounded-full bg-background/90 p-1 shadow group-hover:block"
       >
         <Download className="h-3.5 w-3.5" />
@@ -38,7 +40,7 @@ function AssetThumb({ asset, onDelete, deleting }: {
         type="button"
         onClick={onDelete}
         disabled={deleting}
-        title="Kaldır"
+        title={t("components.clients.brandAssetsTab.remove")}
         className="absolute right-1 top-1 hidden rounded-full bg-background/90 p-1 text-destructive shadow group-hover:block"
       >
         <Trash2 className="h-3.5 w-3.5" />
@@ -51,6 +53,7 @@ function AssetThumb({ asset, onDelete, deleting }: {
 }
 
 export function BrandAssetsTab({ clientId }: { clientId: number }) {
+  const { t } = useI18n()
   const { data: assets, isLoading } = useClientAssets(clientId)
   const upload = useUploadClientAsset(clientId)
   const remove = useDeleteClientAsset(clientId)
@@ -64,7 +67,7 @@ export function BrandAssetsTab({ clientId }: { clientId: number }) {
   function doUpload(file: File, kind: "logo" | "standard") {
     upload.mutate({ file, kind, label: kind === "standard" ? label.trim() || undefined : undefined }, {
       onSuccess: () => { if (kind === "standard") setLabel("") },
-      onError: (e) => toast.error(e instanceof Error ? e.message : "Yükleme başarısız"),
+      onError: (e) => toast.error(e instanceof Error ? e.message : t("components.clients.brandAssetsTab.toast.uploadFailed")),
     })
   }
 
@@ -72,9 +75,9 @@ export function BrandAssetsTab({ clientId }: { clientId: number }) {
 
   return (
     <div className="grid gap-4 md:grid-cols-[280px_1fr]">
-      {/* logo (tekil) */}
+      {/* logo (single) */}
       <Card>
-        <CardHeader><CardTitle className="text-base">Logo</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="text-base">{t("components.clients.brandAssetsTab.logoTitle")}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           {logo ? (
             <AssetThumb asset={logo} deleting={remove.isPending}
@@ -90,31 +93,31 @@ export function BrandAssetsTab({ clientId }: { clientId: number }) {
             {upload.isPending
               ? <Loader2 className="mr-1 size-4 animate-spin" />
               : <Upload className="mr-1 size-4" />}
-            {logo ? "Logoyu değiştir" : "Logo yükle"}
+            {logo ? t("components.clients.brandAssetsTab.changeLogo") : t("components.clients.brandAssetsTab.uploadLogo")}
           </Button>
           <input ref={logoInput} type="file" accept="image/*" className="hidden"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) doUpload(f, "logo"); e.target.value = "" }} />
         </CardContent>
       </Card>
 
-      {/* sabit standart görseller (çoklu) */}
+      {/* fixed standard images (multiple) */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Standart Görseller</CardTitle>
+          <CardTitle className="text-base">{t("components.clients.brandAssetsTab.standardTitle")}</CardTitle>
           <p className="text-sm text-muted-foreground">
-            AI üretiminde referans olarak kullanılacak sabit görseller (ör. ürün etiketleri).
+            {t("components.clients.brandAssetsTab.standardDescription")}
           </p>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex gap-2">
-            <Input placeholder="Etiket (ör. Beyaz peynir etiketi)" value={label}
+            <Input placeholder={t("components.clients.brandAssetsTab.labelPlaceholder")} value={label}
               onChange={(e) => setLabel(e.target.value)} />
             <Button variant="outline" disabled={upload.isPending}
               onClick={() => stdInput.current?.click()}>
               {upload.isPending
                 ? <Loader2 className="mr-1 size-4 animate-spin" />
                 : <Upload className="mr-1 size-4" />}
-              Yükle
+              {t("components.clients.brandAssetsTab.upload")}
             </Button>
             <input ref={stdInput} type="file" accept="image/*" multiple className="hidden"
               onChange={(e) => {
@@ -123,7 +126,7 @@ export function BrandAssetsTab({ clientId }: { clientId: number }) {
               }} />
           </div>
           {standards.length === 0 ? (
-            <p className="py-4 text-center text-sm text-muted-foreground">Henüz standart görsel yok.</p>
+            <p className="py-4 text-center text-sm text-muted-foreground">{t("components.clients.brandAssetsTab.empty")}</p>
           ) : (
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 lg:grid-cols-6">
               {standards.map((a) => (

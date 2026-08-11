@@ -1,9 +1,10 @@
-"""Planlama Panosu görselleri — depolama katmanı + iki uç + yetki.
+"""Planning Board images — storage layer + two endpoints + permissions.
 
-Dosya SUNUCUDA saklanır (`planning_images`, pano başına dizin) ve öğe ona
-`type='image'` + `extra.image={name,w,h}` ile işaret eder. Yetkilendirme dizin
-yerleşiminden gelir: her iki uç da `_board_access`'ten geçtiği ve yol pano
-dizininden kurulduğu için başka panonun görseli adı bilinse bile okunamaz.
+The file is stored ON THE SERVER (`planning_images`, one directory per board) and
+the item points to it via `type='image'` + `extra.image={name,w,h}`. Authorization
+comes from the directory layout: since both endpoints go through `_board_access`
+and the path is built from the board record, another board's image can't be read
+even if its name is known.
 """
 import io
 import os
@@ -33,7 +34,7 @@ def _gif(w=10, h=10):
 
 @pytest.fixture
 def img_dir(tmp_path, monkeypatch):
-    """Görsel deposunu teste izole et — repo `data/`'sına dokunulmaz."""
+    """Isolate the image store for the test — the repo's `data/` is not touched."""
     monkeypatch.setenv('PLANNING_IMAGE_DIR', str(tmp_path))
     return tmp_path
 
@@ -51,7 +52,7 @@ def _upload(client, board_key, data=None, filename='ss.png', content_type='image
                        content_type='multipart/form-data', headers=csrf_headers(client))
 
 
-# --- depolama katmanı ----------------------------------------------------
+# --- storage layer --------------------------------------------------------
 
 def test_store_png_yazar_ve_olculeri_doner(img_dir):
     meta = planning_images.store(7, _png(40, 30))
@@ -61,14 +62,14 @@ def test_store_png_yazar_ve_olculeri_doner(img_dir):
 
 
 def test_store_buyuk_gorseli_kucultur(img_dir):
-    """2000 px üstü kenar küçültülür — panoda tam çözünürlük tutmanın karşılığı yok."""
+    """Edges over 2000 px are shrunk — there's no point keeping full resolution on the board."""
     meta = planning_images.store(1, _png(3000, 1500))
     assert meta['width'] == planning_images.MAX_EDGE
     assert meta['height'] == planning_images.MAX_EDGE // 2
 
 
 def test_store_gif_kucultulmez(img_dir):
-    """Küçültme animasyonlu GIF'i ilk kareye indirirdi → GIF olduğu gibi saklanır."""
+    """Shrinking would reduce an animated GIF to its first frame → GIFs are stored as-is."""
     meta = planning_images.store(1, _gif(10, 10))
     assert meta['name'].endswith('.gif')
 
@@ -79,7 +80,7 @@ def test_store_gorsel_olmayani_reddeder(img_dir):
 
 
 def test_store_svg_reddeder(img_dir):
-    """SVG script taşıyabilir ve panoda inline render edilecek — bilerek dışarıda."""
+    """SVG can carry a script and would be rendered inline on the board — deliberately excluded."""
     svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
     with pytest.raises(planning_images.ImageError):
         planning_images.store(1, svg)
@@ -100,8 +101,8 @@ def test_store_pano_kotasini_asamaz(img_dir, monkeypatch):
 
 
 def test_store_grup_yazilabilir_birakir(img_dir):
-    """Dosyayı Flask (svc-agency) yazar, temizlik timer'ı `proje sahibi` olarak siler —
-    ikisi de `appdev` grubunda; grup yazma izni olmazsa janitor silemez."""
+    """Flask (svc-agency) writes the file, the cleanup timer deletes it as `project owner` —
+    both are in the `appdev` group; without group write permission, the janitor can't delete it."""
     meta = planning_images.store(3, _png())
     mode = os.stat(os.path.join(img_dir, '3', meta['name'])).st_mode
     assert mode & 0o020, 'grup yazma izni yok'
@@ -119,7 +120,7 @@ def test_safe_name_gecerli_adi_kabul_eder():
     assert planning_images.safe_name('a' * 32 + '.PNG') == 'a' * 32 + '.png'
 
 
-# --- uçlar: yükleme ------------------------------------------------------
+# --- endpoints: upload -----------------------------------------------------
 
 def test_upload_management_kendi_panosuna(client, img_dir):
     _seed_users()
@@ -155,9 +156,10 @@ def test_upload_pending_403(client, img_dir):
 
 
 def test_upload_oturumsuz_403_csrf(client, img_dir):
-    """CSRF kapısı (`before_request`) oturum kontrolünden ÖNCE çalışır → oturumsuz
-    istek 401'e hiç ulaşmaz, 403 CSRF ile döner. Token session'dan üretildiği için
-    oturumsuz geçerli token da mümkün değil; bu uçta 401 erişilemez bir daldır."""
+    """The CSRF gate (`before_request`) runs BEFORE the session check → a session-less
+    request never reaches 401, it returns 403 CSRF instead. Since the token is derived
+    from the session, a valid token without a session is also impossible; on this
+    endpoint 401 is an unreachable branch."""
     r = client.post(f'{BASE}/boards/management/images', data={},
                     content_type='multipart/form-data')
     assert r.status_code == 403
@@ -180,7 +182,7 @@ def test_upload_gorsel_olmayan_400(client, img_dir):
     assert 'görsel değil' in r.get_json()['error']
 
 
-# --- uçlar: servis -------------------------------------------------------
+# --- endpoints: serving -----------------------------------------------------
 
 def test_serve_yukleyen_okuyabilir(client, img_dir):
     _seed_users()
@@ -191,11 +193,11 @@ def test_serve_yukleyen_okuyabilir(client, img_dir):
         assert r.status_code == 200
         assert r.data[:8] == b'\x89PNG\r\n\x1a\n'
     finally:
-        r.close()   # send_file dosyayı açık bırakır; ResourceWarning testi kırar
+        r.close()   # send_file leaves the file open; a ResourceWarning would break the test
 
 
 def test_serve_yetkisiz_rol_403(client, img_dir):
-    """Yönetim panosunun görseli tasarımcıya KAPALI — pano kuralının aynısı."""
+    """The management board's image is CLOSED to a designer — same rule as the board itself."""
     _seed_users()
     login_as(client, MANAGER)
     name = _upload(client, 'management').get_json()['image']['name']
@@ -204,8 +206,8 @@ def test_serve_yetkisiz_rol_403(client, img_dir):
 
 
 def test_serve_capraz_pano_404(client, img_dir):
-    """Ad bilinse bile BAŞKA panonun dizininde aranır → bulunamaz.
-    Yol istekten değil pano kaydından kurulduğu için sızıntı imkânsız."""
+    """Even if the name is known, it's looked up in ANOTHER board's directory → not found.
+    Since the path is built from the board record, not from the request, leakage is impossible."""
     _seed_users()
     login_as(client, MANAGER)
     name = _upload(client, 'management').get_json()['image']['name']
@@ -228,10 +230,10 @@ def test_serve_olmayan_ad_404(client, img_dir):
     assert client.get(f'{BASE}/boards/management/images/{"b" * 32}.png').status_code == 404
 
 
-# --- öğe tipi ------------------------------------------------------------
+# --- item type --------------------------------------------------------------
 
 def test_image_ogesi_yazilabilir(client, img_dir):
-    """`type='image'` + `extra.image` — `link` kolonu DEĞİL (orada http(s) şartı var)."""
+    """`type='image'` + `extra.image` — NOT the `link` column (that one requires http(s))."""
     _seed_users()
     login_as(client, MANAGER)
     meta = _upload(client, 'management').get_json()['image']
@@ -244,7 +246,7 @@ def test_image_ogesi_yazilabilir(client, img_dir):
     assert item['extra']['image']['name'] == meta['name']
 
 
-# --- temizlik script'i ---------------------------------------------------
+# --- cleanup script ----------------------------------------------------------
 
 def test_cleanup_yetim_siler_kullanilani_korur(client, img_dir):
     import time
@@ -258,7 +260,7 @@ def test_cleanup_yetim_siler_kullanilani_korur(client, img_dir):
                                    'extra': {'image': kullanilan}}]})
     from models_planning import PlanningBoard
     bid = PlanningBoard.query.filter_by(board_key='management').first().id
-    # İkisini de eskit: yaş eşiği yükleme yarışını kapatır, testte onu aşmalıyız.
+    # Age both: the age threshold closes off the upload race, and the test needs to exceed it.
     eski = time.time() - 40 * 86400
     for n in (kullanilan['name'], yetim['name']):
         os.utime(os.path.join(img_dir, str(bid), n), (eski, eski))
@@ -270,8 +272,8 @@ def test_cleanup_yetim_siler_kullanilani_korur(client, img_dir):
 
 
 def test_cleanup_genc_yetimi_korur(client, img_dir):
-    """Yükleme ile öğe PATCH'i arasındaki pencerede dosya yetim görünür — yaş
-    eşiği olmasaydı janitor onu daha öğe yazılmadan silerdi."""
+    """In the window between upload and the item PATCH, the file looks orphaned — without
+    the age threshold, the janitor would delete it before the item is even written."""
     from scripts.cleanup_planning_images import run
     _seed_users()
     login_as(client, MANAGER)

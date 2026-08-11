@@ -1,7 +1,7 @@
-"""Müşteri örnek (referans) hesapları — /api/sharing/clients/<id>/reference-accounts.
+"""Client example (reference) accounts — /api/sharing/clients/<id>/reference-accounts.
 
-Vurgu: ONAY KAPISI (üretim rolleri yalnız onaylananı görür), handle
-kanonikleştirme (aynı hesap iki satır olmasın) ve rol matrisi.
+Focus: APPROVAL GATE (production roles only see approved ones), handle
+canonicalization (the same account shouldn't get two rows), and the role matrix.
 """
 import pytest
 from conftest import CONTENT_CREATOR, DESIGNER, MANAGER, VIDEOGRAPHER, login_as
@@ -21,8 +21,8 @@ def _ekle(client, cid, handle, **kw):
 
 
 def _aday_yaz(cid, handle, status="candidate"):
-    """Araştırmayla derlenmiş aday — uç yalnız `manual` üretiyor, `research`
-    kayıtları toplu betikle giriyor; testte doğrudan yazılır."""
+    """A candidate compiled by research — the endpoint only produces `manual`,
+    `research` records are entered via a batch script; written directly in the test."""
     from extensions import db
     from models_reference import ClientReferenceAccount
     a = ClientReferenceAccount(client_id=cid, handle=handle, source="research",
@@ -32,7 +32,7 @@ def _aday_yaz(cid, handle, status="candidate"):
     return a
 
 
-# --- ekleme + kanonikleştirme ----------------------------------------------
+# --- adding + canonicalization ----------------------------------------------
 
 @pytest.mark.parametrize("girdi", [
     "ornekhesap",
@@ -42,7 +42,7 @@ def _aday_yaz(cid, handle, status="candidate"):
     "https://instagram.com/ornekhesap?igsh=abc",
 ])
 def test_handle_kanoniklestirilir(client, cid, girdi):
-    """Yapıştırılan her biçim aynı handle'a inmeli, yoksa UNIQUE işe yaramaz."""
+    """Every pasted format must resolve to the same handle, otherwise UNIQUE is useless."""
     login_as(client, MANAGER)
     r = _ekle(client, cid, girdi)
     assert r.status_code == 201, r.get_json()
@@ -53,13 +53,13 @@ def test_handle_kanoniklestirilir(client, cid, girdi):
 def test_ayni_hesap_iki_kez_eklenemez(client, cid):
     login_as(client, MANAGER)
     assert _ekle(client, cid, "tekrar").status_code == 201
-    r = _ekle(client, cid, "@tekrar/")          # farklı yazım, aynı hesap
+    r = _ekle(client, cid, "@tekrar/")          # different spelling, same account
     assert r.status_code == 409
-    assert "zaten var" in r.get_json()["error"]
+    assert "already exists" in r.get_json()["error"]
 
 
 def test_ayni_hesap_farkli_musteride_serbest(client, cid):
-    """Bir hesap birden çok müşteriye örnek olabilir (iki inşaat firması)."""
+    """One account can be a reference for multiple clients (two construction firms)."""
     login_as(client, MANAGER)
     ikinci = client.post("/api/clients", json={"name": "Diğer"},
                          headers=csrf_headers(client)).get_json()["client"]["id"]
@@ -67,8 +67,8 @@ def test_ayni_hesap_farkli_musteride_serbest(client, cid):
     assert _ekle(client, ikinci, "ortak").status_code == 201
 
 
-# "../../etc" → temizleyici ".." bırakıyor; regex en az bir harf/rakam istediği
-# için reddedilir (yol kaçışı handle'a dönüşmesin).
+# "../../etc" → the sanitizer leaves ".."; rejected because the regex requires
+# at least one letter/digit (so a path-escape can't turn into a handle).
 @pytest.mark.parametrize("kotu", ["", "@", "ad soyad", "a" * 31, "hesap!", "../../etc",
                                   "...", "___"])
 def test_gecersiz_handle_400(client, cid, kotu):
@@ -77,18 +77,18 @@ def test_gecersiz_handle_400(client, cid, kotu):
 
 
 def test_elle_eklenen_dogrudan_onayli(client, cid):
-    """Yönetimin elle eklediği hesap zaten onun seçimi — ayrıca onaylatmak
-    gereksiz bir adım olurdu. Onay kapısı derlenen adaylar için var."""
+    """An account manually added by management is already their choice — requiring
+    a further approval step would be redundant. The approval gate exists for compiled candidates."""
     login_as(client, MANAGER)
     d = _ekle(client, cid, "elle", title="Elle Eklenen").get_json()["account"]
     assert d["status"] == "approved" and d["source"] == "manual"
 
 
-# --- onay kapısı ------------------------------------------------------------
+# --- approval gate ------------------------------------------------------------
 
 def _ata(cid, slot, sub):
-    """content_creator/videographer marka rehberini yalnız ATANDIĞI müşteride
-    okuyabiliyor (`_require_asset_read`); designer ve management her müşteride."""
+    """content_creator/videographer can only read the brand guide on a client they're
+    ASSIGNED to (`_require_asset_read`); designer and management can on any client."""
     from extensions import db
     from models import ClientTeamAssignment
     db.session.add(ClientTeamAssignment(client_id=cid, role_slot=slot, user_id=sub))
@@ -103,7 +103,7 @@ def test_uretim_rolleri_yalniz_onaylananlari_gorur(client, cid):
     _aday_yaz(cid, "onayli", status="approved")
     _aday_yaz(cid, "reddedilmis", status="rejected")
 
-    # Yönetim hepsini görür — kararı o veriyor
+    # Management sees all of them — they make the decision
     hepsi = client.get(f"/api/sharing/clients/{cid}/reference-accounts").get_json()["accounts"]
     assert {a["handle"] for a in hepsi} == {"beklemede", "onayli", "reddedilmis"}
 
@@ -143,7 +143,7 @@ def test_not_duzenlenebilir(client, cid):
     assert r.get_json()["account"]["note"] == "Reels kurgusu çok iyi"
 
 
-# --- yetki ------------------------------------------------------------------
+# --- authorization ------------------------------------------------------------------
 
 def test_yazma_yalniz_yonetim(client, cid):
     a = _aday_yaz(cid, "korumali")

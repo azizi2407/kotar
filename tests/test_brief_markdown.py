@@ -1,4 +1,4 @@
-"""brief_markdown.py — saf markdown ayrıştırıcı (DB'siz, yan etkisiz)."""
+"""brief_markdown.py — pure markdown parser (no DB, no side effects)."""
 import json
 
 import brief_markdown
@@ -28,10 +28,10 @@ def test_frontmatter_yoksa_patlamaz():
     assert body == "# Başlık\nİçerik"
 
 
-# --- regresyon: YAML tarih → JSONB-safe --------------------------------------
+# --- regression: YAML date → JSONB-safe --------------------------------------
 def test_frontmatter_tarih_json_safe():
-    """`üretildi: 2026-07-19` YAML'da date'e döner; JSONB'ye yazılabilmesi için
-    ISO string olmalı. Regresyon: 'Object of type date is not JSON serializable'."""
+    """`üretildi: 2026-07-19` becomes a date in YAML; it needs to be an ISO string to
+    be writable to JSONB. Regression: 'Object of type date is not JSON serializable'."""
     txt = (
         "---\nclient_id: 1\nhafta: 2026-W30\nüretildi: 2026-07-19\n"
         "özel_günler: []\n---\n# X\n> intro\n## 💡 Fikir 1\n- **başlık**: a\n"
@@ -39,6 +39,6 @@ def test_frontmatter_tarih_json_safe():
     p = brief_markdown.parse_brief(txt, "x/2026-W30.md")
     assert p["frontmatter"]["üretildi"] == "2026-07-19"
     assert isinstance(p["frontmatter"]["üretildi"], str)
-    json.dumps(p["frontmatter"])   # date sızarsa TypeError fırlatır
+    json.dumps(p["frontmatter"])   # raises TypeError if a date leaks through
     json.dumps(p["ideas"])
     json.dumps(p["week_notes"])

@@ -1,39 +1,43 @@
-"""Kalıcı doğrudan medya bağlantısı — public `GET /m/<file_id>` (2026-07-30).
+"""Permanent direct media link — public `GET /m/<file_id>` (2026-07-30).
 
-NEDEN VAR: videograf sayfalarındaki "Kopyala" düğmesi Drive dosya sayfasının linkini
-veriyordu (`drive.google.com/file/d/<id>/view`) — Drive'ın görüntüleyici SAYFASI, dosyanın
-kendisi değil. Bu uç dosyanın KENDİSİNİ servis eder ve link **kalıcıdır**:
+WHY THIS EXISTS: the "Copy" button on videographer pages was giving out the link to
+Drive's file page (`drive.google.com/file/d/<id>/view`) — Drive's viewer PAGE, not
+the file itself. This endpoint serves the file ITSELF and the link is **permanent**:
 
-    lokal kopya varsa (21 günlük `media_store` penceresi) → dosya doğrudan servis edilir
-    lokal kopya yoksa (pencere doldu)                    → Drive linkine 302 yönlendirme
+    if a local copy exists (the 21-day `media_store` window) → the file is served directly
+    if there's no local copy (the window has closed)         → 302 redirect to the Drive link
 
-Yani aynı link ömür boyu çalışır; sunucu kopyası silinince sessizce Drive'a düşer.
-Drive linki AYRICA saklanmıyor — `file_id` zaten Drive dosya kimliği, yönlendirme
-adresi ondan türetiliyor (yeni kolon gerekmedi).
+So the same link works forever; when the server copy is deleted it silently falls
+back to Drive. The Drive link isn't stored SEPARATELY either — `file_id` is already
+the Drive file id, the redirect address is derived from it (no new column needed).
 
-ÜÇ MOD (2026-07-31 — "linki alan kişi indirebilsin" isteği):
+THREE MODES (2026-07-31 — the "let whoever gets the link download it" request):
 
-    /m/<id>          → mini HTML sayfası: oynatıcı/görsel + "İndir" düğmesi
-    /m/<id>?raw=1    → dosyanın kendisi, inline (Range destekli — video seek)
-    /m/<id>?dl=1     → dosyanın kendisi, attachment (tarayıcı kaydeder)
+    /m/<id>          → mini HTML page: player/image + "İndir" (Download) button
+    /m/<id>?raw=1    → the file itself, inline (Range supported — video seek)
+    /m/<id>?dl=1     → the file itself, as an attachment (browser saves it)
 
-Ham dosya niye artık varsayılan DEĞİL: kopyalanan link genelde ajans dışına gidiyor ve
-ham `video/mp4` yanıtında indirme, tarayıcının yerleşik oynatıcı menüsüne gömülü kalıyordu
-(mobilde çoğu zaman hiç yok). Sayfa, indirmeyi görünür bir düğme yapıyor. `?raw=1` ham
-davranışı aynen koruyor → `<video src>`/gömme kullanan mevcut tüketiciler bozulmaz.
+Why the raw file is no longer the default: a copied link usually goes outside the
+agency, and downloading from a raw `video/mp4` response stayed buried in the
+browser's built-in player menu (often missing entirely on mobile). The page turns
+downloading into a visible button. `?raw=1` preserves the raw behavior exactly →
+existing consumers using `<video src>`/embeds aren't broken.
 
-AUTH YOK — bilinçli (proje sahibi kararı 2026-07-30: "linki bilen herkes açabilsin"). Yeni bir
-açıklık DEĞİL: bu uç YALNIZ Drive'da zaten `grant_anyone_reader` ile "bağlantıya sahip
-herkes okuyabilir" yapılmış iki dosya sınıfını servis eder —
-  * videograf VİDEO yüklemeleri (`CardUpload.category='video'`, sharing.upload izni verir)
-  * çekim FOTOĞRAFLARI (`VideographerPhoto`, vg_photo_upload izni verir)
-Bu ikisi zaten linki bilen herkese açık; aynı dosyayı kendi sunucumuzdan vermek kitleyi
-genişletmiyor. `media_store` içindeki DİĞER her şey (müşteri tasarım yüklemeleri, share
-görselleri — bunların Drive'da public izni YOK) burada **404** döner. Uygunluk DB'den
-sorulur, dosya sisteminden değil: `media_store.find_original` yalnız uygunluk geçtikten
-sonra çağrılır, aksi halde uç `media_store`'un tamamı için okuma oracle'ı olurdu.
+NO AUTH — deliberate (project owner decision 2026-07-30: "anyone who knows the link
+should be able to open it"). This is NOT a new hole: this endpoint serves ONLY the
+two file classes already made "anyone with the link can read" in Drive via
+`grant_anyone_reader` —
+  * videographer VIDEO uploads (`CardUpload.category='video'`, granted by sharing.upload)
+  * shoot PHOTOS (`VideographerPhoto`, granted by vg_photo_upload)
+These two are already open to anyone who knows the link; serving the same file from
+our own server doesn't widen the audience. EVERYTHING ELSE in `media_store` (client
+design uploads, share images — these have NO public permission in Drive) returns
+**404** here. Eligibility is queried from the DB, not the filesystem:
+`media_store.find_original` is called only after eligibility passes; otherwise the
+endpoint would become a read oracle for the whole of `media_store`.
 
-Soft-delete edilen kayıt (`deleted_at`) da 404 verir → panelden silinen dosyanın linki ölür.
+A soft-deleted record (`deleted_at`) also returns 404 → a file deleted from the
+panel has its link die.
 """
 import html
 import logging
@@ -51,25 +55,26 @@ log = logging.getLogger(__name__)
 bp = Blueprint('public_media', __name__)
 
 DRIVE_VIEW = 'https://drive.google.com/file/d/{}/view'
-# Drive'ın doğrudan indirme adresi — lokal kopya süresi dolmuş dosyada `?dl=1`
-# buraya yönlenir (görüntüleyici sayfasına değil): niyet indirmeydi.
+# Drive's direct download address — for a file whose local copy has expired,
+# `?dl=1` redirects here (not to the viewer page): the intent was downloading.
 DRIVE_DOWNLOAD = 'https://drive.google.com/uc?export=download&id={}'
 
-# Drive dosya kimliği alfabesi. Uzunluk aralığı geniş tutuldu (Drive id boyu sabit
-# değil); asıl kapı bu değil, aşağıdaki DB uygunluk sorgusu.
+# Drive file id alphabet. The length range is kept wide (Drive id length isn't
+# fixed); the real gate isn't this, it's the DB eligibility query below.
 _ID_RE = re.compile(r'^[A-Za-z0-9_-]{10,128}$')
 
-# Aynı IP'den dakikada izin verilen istek. Video seek'i Range istekleriyle çok sayıda
-# istek üretebildiği için normal public uçlardan (40/dk) cömert tutuldu.
+# Requests allowed per minute from the same IP. Kept more generous than normal
+# public endpoints (40/min) since video seeking can generate many Range requests.
 RATE_MAX, RATE_WINDOW = 240, 60
 
 
 def _eligible(file_id):
-    """Uygunsa `(dosya_adı, tür)` döndürür, değilse `(None, None)`.
+    """Returns `(file_name, type)` if eligible, `(None, None)` otherwise.
 
-    Tür ('video' | 'foto') sayfanın `<video>` mi `<img>` mi basacağını belirler;
-    ad mime tahmini ve indirme adı için kullanılır.
-    Sıra önemsiz — bir file_id iki sınıfta birden olamaz (ayrı Drive yüklemeleri)."""
+    The type ('video' | 'foto') determines whether the page renders `<video>` or
+    `<img>`; the name is used for mime guessing and the download name.
+    Order doesn't matter — a file_id can't be in both classes (separate Drive
+    uploads)."""
     vu = (CardUpload.query
           .filter_by(file_id=file_id, category='video', deleted_at=None)
           .first())
@@ -89,16 +94,16 @@ def public_media(file_id):
         return 'çok fazla istek', 429
     name, kind = _eligible(file_id)
     if name is None:
-        # Uygun değil VEYA silinmiş. İkisini ayırmıyoruz: ayırmak, hangi file_id'lerin
-        # sistemde var olduğunu sızdırırdı.
+        # Not eligible OR deleted. We don't distinguish the two: doing so would
+        # leak which file_ids exist in the system.
         return '', 404
 
     dl = request.args.get('dl') == '1'
     path = media_store.find_original(file_id)
 
-    # `?web=1` → tarayıcı uyumlu türev (1080p H.264). Yalnız OYNATMA yolunda:
-    # indirme her zaman orijinali verir, yoksa 4K çeken videografın dosyası
-    # linkten 1080p olarak dönerdi (2026-08-01).
+    # `?web=1` → browser-compatible variant (1080p H.264). PLAYBACK path only:
+    # downloading always returns the original, otherwise a 4K-shooting
+    # videographer's file would come back as 1080p from the link (2026-08-01).
     web_served = False
     if not dl and request.args.get('web') == '1':
         web = media_store.find_web(file_id)
@@ -110,37 +115,41 @@ def public_media(file_id):
                             web=bool(media_store.find_web(file_id)))
 
     if path:
-        # Türev DAİMA mp4/H.264'tür; mime'ı dosya ADINDAN türetmek `.mov`
-        # orijinallerde `video/quicktime` verirdi ve tarayıcı türevi reddederdi.
+        # The variant is ALWAYS mp4/H.264; deriving the mime from the file NAME
+        # would give `video/quicktime` for `.mov` originals and the browser would
+        # reject the variant.
         mime = ('video/mp4' if web_served else
                 (mimetypes.guess_type(name)[0] or mimetypes.guess_type(path)[0]
                  or 'application/octet-stream'))
         try:
-            # conditional=True → Range destekli (videoda ileri sarma çalışır).
+            # conditional=True → Range supported (seeking forward in video works).
             resp = send_file(path, mimetype=mime, conditional=True,
                              as_attachment=dl, download_name=(name if dl else None))
             resp.headers['Cache-Control'] = 'public, max-age=3600'
             return resp
         except OSError:
             log.warning('lokal kopya okunamadı, Drive\'a düşülüyor: %s', file_id)
-    # Lokal yok/okunamadı → Drive. 302 (301 DEĞİL): kalıcı yönlendirme tarayıcıda
-    # süresiz cache'lenir, lokal kopya politikası değişirse geri dönemezdik.
+    # No local copy / unreadable → Drive. 302 (NOT 301): a permanent redirect
+    # would be cached indefinitely by the browser, and we couldn't go back if the
+    # local-copy policy changed.
     target = (DRIVE_DOWNLOAD if dl else DRIVE_VIEW).format(file_id)
     return redirect(target, code=302)
 
 
 def _viewer_page(file_id, name, kind, local, web=False):
-    """Mini izleme/indirme sayfası.
+    """Mini viewing/download page.
 
-    `local` ise medya kendi sunucumuzdan (`?raw=1`) gösterilir ve "İndir" düğmesi
-    `?dl=1`'e gider. Lokal kopya süresi dolmuşsa sayfa ÖLMEZ: Drive'ın gömülü
-    oynatıcısına düşer ve indirme Drive'a yönlenir — link kalıcılığı korunur.
+    If `local`, the media is shown from our own server (`?raw=1`) and the
+    "İndir" (Download) button goes to `?dl=1`. If the local copy has expired, the
+    page DOESN'T DIE: it falls back to Drive's embedded player and downloading
+    redirects to Drive — link permanence is preserved.
 
-    `web` (2026-08-01): videonun tarayıcı uyumlu türevi hazır → oynatıcı ONU
-    kullanır (`?raw=1&web=1`). Türev yoksa orijinal denenir; 4K/HEVC ise mobilde
-    oynamayabilir, ama sayfa yine de indirme yolunu sunar."""
+    `web` (2026-08-01): if the video's browser-compatible variant is ready → the
+    player uses IT (`?raw=1&web=1`). If there's no variant, the original is tried;
+    if it's 4K/HEVC it may not play on mobile, but the page still offers the
+    download path."""
     safe_name = html.escape(name)
-    # file_id `_ID_RE` ile doğrulandı (yalnız [A-Za-z0-9_-]) → URL'ye güvenle gömülür.
+    # file_id was validated with `_ID_RE` (only [A-Za-z0-9_-]) → safely embedded in the URL.
     if local:
         src = f'/m/{file_id}?raw=1&amp;web=1' if web else f'/m/{file_id}?raw=1'
         media = (f'<video class="media" src="{src}" controls playsinline '
@@ -157,7 +166,7 @@ def _viewer_page(file_id, name, kind, local, web=False):
 
     page = (_PAGE.replace('__MEDIA__', media)
                  .replace('__NAME__', safe_name)
-                 # Drive indirme adresindeki `&` HTML özniteliğinde `&amp;` olmalı.
+                 # The `&` in the Drive download address must be `&amp;` in the HTML attribute.
                  .replace('__DL_HREF__', html.escape(dl_href, quote=True))
                  .replace('__DL_LABEL__', dl_label)
                  .replace('__NOTE__', note))
@@ -166,8 +175,8 @@ def _viewer_page(file_id, name, kind, local, web=False):
                              'Cache-Control': 'no-store'})
 
 
-# Palet review.py'nin onay sayfasıyla aynı (koyu turkuaz) — medya odaklı sayfada
-# açık zemin videoyu bastırıyordu.
+# Palette is the same as review.py's approval page (dark teal) — on a media-focused
+# page a light background washed out the video.
 _PAGE = """<!doctype html>
 <html lang="tr"><head>
 <meta charset="utf-8">

@@ -1,4 +1,4 @@
-"""mail_crypto — Fernet round-trip ve anahtar-yok davranışı."""
+"""mail_crypto — Fernet round-trip and behavior when no key is present."""
 import importlib
 
 import pytest

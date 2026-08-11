@@ -1,4 +1,4 @@
-"""/api/sharing/videographer/cards — bekleyen video kuyruğu + kişisel gizleme."""
+"""/api/sharing/videographer/cards — pending video queue + personal hiding."""
 import datetime as dt
 
 from conftest import MANAGER, VIDEOGRAPHER, login_as
@@ -17,7 +17,7 @@ def _client_id(client, name='Video Müşteri'):
 
 
 def _video(client_id, file_id, minutes_ago=0):
-    """Yüklenmiş video kaydı (Drive'a gitmeden)."""
+    """An uploaded video record (without hitting Drive)."""
     from models_sharing import CardUpload
     row = CardUpload(client_id=client_id, week_iso=WEEK, category='video',
                      file_id=file_id, file_name=f'{file_id}.mp4',
@@ -29,7 +29,7 @@ def _video(client_id, file_id, minutes_ago=0):
 
 
 def _share(client_id, file_id, deleted=False):
-    """Videoyu bir paylaşıma bağla → artık 'bekleyen' değil."""
+    """Attach the video to a share → no longer 'pending'."""
     from models import utcnow
     from models_sharing import Share
     row = Share(client_id=client_id, week_iso=WEEK, kind='video', status='draft',
@@ -53,7 +53,7 @@ def _hide(client, client_id, hidden=True):
                       headers=csrf_headers(client))
 
 
-# --- bekleyen kuyruk -----------------------------------------------------
+# --- pending queue -----------------------------------------------------
 
 def test_paylasilmis_video_bekleyenden_dusulur(client):
     cid = _client_id(client)
@@ -79,17 +79,17 @@ def test_soft_delete_edilmis_share_videoyu_yeniden_bekliyor_yapar(client):
 def test_liste_en_fazla_bes_en_yeni_once(client):
     cid = _client_id(client)
     for i in range(7):
-        _video(cid, f'f{i}', minutes_ago=i)      # f0 en yeni
+        _video(cid, f'f{i}', minutes_ago=i)      # f0 is the newest
     login_as(client, VIDEOGRAPHER)
     row, _ = _row(client, cid)
-    assert row['video_pending_count'] == 7        # GERÇEK sayı, kırpılmaz
+    assert row['video_pending_count'] == 7        # the REAL count, not truncated
     assert len(row['video_pending']) == 5
     assert [v['file_id'] for v in row['video_pending']] == ['f0', 'f1', 'f2', 'f3', 'f4']
 
 
 def test_video_uploads_semantigi_degismedi(client):
-    """REGRESYON MUHAFIZI — aynı _build_rows yönetim ve designer board'unu da besliyor;
-    `video_uploads` haftanın TÜM videolarını döndürmeye devam etmeli."""
+    """REGRESSION GUARD — the same _build_rows also feeds the management and designer boards;
+    `video_uploads` must keep returning ALL of the week's videos."""
     cid = _client_id(client)
     _video(cid, 'f_bekleyen')
     _video(cid, 'f_paylasilan')
@@ -97,7 +97,7 @@ def test_video_uploads_semantigi_degismedi(client):
     login_as(client, MANAGER)
     rows = client.get(f'/api/sharing/cards?week_iso={WEEK}').get_json()['rows']
     row = next(r for r in rows if r['client']['id'] == cid)
-    assert len(row['video_uploads']) == 2         # ikisi de duruyor
+    assert len(row['video_uploads']) == 2         # both still present
 
 
 def test_videosuz_musteride_sifirlar(client):
@@ -108,7 +108,7 @@ def test_videosuz_musteride_sifirlar(client):
     assert row['video_pending'] == []
 
 
-# --- kişisel gizleme -----------------------------------------------------
+# --- personal hiding -----------------------------------------------------
 
 def test_gizli_musteri_satirda_yok(client):
     cid = _client_id(client, 'Gizlenen')
@@ -134,7 +134,7 @@ def test_gizleme_baska_kullaniciyi_etkilemez(client):
 def test_gizleme_yonetim_ve_designer_boardini_etkilemez(client):
     cid = _client_id(client)
     login_as(client, MANAGER)
-    _hide(client, cid)                       # yönetici kendi vg sayfasında gizledi
+    _hide(client, cid)                       # manager hid it on their own vg page
     rows = client.get(f'/api/sharing/cards?week_iso={WEEK}').get_json()['rows']
     assert cid in [r['client']['id'] for r in rows]
     drows = client.get(f'/api/sharing/designer/cards?week_iso={WEEK}').get_json()['rows']
@@ -151,10 +151,10 @@ def test_geri_acilan_musteri_tekrar_gorunur(client):
     assert body['hidden_count'] == 0
 
 
-# --- N+1 muhafızı --------------------------------------------------------
+# --- N+1 guard --------------------------------------------------------
 
 def test_sorgu_sayisi_musteri_sayisindan_bagimsiz(client):
-    """Paylaşılmış tespiti tek toplu sorgu olmalı; döngüye sorgu girerse kırılır."""
+    """Shared detection must be a single batched query; breaks if a query ends up in a loop."""
     from sqlalchemy import event
 
     def count_queries(n):
@@ -182,10 +182,10 @@ def test_sorgu_sayisi_musteri_sayisindan_bagimsiz(client):
     assert count_queries(2) == count_queries(6)
 
 
-# --- `shared` bayrağı: videograf paylaşılmış videoyu da izleyebilsin -------
-# 2026-07-30: sayfa artık haftanın TÜM videolarını listeliyor (paylaşılmışlar
-# rozetli) ve panelde oynatıyor. Eskiden paylaşılan video listeden düşüyordu →
-# videograf kendi yüklediği videoyu izleyemiyordu.
+# --- `shared` flag: lets the videographer also watch an already-shared video -------
+# 2026-07-30: the page now lists ALL of the week's videos (shared ones badged)
+# and plays them in the panel. Previously a shared video dropped off the list →
+# the videographer couldn't watch the video they themselves uploaded.
 
 def test_shared_bayragi_paylasilmis_videoyu_isaretler(client):
     cid = _client_id(client)
@@ -199,7 +199,7 @@ def test_shared_bayragi_paylasilmis_videoyu_isaretler(client):
 
 
 def test_shared_soft_delete_edilmis_share_i_saymaz(client):
-    """Kart silinince video yeniden 'bekliyor' olmalı — rozet de kalkar."""
+    """When the card is deleted, the video must go back to 'pending' — badge also disappears."""
     cid = _client_id(client)
     _video(cid, 'f_geri')
     _share(cid, 'f_geri', deleted=True)
@@ -208,7 +208,7 @@ def test_shared_soft_delete_edilmis_share_i_saymaz(client):
 
 
 def test_shared_video_pending_ile_tutarli(client):
-    """`video_pending` ve `shared` aynı kaynaktan türer — çelişmemeleri gerekir."""
+    """`video_pending` and `shared` derive from the same source — they must not contradict each other."""
     cid = _client_id(client)
     for i in range(3):
         _video(cid, f'v{i}', minutes_ago=i)
@@ -218,11 +218,11 @@ def test_shared_video_pending_ile_tutarli(client):
     bekleyen = {v['file_id'] for v in row['video_pending']}
     assert paylasilmis == {'v1'}
     assert paylasilmis.isdisjoint(bekleyen)
-    assert len(row['video_uploads']) == 3           # hepsi listede
+    assert len(row['video_uploads']) == 3           # all present in the list
 
 
 def test_shared_videografa_da_doner(client):
-    """Bayrak videografın kendi görünümünde de olmalı (sayfanın asıl tüketicisi)."""
+    """The flag must also be present in the videographer's own view (the page's actual consumer)."""
     cid = _client_id(client)
     _video(cid, 'f_vg')
     _share(cid, 'f_vg')
@@ -232,7 +232,7 @@ def test_shared_videografa_da_doner(client):
 
 
 def test_shared_dosyasiz_yuklemede_false(client):
-    """file_id yoksa paylaşılmış olamaz — `in` kontrolü None'da patlamamalı."""
+    """Without a file_id it can't be shared — the `in` check must not blow up on None."""
     cid = _client_id(client)
     _video(cid, None)
     row, _ = _row(client, cid)

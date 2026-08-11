@@ -1,13 +1,13 @@
-// Pano şablonları — SAF üreteçler. Her biri `Partial<PlanningItem>[]` döndürür,
-// çağıran tek `store.commit()` ile hepsini bir delta PATCH'te gönderir.
+// Board templates — PURE generators. Each returns `Partial<PlanningItem>[]`,
+// the caller sends them all in one delta PATCH with a single `store.commit()`.
 //
-// Sınır: sunucu `MAX_BATCH = 200`. Şablonlar bunun çok altında tutulur; yine de
-// `chunkForPatch()` bölerek göndermeyi mümkün kılar.
+// Limit: the server's `MAX_BATCH = 200`. Templates are kept well under this; still,
+// `chunkForPatch()` makes chunked sending possible.
 import { COLORS, DEFAULT_SIZE, newItemKey, type PlanningItem } from "@/lib/planlama"
 
 export type NewItem = Partial<PlanningItem> & { item_key: string }
 
-/** Sunucunun tek PATCH'te kabul ettiği azami öğe (planning.MAX_BATCH ile eş). */
+/** The max items the server accepts in a single PATCH (matches planning.MAX_BATCH). */
 export const MAX_BATCH = 200
 
 export function chunkForPatch<T>(items: T[], size = MAX_BATCH): T[][] {
@@ -33,48 +33,6 @@ function note(text: string, x: number, y: number): NewItem {
            z: 0, color: "#fef9c3", status: "open" }
 }
 
-const GUNLER = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
-
-/** Haftalık plan: 7 gün bölgesi yan yana, her birinde bir başlangıç kartı. */
-function haftalikPlan(ox: number, oy: number): NewItem[] {
-  const W = 260, H = 520, GAP = 16
-  const out: NewItem[] = []
-  GUNLER.forEach((gun, i) => {
-    const x = ox + i * (W + GAP)
-    out.push(region(gun, x, oy, W, H, i >= 5 ? "#f8fafc" : "#f1f5f9"))
-    out.push(card("Yeni iş", x + 20, oy + 44, COLORS[i % COLORS.length]))
-  })
-  return out
-}
-
-/** Kampanya akışı: brief → içerik → onay → yayın, aralarında bağlantı yok
- *  (bağlantıyı kullanıcı çizsin — otomatik ok koymak çoğu zaman yanlış oluyor). */
-function kampanyaAkisi(ox: number, oy: number): NewItem[] {
-  const asamalar: [string, string][] = [
-    ["Brief", "#e0f2fe"], ["İçerik üretimi", "#e0e7ff"],
-    ["İç onay", "#fef9c3"], ["Müşteri onayı", "#f3e8ff"], ["Yayın", "#dcfce7"],
-  ]
-  const out: NewItem[] = [region("Kampanya akışı", ox, oy, 5 * 236 + 24, 240, "#f8fafc")]
-  asamalar.forEach(([ad, renk], i) => {
-    out.push(card(ad, ox + 20 + i * 236, oy + 48, renk, `Aşama ${i + 1}`))
-  })
-  out.push(note("Aşamalar arasına ok çizmek için karttan diğerine sürükle.", ox + 20, oy + 190))
-  return out
-}
-
-/** Çekim akışı: hazırlık → çekim → kurgu → teslim. */
-function cekimAkisi(ox: number, oy: number): NewItem[] {
-  const asamalar: [string, string][] = [
-    ["Çekim planı", "#e0f2fe"], ["Ekipman / lokasyon", "#f1f5f9"],
-    ["Çekim günü", "#fee2e2"], ["Kurgu", "#e0e7ff"], ["Teslim", "#dcfce7"],
-  ]
-  const out: NewItem[] = [region("Çekim akışı", ox, oy, 3 * 236 + 24, 460, "#f8fafc")]
-  asamalar.forEach(([ad, renk], i) => {
-    out.push(card(ad, ox + 20 + (i % 3) * 236, oy + 48 + Math.floor(i / 3) * 168, renk))
-  })
-  return out
-}
-
 export interface Template {
   id: string
   name: string
@@ -82,14 +40,74 @@ export interface Template {
   build: (originX: number, originY: number) => NewItem[]
 }
 
-export const TEMPLATES: Template[] = [
-  { id: "hafta", name: "Haftalık plan",
-    description: "7 gün bölgesi, her birinde bir başlangıç kartı",
-    build: haftalikPlan },
-  { id: "kampanya", name: "Kampanya akışı",
-    description: "Brief → içerik → iç onay → müşteri onayı → yayın",
-    build: kampanyaAkisi },
-  { id: "cekim", name: "Çekim akışı",
-    description: "Plan → ekipman → çekim → kurgu → teslim",
-    build: cekimAkisi },
-]
+type TFunc = (key: string, vars?: Record<string, string | number>) => string
+
+/** Template list — the name/description and content text are translated per language,
+ *  so it's a generator that takes `t()` instead of a fixed array. The caller passes in
+ *  the `t` it got from `useI18n()` (see PlanlamaPage.tsx). */
+export function getTemplates(t: TFunc): Template[] {
+  const GUNLER = [
+    t("pages.planning.templates.day.monday"), t("pages.planning.templates.day.tuesday"),
+    t("pages.planning.templates.day.wednesday"), t("pages.planning.templates.day.thursday"),
+    t("pages.planning.templates.day.friday"), t("pages.planning.templates.day.saturday"),
+    t("pages.planning.templates.day.sunday"),
+  ]
+
+  /** Weekly plan: 7 day regions side by side, each with one starter card. */
+  function haftalikPlan(ox: number, oy: number): NewItem[] {
+    const W = 260, H = 520, GAP = 16
+    const out: NewItem[] = []
+    GUNLER.forEach((gun, i) => {
+      const x = ox + i * (W + GAP)
+      out.push(region(gun, x, oy, W, H, i >= 5 ? "#f8fafc" : "#f1f5f9"))
+      out.push(card(t("pages.planning.templates.newTaskCard"), x + 20, oy + 44, COLORS[i % COLORS.length]))
+    })
+    return out
+  }
+
+  /** Campaign flow: brief → content → approval → publish, with no connections between them
+   *  (let the user draw the connection — auto-placed arrows are usually wrong). */
+  function kampanyaAkisi(ox: number, oy: number): NewItem[] {
+    const asamalar: [string, string][] = [
+      [t("pages.planning.templates.campaignStage.brief"), "#e0f2fe"],
+      [t("pages.planning.templates.campaignStage.contentProduction"), "#e0e7ff"],
+      [t("pages.planning.templates.campaignStage.internalApproval"), "#fef9c3"],
+      [t("pages.planning.templates.campaignStage.clientApproval"), "#f3e8ff"],
+      [t("pages.planning.templates.campaignStage.publish"), "#dcfce7"],
+    ]
+    const out: NewItem[] = [region(t("pages.planning.templates.campaign.name"), ox, oy, 5 * 236 + 24, 240, "#f8fafc")]
+    asamalar.forEach(([ad, renk], i) => {
+      out.push(card(ad, ox + 20 + i * 236, oy + 48, renk, t("pages.planning.templates.stageLabel", { n: i + 1 })))
+    })
+    out.push(note(t("pages.planning.templates.campaignNote"), ox + 20, oy + 190))
+    return out
+  }
+
+  /** Shoot flow: prep → shoot → edit → delivery. */
+  function cekimAkisi(ox: number, oy: number): NewItem[] {
+    const asamalar: [string, string][] = [
+      [t("pages.planning.templates.shootStage.plan"), "#e0f2fe"],
+      [t("pages.planning.templates.shootStage.equipment"), "#f1f5f9"],
+      [t("pages.planning.templates.shootStage.day"), "#fee2e2"],
+      [t("pages.planning.templates.shootStage.edit"), "#e0e7ff"],
+      [t("pages.planning.templates.shootStage.delivery"), "#dcfce7"],
+    ]
+    const out: NewItem[] = [region(t("pages.planning.templates.shoot.name"), ox, oy, 3 * 236 + 24, 460, "#f8fafc")]
+    asamalar.forEach(([ad, renk], i) => {
+      out.push(card(ad, ox + 20 + (i % 3) * 236, oy + 48 + Math.floor(i / 3) * 168, renk))
+    })
+    return out
+  }
+
+  return [
+    { id: "hafta", name: t("pages.planning.templates.weekly.name"),
+      description: t("pages.planning.templates.weekly.description"),
+      build: haftalikPlan },
+    { id: "kampanya", name: t("pages.planning.templates.campaign.name"),
+      description: t("pages.planning.templates.campaign.description"),
+      build: kampanyaAkisi },
+    { id: "cekim", name: t("pages.planning.templates.shoot.name"),
+      description: t("pages.planning.templates.shoot.description"),
+      build: cekimAkisi },
+  ]
+}

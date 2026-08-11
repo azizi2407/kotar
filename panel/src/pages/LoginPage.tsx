@@ -1,7 +1,7 @@
-// Yerel giriş sayfası (AUTH_MODE=local). AUTH_MODE=oidc iken bu sayfaya hiç
-// yönlendirilmez — Flask /auth/login doğrudan sağlayıcıya (Google/Keycloak/...)
-// gönderir. Buraya erişim yalnız AUTH_MODE=local'de, Flask /auth/login'in
-// /panel/login'e 302'siyle olur (bkz. auth.py login()).
+// Local login page (AUTH_MODE=local). Never routed to when AUTH_MODE=oidc — Flask
+// /auth/login sends the browser straight to the provider (Google/Keycloak/...).
+// This page is only reached under AUTH_MODE=local, via Flask /auth/login's 302 to
+// /panel/login (see auth.py login()).
 import { useEffect, useState, type FormEvent } from "react"
 import { useNavigate } from "react-router-dom"
 import { toast } from "sonner"
@@ -41,7 +41,7 @@ export function LoginPage() {
         setBusy(false)
         return
       }
-      // Tam sayfa yenileme: AuthProvider'ın ilk /session çağrısı yeni oturumla tazelensin.
+      // Full page reload: so AuthProvider's initial /session call refreshes with the new session.
       window.location.href = "/panel/"
     } catch {
       toast.error(t("login.networkError"))
@@ -67,7 +67,7 @@ export function LoginPage() {
             autoComplete="username"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder="ad@ornek.com"
+            placeholder="name@example.com"
             required
           />
         </div>

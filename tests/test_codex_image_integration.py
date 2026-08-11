@@ -1,11 +1,12 @@
-"""Gerçek Codex smoke testi — VARSAYILAN KOŞUDA ATLANIR (`pytest.ini` addopts).
+"""Real Codex smoke test — SKIPPED IN THE DEFAULT RUN (`pytest.ini` addopts).
 
-Elle çalıştırmak için:
+To run manually:
     venv/bin/python -m pytest tests/test_codex_image_integration.py -m integration -q
 
-Gerçek ChatGPT kotası harcar ve 1-4 dakika sürer. Sunucuda `codex` CLI kurulu ve
-oturum açık olmalı; değilse test `codex CLI bulunamadı` / `Codex oturumu yok` ile
-başarısız olur (bu da bilgidir: hattın işletim önkoşulu sağlanmıyor demektir).
+Consumes real ChatGPT quota and takes 1-4 minutes. The `codex` CLI must be installed
+and logged in on the server; otherwise the test fails with `codex CLI bulunamadı` /
+`Codex oturumu yok` (which is itself informative: it means the pipeline's operating
+prerequisite isn't met).
 """
 import os
 
@@ -35,7 +36,7 @@ def test_gercek_codex_gorsel_uretir(client, tmp_path, monkeypatch):
 
     assert res.meta["width"] == 1024 and res.meta["height"] == 1024
     assert os.path.isfile(str(tmp_path / "depo" / res.rel_path))
-    # Efemer dizin ve Codex'in ev dizinindeki kopyası temizlendi mi?
+    # Was the ephemeral directory and Codex's copy in its home dir cleaned up?
     isler = tmp_path / "isler"
     assert not isler.exists() or not any(isler.iterdir())
     if res.thread_id:

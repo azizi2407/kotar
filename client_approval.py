@@ -1,23 +1,26 @@
-"""Public müşteri onay sayfası — ELLE SEÇİLMİŞ içerikler (/onay/<token>).
+"""Public client approval page — MANUALLY SELECTED content (/onay/<token>).
 
-`review.py`'nin ikizi DEĞİL, yanında duran ikinci bir akış (proje sahibi 2026-08-06:
-"oradakine dokunmayalım"). Farklar:
+NOT a twin of `review.py`, but a second flow sitting alongside it (project
+owner's call, 2026-08-06: "let's not touch the other one"). Differences:
 
-- **Kapsam:** `/review/<token>` (müşteri, hafta) çiftini gösterir; burada linkin
-  `upload_ids` listesi dondurulmuştur — üç haftalık pencereden elle seçilmiş
-  dosyalar. Sonradan yüklenen hiçbir şey linke sızmaz.
-- **Not defteri:** sayfanın sağında müşterinin serbestçe yazdığı, otomatik
-  kaydedilen alan. Metin her değiştiğinde ekibe bildirim düşer; art arda gelen
-  değişiklikleri 30 dk'lık coalesce penceresi toplar.
-- **Görsel dil:** özel gün seçim sayfasıyla (`special_days.py`) aynı krem/altın
-  palet ve tipografi — müşteriye giden iki sayfa aynı ajanstan gelmiş görünsün.
+- **Scope:** `/review/<token>` shows a (client, week) pair; here the link's
+  `upload_ids` list is frozen — files manually picked from a three-week
+  window. Nothing uploaded afterward leaks into the link.
+- **Notepad:** a freely-written, auto-saved field on the right side of the
+  page for the client. A notification fires to the team whenever the text
+  changes; a 30-minute coalesce window batches consecutive changes.
+- **Visual language:** same cream/gold palette and typography as the special-
+  day selection page (`special_days.py`) — the two pages going out to the
+  client should look like they're from the same agency.
 
-Kararlar AYRI tablo tutmaz: `card_upload_reviews`'a yazılır → sharing board'daki
-✅/📝 rozetleri ve `client_review` bildirimleri bu akışta da çalışır.
+Decisions do NOT get a SEPARATE table: they're written to
+`card_upload_reviews` -> the sharing board's checkmark/pencil badges and
+`client_review` notifications work in this flow too.
 
-Auth YOK: token'ın kendisi yetkidir (32 bayt). Medya proxy ve karar uçları yalnız
-linkin kendi `upload_ids`'ine bakar; keyfi file_id / başka müşterinin dosyası
-reddedilir. CSRF yok (mutasyon token'la korunur), token başına hız sınırı var.
+NO auth: the token itself is the authorization (32 bytes). The media proxy
+and decision endpoints only look at the link's own `upload_ids`; an
+arbitrary file_id / another client's file is rejected. No CSRF (mutation is
+protected by the token), there's a per-token rate limit.
 """
 import mimetypes
 
@@ -35,9 +38,10 @@ from sharing import REVIEW_CATEGORIES
 
 bp = Blueprint('client_approval', __name__)
 
-# Not defterinin üst sınırı — DB'de Text ama sayfadan gelen veri sınırsız olamaz.
+# Upper bound for the notepad — it's Text in the DB, but data coming from the
+# page can't be unbounded.
 NOTE_MAX = 4000
-# Bildirim gövdesindeki not özeti.
+# Note summary in the notification body.
 NOTE_SUMMARY = 120
 MEDIA_WIDTHS = {'thumb': 600, 'full': 2048}
 
@@ -50,10 +54,11 @@ def _link_or_404(token):
 
 
 def _uploads(link):
-    """Linkin içerikleri — `upload_ids` SIRASIYLA (tasarımcının seçim sırası).
+    """The link's content — IN `upload_ids` ORDER (the designer's selection order).
 
-    Aradan silinmiş dosya sessizce düşer: link üretildikten sonra yükleme
-    kalıcı silinebiliyor (videografın silme ucu), sayfa bunun için ölmemeli."""
+    A file deleted in the meantime silently drops out: an upload can be
+    permanently deleted after the link is generated (the videographer's
+    delete endpoint), the page shouldn't break because of that."""
     ids = [i for i in (link.upload_ids or []) if isinstance(i, int)]
     if not ids:
         return []
@@ -70,7 +75,7 @@ def _item(token, up):
         'id': up.id, 'kind': up.category, 'file_name': up.file_name,
         'week_iso': up.week_iso,
         'media_url': f'/onay/{token}/media/{up.file_id}' if up.file_id else None,
-        # Lokal kopya varken video sayfa içinde oynar (21 günlük pencere).
+        # While a local copy exists, the video plays in-page (21-day window).
         'video_url': (f'/onay/{token}/stream/{up.file_id}'
                       if is_video and up.file_id
                       and media_store.has_original(up.file_id) else None),
@@ -96,8 +101,8 @@ def items(token):
 
 @bp.get('/onay/<token>/media/<file_id>')
 def media(token, file_id):
-    """Görsel proxy — yalnız bu linkin dosyaları. Sıra: lokal orijinal (full ve
-    görselse) → lokal önizleme → DB thumbnail cache → Drive."""
+    """Image proxy — only this link's files. Order: local original (full, if
+    it's an image) -> local preview -> DB thumbnail cache -> Drive."""
     link = _link_or_404(token)
     allowed = {u.file_id for u in _uploads(link) if u.file_id}
     if file_id not in allowed:
@@ -119,7 +124,7 @@ def media(token, file_id):
             resp.headers['Cache-Control'] = 'private, max-age=86400'
             return resp
         except OSError:
-            pass  # lokal okunamadıysa Drive yoluna düş
+            pass  # fall through to Drive if local read fails
     width = MEDIA_WIDTHS.get(request.args.get('size'), MEDIA_WIDTHS['thumb'])
     cached = db.session.get(DriveThumbnail, (file_id, width))
     if cached:
@@ -140,8 +145,8 @@ def media(token, file_id):
 
 @bp.get('/onay/<token>/stream/<file_id>')
 def stream(token, file_id):
-    """Lokal orijinal akışı (Range destekli). Lokal kopya süresi dolduysa 404 →
-    sayfa Drive bağlantısına düşer."""
+    """Local original streaming (Range-supported). 404 if the local copy has
+    expired -> the page falls back to the Drive link."""
     link = _link_or_404(token)
     if not ratelimit.hit(f'onaystream:{token}', 120, 60):
         abort(429)
@@ -162,20 +167,20 @@ def stream(token, file_id):
 
 @bp.post('/onay/<token>/decision')
 def decision(token):
-    """Müşterinin içerik bazlı kararı → `card_upload_reviews` (ortak tablo).
+    """The client's per-content decision -> `card_upload_reviews` (shared table).
 
-    Revize için not ZORUNLU (mevcut onay akışıyla aynı sözleşme): "revize" tek
-    başına tasarımcıya ne yapacağını söylemez."""
+    A note is REQUIRED for a revision (same contract as the existing approval
+    flow): "revise" by itself doesn't tell the designer what to do."""
     link = _link_or_404(token)
     if not ratelimit.hit(f'onay:{token}', 40, 60):
-        return jsonify(error='çok fazla istek, biraz bekleyin'), 429
+        return jsonify(error='too many requests, please wait a moment'), 429
     data = request.get_json(silent=True) or {}
     act = data.get('action')
     if act not in ('approve', 'revise'):
-        return jsonify(error='geçersiz işlem'), 400
+        return jsonify(error='invalid action'), 400
     note = (data.get('note') or '').strip()
     if act == 'revise' and not note:
-        return jsonify(error='revize için not zorunlu'), 400
+        return jsonify(error='a note is required for a revision'), 400
     upload_id = data.get('upload_id')
     up = next((u for u in _uploads(link) if u.id == upload_id), None)
     if up is None:
@@ -189,7 +194,7 @@ def decision(token):
     rv.note = note[:1000] or None
     rv.at = utcnow()
     db.session.flush()
-    # Yazımdan SONRA, commit'ten ÖNCE (review.py ile aynı sıra).
+    # AFTER the write, BEFORE the commit (same order as review.py).
     notify_client_review(link.client_id, up.week_iso, status)
     db.session.commit()
     return jsonify(ok=True, review=rv.to_dict())
@@ -197,20 +202,21 @@ def decision(token):
 
 @bp.post('/onay/<token>/note')
 def note(token):
-    """Not defteri — otomatik kaydedilir (sayfa debounce'lar).
+    """Notepad — auto-saved (the page debounces).
 
-    Bildirim **not METNİ değiştiğinde** gider; aynı içerik tekrar POST edilirse
-    (alan her duraklamada gönderiyor) bildirim üretilmez, art arda gelen gerçek
-    değişiklikleri de `approval_note` coalesce penceresi (30 dk) toplar.
-    **2026-08-07'de değişti:** önce yalnız ilk yazımda bildiriliyordu, müşteri
-    saatler sonra yeni not yazınca kimse haber alamıyordu (canlı denemede çıktı).
-    `note_notified_at` artık kapı değil, SON bildirim zamanının izi."""
+    A notification only fires **when the note TEXT changes**; if the same
+    content is POSTed again (the field sends on every pause), no notification
+    is generated, and the `approval_note` coalesce window (30 min) batches
+    genuine consecutive changes too. **Changed on 2026-08-07:** it used to
+    notify only on the first write, so when the client wrote a new note hours
+    later nobody heard about it (found during a live trial). `note_notified_at`
+    is no longer a gate, it's a record of the LAST notification time."""
     link = _link_or_404(token)
     if not ratelimit.hit(f'onaynot:{token}', 60, 60):
-        return jsonify(error='çok fazla istek, biraz bekleyin'), 429
+        return jsonify(error='too many requests, please wait a moment'), 429
     metin = (request.get_json(silent=True) or {}).get('note')
     if not isinstance(metin, str):
-        return jsonify(error='note zorunlu'), 400
+        return jsonify(error='note is required'), 400
     metin = metin.strip()[:NOTE_MAX]
     degisti = bool(metin) and metin != (link.note or '')
     link.note = metin or None
@@ -232,14 +238,15 @@ def page(token):
                     headers={'X-Robots-Tag': 'noindex, nofollow'})
 
 
-# Palet ve tipografi `special_days.py` ile aynı (proje sahibi 2026-08-06: "görsel tasarımı
-# özel günler sayfalarındaki gibi olsun"). Sayfa tek dosya, inline CSS/JS.
+# Palette and typography match `special_days.py` (project owner's call,
+# 2026-08-06: "keep the visual design like the special-days pages"). The page
+# is a single file, inline CSS/JS.
 _PAGE = """<!doctype html>
 <html lang="tr"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow">
-<title>İçerik Onayı</title>
+<title>Content Approval</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet">
@@ -341,23 +348,23 @@ _PAGE = """<!doctype html>
 </style></head>
 <body>
   <header class="page-header">
-    <div class="logo-lockup"><img class="logo-img" src="/panel/kotar-logo.png" alt="Kotar — dijital medya ajansı"></div>
-    <p class="header-eyebrow">İÇERİK ONAYI</p>
-    <h1 class="header-title">Hazırladığımız<br><em>İçerikler</em></h1>
+    <div class="logo-lockup"><img class="logo-img" src="/panel/kotar-logo.png" alt="Kotar — digital media agency"></div>
+    <p class="header-eyebrow">CONTENT APPROVAL</p>
+    <h1 class="header-title">The Content<br><em>We Prepared</em></h1>
     <p class="header-client" id="client"></p>
-    <p class="header-desc">Aşağıdaki içerikleri tek tek onaylayabilir ya da revize isteyebilirsiniz. Aklınıza takılan her şeyi <span class="yon-genis">sağdaki</span><span class="yon-dar">sayfanın altındaki</span> not alanına yazabilirsiniz — otomatik kaydedilir.</p>
+    <p class="header-desc">You can approve each item below individually or request a revision. You can write anything on your mind in the notes area <span class="yon-genis">on the right</span><span class="yon-dar">at the bottom of the page</span> — it saves automatically.</p>
   </header>
   <div class="divider"><div class="divider-line"></div></div>
   <div class="layout">
     <main>
       <div class="counter-chip"><div class="counter-inner"><div class="counter-dot"></div>
-        <p class="counter-text"><span id="countNum">0</span>/<span id="countTotal">0</span> içerik yanıtlandı</p></div></div>
-      <div class="cards" id="cards"><div class="empty-state">Yükleniyor…</div></div>
+        <p class="counter-text"><span id="countNum">0</span>/<span id="countTotal">0</span> items reviewed</p></div></div>
+      <div class="cards" id="cards"><div class="empty-state">Loading…</div></div>
     </main>
     <aside class="notepad">
-      <h2>Notlarınız</h2>
-      <p>Genel görüşleriniz, istekleriniz veya sonraki içerikler için fikirleriniz.</p>
-      <textarea id="note" placeholder="Buraya yazabilirsiniz…"></textarea>
+      <h2>Your Notes</h2>
+      <p>Your general feedback, requests, or ideas for future content.</p>
+      <textarea id="note" placeholder="You can write here…"></textarea>
       <div class="note-state" id="noteState"></div>
     </aside>
   </div>
@@ -368,7 +375,7 @@ const cardsEl=document.getElementById("cards"), countEl=document.getElementById(
       totalEl=document.getElementById("countTotal"), noteEl=document.getElementById("note"),
       noteState=document.getElementById("noteState"), lightbox=document.getElementById("lightbox"),
       lightboxImg=document.getElementById("lightboxImg");
-const KINDS={post:"Tasarım",video:"Video"};
+const KINDS={post:"Design",video:"Video"};
 let items=[];
 function esc(s){const d=document.createElement("div");d.textContent=s||"";return d.innerHTML;}
 function updateCounter(){
@@ -377,14 +384,14 @@ function updateCounter(){
 }
 function stateText(rv){
   if(!rv||!rv.status) return "";
-  if(rv.status==="approved") return "<b>Onayladınız.</b> Dilerseniz kararınızı değiştirebilirsiniz.";
-  return "<b>Revize istediniz.</b> Notunuz ekibimize iletildi."+(rv.note?" ("+esc(rv.note)+")":"");
+  if(rv.status==="approved") return "<b>You approved this.</b> You can change your decision if you'd like.";
+  return "<b>You requested a revision.</b> Your note has been sent to our team."+(rv.note?" ("+esc(rv.note)+")":"");
 }
 function mediaBlock(it){
   if(it.video_url) return `<div class="media-wrap"><video controls preload="metadata" playsinline src="${it.video_url}"></video></div>`;
-  if(it.kind==="video"&&it.drive_url) return `<div class="media-wrap"><div class="media-fallback">Videoyu görüntülemek için <a href="${it.drive_url}" target="_blank" rel="noreferrer">buraya tıklayın</a>.</div></div>`;
+  if(it.kind==="video"&&it.drive_url) return `<div class="media-wrap"><div class="media-fallback">To view the video, <a href="${it.drive_url}" target="_blank" rel="noreferrer">click here</a>.</div></div>`;
   if(it.media_url) return `<div class="media-wrap"><img loading="lazy" src="${it.media_url}?size=full" alt="${esc(it.file_name)}"></div>`;
-  return `<div class="media-wrap"><div class="media-fallback">Önizleme yok.</div></div>`;
+  return `<div class="media-wrap"><div class="media-fallback">No preview available.</div></div>`;
 }
 function card(it){
   const el=document.createElement("article");
@@ -395,16 +402,16 @@ function card(it){
   el.innerHTML=`${mediaBlock(it)}
     <div class="item-body">
       <div class="item-top">
-        <div class="item-name">${esc(it.file_name)||"İçerik"}</div>
+        <div class="item-name">${esc(it.file_name)||"Content"}</div>
         <div class="item-badge">${KINDS[it.kind]||it.kind}</div>
       </div>
       <div class="actions">
-        <button class="btn btn-approve${rv&&rv.status==="approved"?" on-approve":""}" type="button">Onaylıyorum</button>
-        <button class="btn btn-revise${rv&&rv.status==="revision_requested"?" on-revise":""}" type="button">Revize istiyorum</button>
+        <button class="btn btn-approve${rv&&rv.status==="approved"?" on-approve":""}" type="button">Approve</button>
+        <button class="btn btn-revise${rv&&rv.status==="revision_requested"?" on-revise":""}" type="button">Request revision</button>
       </div>
       <div class="revise-box">
-        <textarea placeholder="Neyin değişmesini istersiniz?">${esc(rv&&rv.status==="revision_requested"?rv.note:"")}</textarea>
-        <button class="revise-send" type="button">Revize talebini gönder</button>
+        <textarea placeholder="What would you like changed?">${esc(rv&&rv.status==="revision_requested"?rv.note:"")}</textarea>
+        <button class="revise-send" type="button">Send revision request</button>
       </div>
       <div class="state-line${rv&&rv.status?" show":""}">${stateText(rv)}</div>
     </div>`;
@@ -420,7 +427,7 @@ function card(it){
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({upload_id:it.id,action,note:note||""})});
       const d=await r.json().catch(()=>({}));
-      if(!r.ok){ line.innerHTML="Gönderilemedi, tekrar deneyin."; line.classList.add("show"); return; }
+      if(!r.ok){ line.innerHTML="Couldn't send, please try again."; line.classList.add("show"); return; }
       it.review=d.review;
       approveBtn.classList.toggle("on-approve",action==="approve");
       reviseBtn.classList.toggle("on-revise",action==="revise");
@@ -429,7 +436,7 @@ function card(it){
       box.classList.remove("open");
       line.innerHTML=stateText(it.review); line.classList.add("show");
       updateCounter();
-    }catch{ line.innerHTML="Bağlantı hatası, tekrar deneyin."; line.classList.add("show"); }
+    }catch{ line.innerHTML="Connection error, please try again."; line.classList.add("show"); }
     finally{ btn.disabled=false; }
   }
   approveBtn.addEventListener("click",()=>{ box.classList.remove("open"); decide("approve","",approveBtn); });
@@ -446,12 +453,12 @@ document.addEventListener("keydown",e=>{ if(e.key==="Escape") lightbox.classList
 async function load(){
   let d;
   try{ const r=await fetch(`/onay/${TOKEN}/items`); if(!r.ok)throw 0; d=await r.json(); }
-  catch{ cardsEl.innerHTML='<div class="empty-state">Bu bağlantı geçersiz.</div>'; return; }
+  catch{ cardsEl.innerHTML='<div class="empty-state">This link is invalid.</div>'; return; }
   document.getElementById("client").textContent=d.client_name||"";
   noteEl.value=d.note||"";
   items=d.items||[];
   updateCounter();
-  if(!items.length){ cardsEl.innerHTML='<div class="empty-state">Bu bağlantıda içerik kalmamış.</div>'; return; }
+  if(!items.length){ cardsEl.innerHTML='<div class="empty-state">There is no content left on this link.</div>'; return; }
   cardsEl.innerHTML="";
   items.forEach((it,i)=>{ const el=card(it); cardsEl.appendChild(el);
     setTimeout(()=>el.classList.add("visible"),120+i*70); });
@@ -459,17 +466,17 @@ async function load(){
 // Not defteri: yazma durduktan 900ms sonra kaydeder (her tuşta istek atmaz).
 let noteTimer=null, noteSon="";
 noteEl.addEventListener("input",()=>{
-  noteState.textContent="yazılıyor…";
+  noteState.textContent="typing…";
   clearTimeout(noteTimer);
   noteTimer=setTimeout(async()=>{
     const val=noteEl.value;
-    if(val===noteSon){ noteState.textContent="kaydedildi"; return; }
+    if(val===noteSon){ noteState.textContent="saved"; return; }
     try{
       const r=await fetch(`/onay/${TOKEN}/note`,{method:"POST",
         headers:{"Content-Type":"application/json"},body:JSON.stringify({note:val})});
-      if(r.ok){ noteSon=val; noteState.textContent="kaydedildi"; }
-      else noteState.textContent="kaydedilemedi, tekrar deneyin";
-    }catch{ noteState.textContent="bağlantı hatası"; }
+      if(r.ok){ noteSon=val; noteState.textContent="saved"; }
+      else noteState.textContent="couldn't save, try again";
+    }catch{ noteState.textContent="connection error"; }
   },900);
 });
 load();

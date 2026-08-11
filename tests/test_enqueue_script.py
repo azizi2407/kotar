@@ -1,6 +1,6 @@
-"""scripts/enqueue_job.py — genel enqueue script'inin test edilebilir çekirdeği.
+"""scripts/enqueue_job.py — the testable core of the generic enqueue script.
 
-Gerçek DB round-trip (conftest sqlite + app_context autouse); mock yok.
+Real DB round-trip (conftest sqlite + app_context autouse); no mocks.
 """
 import json
 
@@ -19,7 +19,7 @@ def test_run_dogru_tip_ve_payload_ile_job_olusturur(client):
     assert j.payload == {"week_iso": "2026-W29"}
     assert j.created_by == "cli"
 
-    # DB'de gerçekten var mı — round-trip
+    # is it actually there in the DB — round-trip
     row = db.session.get(Job, j.id)
     assert row is not None and row.type == "brief"
 

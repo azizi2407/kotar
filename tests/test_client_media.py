@@ -1,7 +1,7 @@
-"""Müşteri medya sayfası uçları — GET /clients/<id>/media + POST /uploads/move-week.
+"""Client media page endpoints — GET /clients/<id>/media + POST /uploads/move-week.
 
-Drive katmanı mock'lanır (ağa çıkış yok). Taşımanın Drive tarafı `move_file`
-çağrılarıyla, panel tarafı `week_iso`/`moved_from_week_iso` alanlarıyla doğrulanır.
+The Drive layer is mocked (no network calls). The Drive side of a move is verified
+via `move_file` calls, the panel side via the `week_iso`/`moved_from_week_iso` fields.
 """
 import pytest
 from conftest import CONTENT_CREATOR, DESIGNER, MANAGER, login_as
@@ -18,7 +18,7 @@ def client_id(client):
 
 @pytest.fixture
 def fake_drive(monkeypatch):
-    """`dg.available` + `dg.move_file` taklidi. Çağrılar listede birikir."""
+    """Fakes `dg.available` + `dg.move_file`. Calls accumulate in the list."""
     calls = []
 
     def fake_move(file_id, new_parent, old_parent=None):
@@ -106,7 +106,7 @@ def test_medya_haftalar_azalan_sirali(client, client_id):
 
 
 def test_medya_bos_komsu_haftalar_da_doner(client, client_id):
-    """Dosyası olmayan komşu haftalar sürükleme HEDEFİ olarak render edilmeli."""
+    """Neighboring weeks with no files must still render as drag-and-drop TARGETS."""
     import sharing
     login_as(client, MANAGER)
     weeks = _weeks(client.get(f"/api/sharing/clients/{client_id}/media").get_json())
@@ -129,7 +129,7 @@ def test_medya_used_bayragi(client, client_id):
     _upload(client_id, "2026-W20", file_id="B")
     _upload(client_id, "2026-W20", file_id="C")
     _share(client_id, "2026-W20", "A")
-    _share(client_id, "2026-W20", "C", deleted=True)   # silinmiş kart sayılmaz
+    _share(client_id, "2026-W20", "C", deleted=True)   # a deleted card doesn't count
     login_as(client, MANAGER)
     ups = _weeks(client.get(f"/api/sharing/clients/{client_id}/media").get_json())["2026-W20"]
     used = {u["file_id"]: u["used"] for u in ups}
@@ -188,7 +188,7 @@ def test_tasima_content_creator_403(client, client_id, fake_drive):
 
 
 def test_tasima_karisik_kaynak_haftalar_tek_istekte(client, client_id, fake_drive):
-    """Bu ucun `move-files`'tan farkı: kaynak hafta HER KAYITTAN okunur."""
+    """This endpoint differs from `move-files`: the source week is read from EACH RECORD."""
     _week_folder(client_id, 20, "KLASOR20")
     _week_folder(client_id, 21, "KLASOR21")
     _week_folder(client_id, 22, "KLASOR22")
@@ -203,7 +203,7 @@ def test_tasima_karisik_kaynak_haftalar_tek_istekte(client, client_id, fake_driv
 
 
 def test_tasima_kaynak_klasor_kaydi_yoksa_none_gecer(client, client_id, fake_drive):
-    """Klasör kaydı yoksa `move_file` dosyanın mevcut parent'ını kendisi çözer."""
+    """If there's no folder record, `move_file` resolves the file's current parent itself."""
     _week_folder(client_id, 22, "KLASOR22")
     uid = _upload(client_id, "2026-W20", file_id="A")
     login_as(client, MANAGER)
@@ -214,7 +214,7 @@ def test_tasima_kaynak_klasor_kaydi_yoksa_none_gecer(client, client_id, fake_dri
 
 
 def test_tasima_drive_hatasi_kismi_basari(client, client_id, fake_drive, monkeypatch):
-    """Tek dosya patlayınca toplu taşıma çökmez: kalanlar taşınır, hata döner."""
+    """When a single file fails, the bulk move doesn't crash: the rest are moved, an error is returned."""
     _week_folder(client_id, 22, "KLASOR22")
     a = _upload(client_id, "2026-W20", file_id="PATLA", name="kotu.jpg")
     b = _upload(client_id, "2026-W20", file_id="IYI", name="iyi.jpg")
@@ -237,8 +237,8 @@ def test_tasima_drive_hatasi_kismi_basari(client, client_id, fake_drive, monkeyp
 
     from extensions import db
     from models_sharing import CardUpload
-    assert db.session.get(CardUpload, a).week_iso == "2026-W20"   # taşınmadı
-    assert db.session.get(CardUpload, b).week_iso == "2026-W22"   # taşındı
+    assert db.session.get(CardUpload, a).week_iso == "2026-W20"   # not moved
+    assert db.session.get(CardUpload, b).week_iso == "2026-W22"   # moved
 
 
 def test_tasima_capraz_musteri_400(client, client_id, fake_drive):
@@ -299,7 +299,7 @@ def test_tasima_ayni_haftaya_drive_cagrisi_yapmaz(client, client_id, fake_drive)
 
 
 def test_tasima_hedef_klasor_yoksa_400(client, client_id, monkeypatch):
-    """Hedef hafta klasörü yok ve Drive'da oluşturulamıyorsa taşıma reddedilir."""
+    """If the target week's folder doesn't exist and can't be created on Drive, the move is rejected."""
     import drive_gateway
     monkeypatch.setattr(drive_gateway, "available", lambda: True)
     monkeypatch.setattr(drive_gateway, "ensure_subfolder",

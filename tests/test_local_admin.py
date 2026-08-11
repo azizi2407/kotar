@@ -1,7 +1,7 @@
-"""local_admin.py — yerel kullanıcı yönetimi (AUTH_MODE=local, DB'li, ağsız).
+"""local_admin.py — local user management (AUTH_MODE=local, DB-backed, no network).
 
-Hem modül fonksiyonlarını hem `/api/admin/*` uçlarını kapsar. Global test
-varsayılanı zaten AUTH_MODE=local (bkz. conftest.py) — ayrı monkeypatch gerekmez.
+Covers both the module functions and the `/api/admin/*` endpoints. The global test
+default is already AUTH_MODE=local (see conftest.py) — no separate monkeypatch needed.
 """
 import pytest
 
@@ -23,7 +23,7 @@ def test_create_user_gecici_parola_doner(app):
         assert out['role'] == 'designer'
         assert 'temp_password' in out and len(out['temp_password']) > 8
         row = LocalUser.query.filter_by(email='yeni@test.com').one()
-        assert row.password_hash != out['temp_password']  # hash'lenmiş, düz metin değil
+        assert row.password_hash != out['temp_password']  # hashed, not plain text
 
 
 def test_create_user_userref_senkronlar(app):

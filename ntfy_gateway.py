@@ -1,17 +1,19 @@
-"""ntfy kanalı — bildirimi kullanıcının telefonuna gönderir (2026-08-05).
+"""ntfy channel — sends the notification to the user's phone (2026-08-05).
 
-Tek iş: HTTP POST. Kararı çağıran verir (`notify_rules.should_push_ntfy`),
-burada yalnız teslimat var.
+A single job: HTTP POST. The caller makes the decision
+(`notify_rules.should_push_ntfy`), only delivery lives here.
 
-**Best-effort ve SENKRON.** ntfy sunucusu localhost'ta (127.0.0.1:2586, podman)
-— Drive/Magnific gibi dış servis değil, gecikmesi milisaniye. Job kuyruğuna
-atmak worker poll aralığı kadar gecikme eklerdi ve "anlık bildirim"in anlamı
-kalmazdı. Buna karşılık hiçbir hata çağıranı etkilemez: bildirim satırı DB'ye
-zaten yazıldı, telefona gitmemesi paneli bozmamalı.
+**Best-effort and SYNCHRONOUS.** The ntfy server is on localhost (127.0.0.1:2586,
+podman) — not an external service like Drive/Magnific, its latency is
+milliseconds. Putting it on the job queue would add a delay of the worker's poll
+interval, and "instant notification" would lose its meaning. In return, no error
+affects the caller: the notification row is already written to the DB, it not
+reaching the phone shouldn't break the panel.
 
-Yazma token'lı (`NTFY_TOKEN`): ntfy'de `auth-default-access: read-only`, yani
-token'sız kimse mesaj üretemez. Okuma tarafı topic adının gizliliğine dayanır —
-topic'ler 32-hex rastgele ve yalnız sahibine gösterilir.
+Writing requires a token (`NTFY_TOKEN`): ntfy has `auth-default-access:
+read-only`, meaning nobody can produce a message without a token. Reading relies
+on the secrecy of the topic name — topics are random 32-hex and are shown only
+to their owner.
 """
 import logging
 import os
@@ -30,28 +32,30 @@ def base_url():
 
 
 def available():
-    """Kanal yapılandırılmış mı? (env yoksa panel sessizce panel-içi kanalla çalışır)"""
+    """Is the channel configured? (if the env is missing, the panel silently falls
+    back to the in-panel channel)"""
     return bool(base_url() and os.environ.get('NTFY_TOKEN'))
 
 
 def _baslik(value):
-    """Başlığı UTF-8 BYTES olarak ver.
+    """Give the title as UTF-8 BYTES.
 
-    requests header'ı str alırsa latin-1'e encode eder ve "Çekim fotoğrafı" →
-    "?ekim foto?raf?" olur (2026-08-05'te canlıda görüldü). ntfy sunucusu başlıkta
-    ham UTF-8 kabul ediyor (curl ile doğrulandı: 'Çekim fotoğrafı … İĞÜŞÖÇ' aynen
-    döndü), bytes vererek requests'in kodlamasını atlıyoruz. Başlık ayrıca tek
-    satıra indirgenir: HTTP başlığında satır sonu istek bölme (header injection)
-    riskidir ve bildirim başlıkları kullanıcı metni taşıyabiliyor (anons)."""
+    If requests receives the header as str it encodes it to latin-1, turning
+    "Çekim fotoğrafı" into "?ekim foto?raf?" (seen live on 2026-08-05). The ntfy
+    server accepts raw UTF-8 in the header (verified with curl: 'Çekim fotoğrafı
+    … İĞÜŞÖÇ' came back unchanged); by passing bytes we bypass requests' own
+    encoding. The title is also collapsed to a single line: a line break in an
+    HTTP header is a request-splitting risk (header injection), and notification
+    titles can carry user text (announcements)."""
     tek_satir = ' '.join((value or '').split())
     return tek_satir.encode('utf-8')
 
 
 def send(topic, title, body, severity=NORMAL, click_url=None):
-    """Tek bildirim gönder. Başarılıysa True; her hata durumunda False (yutulur).
+    """Send a single notification. True on success; False on any error (swallowed).
 
-    Not: `click_url` panelin ilgili sayfası — telefondan bildirime dokununca
-    doğrudan oraya gider (`Notification.link` alanı)."""
+    Note: `click_url` is the corresponding panel page — tapping the notification
+    on the phone goes straight there (the `Notification.link` field)."""
     if not available() or not topic:
         return False
     headers = {
@@ -70,6 +74,6 @@ def send(topic, title, body, severity=NORMAL, click_url=None):
                         topic, r.status_code, r.text[:200])
             return False
         return True
-    except Exception as e:  # noqa: BLE001 — teslimat en-iyi-çaba, panel akışı kritik
+    except Exception as e:  # noqa: BLE001 — delivery is best-effort, the panel flow is critical
         log.warning('ntfy isteği başarısız (topic=%s): %s', topic, e)
         return False

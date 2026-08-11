@@ -1,6 +1,6 @@
-// Reklam Takibi (/reklam) — yalnız management. Müşteri başına reklam çıkışları:
-// tarih aralığı, harcanan tutar, platform, durum, sonuç metrikleri, notlar.
-// Üstte filtre + özet (toplam & müşteri bazlı kırılım), altta kayıt tablosu.
+// Ad Tracking (/reklam) — management only. Per-client ad campaigns: date range,
+// amount spent, platform, status, result metrics, notes.
+// Filters + summary (total & per-client breakdown) on top, records table below.
 import { useMemo, useState } from "react"
 import { GanttChartSquare, List, Megaphone, Pencil, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
@@ -14,9 +14,10 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Textarea } from "@/components/ui/textarea"
 import { useClients } from "@/lib/clients"
 import {
-  fmtDateRange, fmtTRY, PLATFORM_LABELS, STATUS_LABELS, useAds, useCreateAd, useDeleteAd,
+  fmtDateRange, fmtTRY, useAds, useCreateAd, useDeleteAd, usePlatformLabels, useStatusLabels,
   useUpdateAd, type AdCampaign, type AdFilters, type AdInput,
 } from "@/lib/ads"
+import { useI18n } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
 const STATUS_TONE: Record<string, string> = {
@@ -31,7 +32,10 @@ function todayStr() {
 }
 
 export function AdsPage() {
-  // İlk girişte AKTİF reklamlar, zaman çizelgesi görünümünde (proje sahibi isteği 2026-07-24).
+  const { t } = useI18n()
+  const PLATFORM_LABELS = usePlatformLabels()
+  const STATUS_LABELS = useStatusLabels()
+  // On first load, show ACTIVE ads in timeline view (project owner's request, 2026-07-24).
   const [filters, setFilters] = useState<AdFilters>({ status: "active" })
   const [view, setView] = useState<"timeline" | "list">("timeline")
   const [editing, setEditing] = useState<AdCampaign | null>(null)
@@ -45,10 +49,10 @@ export function AdsPage() {
   const summary = adsQ.data?.summary
 
   function onDelete(c: AdCampaign) {
-    if (!window.confirm(`"${c.title || c.client_name}" reklam kaydı silinsin mi?`)) return
+    if (!window.confirm(t("pages.ads.confirmDelete", { name: c.title || c.client_name || "" }))) return
     del.mutate(c.id, {
-      onSuccess: () => toast.success("Kayıt silindi"),
-      onError: (e) => toast.error(e instanceof Error ? e.message : "Silinemedi"),
+      onSuccess: () => toast.success(t("pages.ads.deleted")),
+      onError: (e) => toast.error(e instanceof Error ? e.message : t("pages.ads.deleteFailed")),
     })
   }
 
@@ -57,93 +61,93 @@ export function AdsPage() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="flex items-center gap-2 text-xl font-semibold">
-            <Megaphone className="h-5 w-5" /> Reklam Takibi
+            <Megaphone className="h-5 w-5" /> {t("pages.ads.title")}
           </h1>
           <p className="text-sm text-muted-foreground">
-            Reklam çıktığımız müşteriler: tarih aralığı, harcanan tutar ve notlar.
+            {t("pages.ads.subtitle")}
           </p>
         </div>
         <div className="flex items-center gap-2">
           <div className="flex rounded-md border p-0.5">
             <Button size="sm" variant={view === "timeline" ? "secondary" : "ghost"} className="h-7 px-2"
-              onClick={() => setView("timeline")} title="Zaman çizelgesi">
-              <GanttChartSquare className="mr-1 h-4 w-4" /> Zaman Çizelgesi
+              onClick={() => setView("timeline")} title={t("pages.ads.timeline")}>
+              <GanttChartSquare className="mr-1 h-4 w-4" /> {t("pages.ads.timeline")}
             </Button>
             <Button size="sm" variant={view === "list" ? "secondary" : "ghost"} className="h-7 px-2"
-              onClick={() => setView("list")} title="Liste">
-              <List className="mr-1 h-4 w-4" /> Liste
+              onClick={() => setView("list")} title={t("pages.ads.list")}>
+              <List className="mr-1 h-4 w-4" /> {t("pages.ads.list")}
             </Button>
           </div>
           <Button onClick={() => setAdding(true)}>
-            <Plus className="mr-1 h-4 w-4" /> Reklam ekle
+            <Plus className="mr-1 h-4 w-4" /> {t("pages.ads.addAd")}
           </Button>
         </div>
       </div>
 
-      {/* Filtreler */}
+      {/* Filters */}
       <div className="flex flex-wrap items-end gap-2 rounded-lg border p-3">
         <div className="space-y-1">
-          <Label className="text-xs">Müşteri</Label>
+          <Label className="text-xs">{t("pages.ads.client")}</Label>
           <select
             className="h-9 w-48 rounded-md border bg-background px-2 text-sm"
             value={filters.client_id ?? ""}
             onChange={(e) => setFilters({ ...filters, client_id: e.target.value ? Number(e.target.value) : null })}
           >
-            <option value="">Tümü</option>
+            <option value="">{t("pages.ads.all")}</option>
             {(clientsQ.data ?? []).map((c) => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
         </div>
         <div className="space-y-1">
-          <Label className="text-xs">Durum</Label>
+          <Label className="text-xs">{t("pages.ads.status")}</Label>
           <select
             className="h-9 rounded-md border bg-background px-2 text-sm"
             value={filters.status ?? ""}
             onChange={(e) => setFilters({ ...filters, status: e.target.value })}
           >
-            <option value="">Tümü</option>
+            <option value="">{t("pages.ads.all")}</option>
             {Object.entries(STATUS_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
           </select>
         </div>
         <div className="space-y-1">
-          <Label className="text-xs">Platform</Label>
+          <Label className="text-xs">{t("pages.ads.platform")}</Label>
           <select
             className="h-9 rounded-md border bg-background px-2 text-sm"
             value={filters.platform ?? ""}
             onChange={(e) => setFilters({ ...filters, platform: e.target.value })}
           >
-            <option value="">Tümü</option>
+            <option value="">{t("pages.ads.all")}</option>
             {Object.entries(PLATFORM_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
           </select>
         </div>
         <div className="space-y-1">
-          <Label className="text-xs">Başlangıç</Label>
+          <Label className="text-xs">{t("pages.ads.startDate")}</Label>
           <Input type="date" className="h-9 w-40" value={filters.from ?? ""}
             onChange={(e) => setFilters({ ...filters, from: e.target.value })} />
         </div>
         <div className="space-y-1">
-          <Label className="text-xs">Bitiş</Label>
+          <Label className="text-xs">{t("pages.ads.endDate")}</Label>
           <Input type="date" className="h-9 w-40" value={filters.to ?? ""}
             onChange={(e) => setFilters({ ...filters, to: e.target.value })} />
         </div>
         {(filters.client_id || filters.status || filters.platform || filters.from || filters.to) && (
-          <Button variant="ghost" size="sm" onClick={() => setFilters({})}>Filtreleri temizle</Button>
+          <Button variant="ghost" size="sm" onClick={() => setFilters({})}>{t("pages.ads.clearFilters")}</Button>
         )}
       </div>
 
-      {/* Özet */}
+      {/* Summary */}
       {summary && (
         <div className="grid gap-3 md:grid-cols-3">
           <div className="rounded-lg border p-4">
-            <div className="text-xs text-muted-foreground">Toplam harcama (filtreli)</div>
+            <div className="text-xs text-muted-foreground">{t("pages.ads.totalSpendFiltered")}</div>
             <div className="mt-1 text-2xl font-semibold">{fmtTRY(summary.total_amount)}</div>
-            <div className="text-xs text-muted-foreground">{summary.count} kayıt</div>
+            <div className="text-xs text-muted-foreground">{t("pages.ads.recordCount", { count: summary.count })}</div>
           </div>
           <div className="rounded-lg border p-4 md:col-span-2">
-            <div className="mb-2 text-xs text-muted-foreground">Müşteri bazlı toplam</div>
+            <div className="mb-2 text-xs text-muted-foreground">{t("pages.ads.byClientTotal")}</div>
             {summary.by_client.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Kayıt yok</p>
+              <p className="text-sm text-muted-foreground">{t("pages.ads.noRecords")}</p>
             ) : (
               <div className="max-h-40 overflow-y-auto">
                 <table className="w-full text-sm">
@@ -151,7 +155,7 @@ export function AdsPage() {
                     {summary.by_client.map((b) => (
                       <tr key={b.client_id} className="border-b last:border-0">
                         <td className="py-1">{b.client_name}</td>
-                        <td className="py-1 text-right text-muted-foreground">{b.count} reklam</td>
+                        <td className="py-1 text-right text-muted-foreground">{t("pages.ads.adCount", { count: b.count })}</td>
                         <td className="py-1 text-right font-medium">{fmtTRY(b.total)}</td>
                       </tr>
                     ))}
@@ -163,11 +167,11 @@ export function AdsPage() {
         </div>
       )}
 
-      {/* Liste */}
+      {/* List */}
       {adsQ.isLoading && <Skeleton className="h-64 w-full" />}
       {adsQ.isError && (
         <p className="text-sm text-red-600">
-          {adsQ.error instanceof Error ? adsQ.error.message : "Kayıtlar yüklenemedi"}
+          {adsQ.error instanceof Error ? adsQ.error.message : t("pages.ads.loadFailed")}
         </p>
       )}
       {adsQ.isSuccess && view === "timeline" && (
@@ -179,21 +183,21 @@ export function AdsPage() {
           <table className="w-full text-sm">
             <thead className="border-b bg-muted/40 text-left text-xs text-muted-foreground">
               <tr>
-                <th className="px-3 py-2">Müşteri</th>
-                <th className="px-3 py-2">Kampanya</th>
-                <th className="px-3 py-2">Platform</th>
-                <th className="px-3 py-2">Tarih aralığı</th>
-                <th className="px-3 py-2 text-right">Harcanan</th>
-                <th className="px-3 py-2">Durum</th>
-                <th className="px-3 py-2 text-right">Erişim / Tıklama</th>
-                <th className="px-3 py-2">Not</th>
+                <th className="px-3 py-2">{t("pages.ads.client")}</th>
+                <th className="px-3 py-2">{t("pages.ads.campaign")}</th>
+                <th className="px-3 py-2">{t("pages.ads.platform")}</th>
+                <th className="px-3 py-2">{t("pages.ads.dateRange")}</th>
+                <th className="px-3 py-2 text-right">{t("pages.ads.spent")}</th>
+                <th className="px-3 py-2">{t("pages.ads.status")}</th>
+                <th className="px-3 py-2 text-right">{t("pages.ads.reachClicks")}</th>
+                <th className="px-3 py-2">{t("pages.ads.note")}</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
               {campaigns.length === 0 && (
                 <tr><td colSpan={9} className="px-3 py-6 text-center text-muted-foreground">
-                  Kayıt yok — "Reklam ekle" ile başla.
+                  {t("pages.ads.emptyList")}
                 </td></tr>
               )}
               {campaigns.map((c) => (
@@ -201,7 +205,7 @@ export function AdsPage() {
                   <td className="px-3 py-2 font-medium">{c.client_name}</td>
                   <td className="px-3 py-2">{c.title || "—"}</td>
                   <td className="px-3 py-2 text-muted-foreground">{PLATFORM_LABELS[c.platform] ?? c.platform}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">{fmtDateRange(c.start_date, c.end_date)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{fmtDateRange(c.start_date, c.end_date, t("pages.ads.ongoing"))}</td>
                   <td className="px-3 py-2 text-right font-medium">{fmtTRY(c.amount_spent)}</td>
                   <td className="px-3 py-2">
                     <span className={cn("rounded px-1.5 py-0.5 text-xs", STATUS_TONE[c.status])}>
@@ -218,10 +222,10 @@ export function AdsPage() {
                   </td>
                   <td className="px-3 py-2">
                     <div className="flex justify-end gap-1">
-                      <Button size="icon" variant="ghost" title="Düzenle" onClick={() => setEditing(c)}>
+                      <Button size="icon" variant="ghost" title={t("pages.ads.edit")} onClick={() => setEditing(c)}>
                         <Pencil className="h-4 w-4" />
                       </Button>
-                      <Button size="icon" variant="ghost" title="Sil" disabled={del.isPending}
+                      <Button size="icon" variant="ghost" title={t("pages.ads.delete")} disabled={del.isPending}
                         onClick={() => onDelete(c)}>
                         <Trash2 className="h-4 w-4 text-red-600" />
                       </Button>
@@ -252,6 +256,9 @@ function AdDialog({
   clients: { id: number; name: string }[]
   onClose: () => void
 }) {
+  const { t } = useI18n()
+  const PLATFORM_LABELS = usePlatformLabels()
+  const STATUS_LABELS = useStatusLabels()
   const create = useCreateAd()
   const update = useUpdateAd()
   const [form, setForm] = useState<AdInput>(() => ({
@@ -267,20 +274,23 @@ function AdDialog({
     notes: campaign?.notes ?? "",
   }))
   const busy = create.isPending || update.isPending
-  const title = useMemo(() => (campaign ? "Reklam kaydını düzenle" : "Reklam ekle"), [campaign])
+  const title = useMemo(
+    () => (campaign ? t("pages.ads.editTitle") : t("pages.ads.addAd")),
+    [campaign, t],
+  )
 
   async function submit() {
-    if (!form.client_id) { toast.error("Müşteri seçin"); return }
-    if (!form.start_date) { toast.error("Başlangıç tarihi gerekli"); return }
+    if (!form.client_id) { toast.error(t("pages.ads.selectClient")); return }
+    if (!form.start_date) { toast.error(t("pages.ads.startDateRequired")); return }
     const body: AdInput = { ...form, end_date: form.end_date || null,
       reach: form.reach === "" ? null : form.reach, clicks: form.clicks === "" ? null : form.clicks }
     try {
       if (campaign) await update.mutateAsync({ id: campaign.id, body })
       else await create.mutateAsync(body)
-      toast.success(campaign ? "Güncellendi" : "Reklam kaydı eklendi")
+      toast.success(campaign ? t("pages.ads.updated") : t("pages.ads.added"))
       onClose()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Kaydedilemedi")
+      toast.error(e instanceof Error ? e.message : t("pages.ads.saveFailed"))
     }
   }
 
@@ -291,7 +301,7 @@ function AdDialog({
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div className="col-span-2 space-y-1">
-              <Label>Müşteri</Label>
+              <Label>{t("pages.ads.client")}</Label>
               <select
                 className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                 value={form.client_id}
@@ -301,27 +311,27 @@ function AdDialog({
               </select>
             </div>
             <div className="col-span-2 space-y-1">
-              <Label>Kampanya adı</Label>
-              <Input value={form.title ?? ""} placeholder="örn. Ramazan Kampanyası"
+              <Label>{t("pages.ads.campaignName")}</Label>
+              <Input value={form.title ?? ""} placeholder={t("pages.ads.campaignNamePlaceholder")}
                 onChange={(e) => setForm({ ...form, title: e.target.value })} />
             </div>
             <div className="space-y-1">
-              <Label>Başlangıç</Label>
+              <Label>{t("pages.ads.start")}</Label>
               <Input type="date" value={form.start_date}
                 onChange={(e) => setForm({ ...form, start_date: e.target.value })} />
             </div>
             <div className="space-y-1">
-              <Label>Bitiş <span className="text-xs text-muted-foreground">(boş = devam ediyor)</span></Label>
+              <Label>{t("pages.ads.end")} <span className="text-xs text-muted-foreground">{t("pages.ads.endEmptyHint")}</span></Label>
               <Input type="date" value={form.end_date ?? ""}
                 onChange={(e) => setForm({ ...form, end_date: e.target.value })} />
             </div>
             <div className="space-y-1">
-              <Label>Harcanan tutar (₺)</Label>
+              <Label>{t("pages.ads.amountSpent")}</Label>
               <Input inputMode="decimal" placeholder="0,00" value={String(form.amount_spent ?? "")}
                 onChange={(e) => setForm({ ...form, amount_spent: e.target.value })} />
             </div>
             <div className="space-y-1">
-              <Label>Platform</Label>
+              <Label>{t("pages.ads.platform")}</Label>
               <select
                 className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                 value={form.platform}
@@ -331,7 +341,7 @@ function AdDialog({
               </select>
             </div>
             <div className="space-y-1">
-              <Label>Durum</Label>
+              <Label>{t("pages.ads.status")}</Label>
               <select
                 className="h-9 w-full rounded-md border bg-background px-2 text-sm"
                 value={form.status}
@@ -342,25 +352,25 @@ function AdDialog({
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1">
-                <Label className="text-xs">Erişim</Label>
+                <Label className="text-xs">{t("pages.ads.reach")}</Label>
                 <Input inputMode="numeric" value={String(form.reach ?? "")}
                   onChange={(e) => setForm({ ...form, reach: e.target.value })} />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">Tıklama</Label>
+                <Label className="text-xs">{t("pages.ads.clicks")}</Label>
                 <Input inputMode="numeric" value={String(form.clicks ?? "")}
                   onChange={(e) => setForm({ ...form, clicks: e.target.value })} />
               </div>
             </div>
             <div className="col-span-2 space-y-1">
-              <Label>Notlar</Label>
+              <Label>{t("pages.ads.notes")}</Label>
               <Textarea rows={3} value={form.notes ?? ""}
                 onChange={(e) => setForm({ ...form, notes: e.target.value })} />
             </div>
           </div>
           <div className="flex justify-end gap-2">
-            <Button variant="ghost" onClick={onClose} disabled={busy}>İptal</Button>
-            <Button onClick={submit} disabled={busy}>{busy ? "Kaydediliyor…" : "Kaydet"}</Button>
+            <Button variant="ghost" onClick={onClose} disabled={busy}>{t("pages.ads.cancel")}</Button>
+            <Button onClick={submit} disabled={busy}>{busy ? t("pages.ads.saving") : t("pages.ads.save")}</Button>
           </div>
         </div>
       </DialogContent>

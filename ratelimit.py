@@ -1,8 +1,8 @@
-"""Paylaşımlı hız sınırı — Postgres fixed-window (worker'lar arası ortak).
+"""Shared rate limit — Postgres fixed-window (shared across workers).
 
-Redis eleniyor + `limits` kütüphanesi Postgres desteklemiyor; bu yüzden basit,
-atomik bir fixed-window sayaç. `hit(bucket, max, window)` → izin verildi mi (bool).
-Public uçların (review/special-days) kötüye kullanımına karşı.
+Redis is out + the `limits` library doesn't support Postgres; hence a simple,
+atomic fixed-window counter. `hit(bucket, max, window)` → whether it was allowed (bool).
+Guards public endpoints (review/special-days) against abuse.
 """
 import time
 
@@ -11,7 +11,7 @@ from models import RateWindow
 
 
 def hit(bucket, max_count, window_seconds):
-    """Bir istek say; pencere içinde max_count'u aşmadıysa True döndür."""
+    """Count a request; return True if it hasn't exceeded max_count within the window."""
     now = int(time.time())
     window = now - (now % window_seconds)
     dialect = db.session.get_bind().dialect.name
@@ -25,7 +25,7 @@ def hit(bucket, max_count, window_seconds):
                     set_={'count': RateWindow.count + 1})
                 .returning(RateWindow.count))
         count = db.session.execute(stmt).scalar()
-    else:  # sqlite (test)
+    else:  # sqlite (tests)
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
         stmt = (sqlite_insert(RateWindow)
                 .values(bucket=bucket, window_start=window, count=1)
@@ -36,7 +36,7 @@ def hit(bucket, max_count, window_seconds):
         count = db.session.query(RateWindow.count).filter_by(
             bucket=bucket, window_start=window).scalar()
 
-    # Bu bucket'ın eski pencerelerini temizle (tablo şişmesin)
+    # Clean up this bucket's old windows (keep the table from bloating)
     db.session.query(RateWindow).filter(
         RateWindow.bucket == bucket, RateWindow.window_start < window).delete()
     db.session.commit()

@@ -1,4 +1,4 @@
-"""/api/sharing revision request akışı + auto-resolve + board durumu."""
+"""/api/sharing revision request flow + auto-resolve + board state."""
 import io
 
 import pytest
@@ -10,7 +10,7 @@ WK = "2026-W21"
 
 @pytest.fixture
 def ctx(client):
-    """management + müşteri + yayınlanmış post share. Döner (client_id, share_id)."""
+    """management + client + a published post share. Returns (client_id, share_id)."""
     login_as(client, MANAGER)
     cid = client.post("/api/clients", json={"name": "Rev Müşteri"},
                       headers=csrf_headers(client)).get_json()["client"]["id"]
@@ -26,17 +26,17 @@ def _req(client, cid, **kw):
     return client.post("/api/sharing/revision-request", json=body, headers=csrf_headers(client))
 
 
-# --- görünürlük kuralı (_visible_shares) ---
+# --- visibility rule (_visible_shares) ---
 
 class _S:
-    """Share taklidi — _visible_shares saf fonksiyon, DB gerekmez."""
+    """Share fake — _visible_shares is a pure function, no DB needed."""
     def __init__(self, id, kind="video", status="draft", revision=0):
         self.id, self.kind, self.status, self.revision = id, kind, status, revision
 
 
 def test_esit_revizyondaki_farkli_videolar_hepsi_gorunur():
-    """Regresyon: eşit revizyonda `max()` tek video bırakıyordu → 3 videodan 2'si
-    hem board'dan hem müşteri onay sayfasından kayboluyordu."""
+    """Regression: at equal revision, `max()` left only one video → 2 of 3 videos
+    were disappearing from both the board and the client approval page."""
     from sharing import _visible_shares
     shares = [_S(1), _S(2), _S(3)]
     assert sorted(s.id for s in _visible_shares(shares)) == [1, 2, 3]
@@ -88,7 +88,7 @@ def test_revisions_listesi_ve_resolve(client, ctx):
     r = client.post(f"/api/sharing/revisions/{rid}/resolve", headers=csrf_headers(client))
     assert r.status_code == 200
     assert r.get_json()["revision"]["status"] == "resolved"
-    # artık açık listede yok
+    # no longer in the open list
     lst2 = client.get("/api/sharing/revisions?status=open").get_json()["revisions"]
     assert not any(x["id"] == rid for x in lst2)
 
@@ -112,7 +112,7 @@ def test_upload_design_revizesini_auto_resolve(client, ctx, monkeypatch):
     monkeypatch.setattr(drive_gateway, "upload_file",
                         lambda *a, **k: {"id": "nf", "name": a[1], "mimeType": a[3], "size": "3"})
     rid = _req(client, cid, share_id=sid, kind="design").get_json()["revision"]["id"]
-    # tasarım yüklemesi (category post) → açık design revizyonu kapanır
+    # a design upload (category post) → the open design revision closes
     client.post("/api/sharing/upload",
                 data={"client_id": str(cid), "week_iso": WK, "category": "post",
                       "file": (io.BytesIO(b"img"), "x.jpg")},
@@ -131,7 +131,7 @@ def test_upload_video_design_revizesini_kapatmaz(client, ctx, monkeypatch):
     monkeypatch.setattr(drive_gateway, "upload_file",
                         lambda *a, **k: {"id": "nf", "name": a[1], "mimeType": a[3], "size": "3"})
     rid = _req(client, cid, kind="design").get_json()["revision"]["id"]
-    # video yüklemesi design revizyonunu KAPATMAMALI
+    # a video upload must NOT close a design revision
     client.post("/api/sharing/upload",
                 data={"client_id": str(cid), "week_iso": WK, "category": "video",
                       "file": (io.BytesIO(b"vid"), "v.mp4")},

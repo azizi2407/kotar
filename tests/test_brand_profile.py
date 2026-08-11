@@ -1,4 +1,4 @@
-"""Marka profili (Client.brand_profile) + global ayarlar (AppSetting) veri modeli."""
+"""Brand profile (Client.brand_profile) + global settings (AppSetting) data model."""
 from extensions import db
 from models import AppSetting, Client
 

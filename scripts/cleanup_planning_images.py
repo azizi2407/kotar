@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Planlama Panosu görsellerinin yetim dosyalarını temizler.
+"""Cleans up orphan files among Planning Board images.
 
-Bir görsel öğesi silinince dosya BİLEREK hemen silinmez: pano Ctrl+Z ile geri
-alınabiliyor ve öğe aynı `extra.image.name` ile geri gelebiliyor — dosyayı anında
-silmek geri almayı sessizce bozardı. Bunun yerine dosya yetim kalır ve bu script
-onu yeterince eskidiğinde alır.
+When an image item is deleted, the file is DELIBERATELY NOT deleted right away:
+the board can be undone with Ctrl+Z and the item can come back with the same
+`extra.image.name` — deleting the file immediately would silently break undo.
+Instead the file is left orphaned, and this script picks it up once it's old enough.
 
-YETİM = hiçbir `planning_items` satırının `extra->'image'->>'name'` değeriyle
-eşleşmeyen dosya. Yaş eşiği ayrıca yükleme yarışını kapatır: dosya yüklendikten
-sonra öğe PATCH'i saniyeler içinde gelir, 30 gün bunu fazlasıyla kapsar.
+ORPHAN = a file that doesn't match the `extra->'image'->>'name'` value of any
+`planning_items` row. The age threshold also closes the upload race: the item
+PATCH arrives within seconds of the file being uploaded, 30 days covers that
+with plenty of margin.
 
-Kullanım:
-    python scripts/cleanup_planning_images.py                # kuru koşu
-    python scripts/cleanup_planning_images.py --apply        # gerçekten sil
+Usage:
+    python scripts/cleanup_planning_images.py                # dry run
+    python scripts/cleanup_planning_images.py --apply        # actually delete
     python scripts/cleanup_planning_images.py --days 60 --apply
 """
 import argparse
@@ -22,7 +23,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import app  # noqa: E402  (env yüklü olmalı)
+from app import app  # noqa: E402  (env must be loaded)
 import planning_images  # noqa: E402
 from extensions import db  # noqa: E402
 from models_planning import PlanningItem  # noqa: E402
@@ -31,13 +32,13 @@ DEFAULT_DAYS = 30
 
 
 def run(days=DEFAULT_DAYS, apply=False):
-    """(silinen, korunan, bayt) döner. `apply=False` hiçbir şeye dokunmaz."""
+    """Returns (deleted, kept, bytes). `apply=False` touches nothing."""
     root = (os.environ.get('PLANNING_IMAGE_DIR')
             or os.path.join(app.root_path, 'data', 'planning-images'))
     if not os.path.isdir(root):
         return 0, 0, 0
 
-    # Kullanımdaki adlar — TEK sorgu, pano başına küme.
+    # Names in use — a SINGLE query, a set per board.
     used = {}
     for board_id, extra in db.session.query(PlanningItem.board_id, PlanningItem.extra).filter(
             PlanningItem.type == 'image').all():
@@ -56,13 +57,13 @@ def run(days=DEFAULT_DAYS, apply=False):
             p = os.path.join(d, name)
             if not os.path.isfile(p):
                 continue
-            # `.tmp-*` yarım yüklemedir: adı hiçbir öğede geçmez, aynı kurala tabi.
+            # `.tmp-*` is a half-finished upload: its name doesn't appear in any item, subject to the same rule.
             if name in keep:
                 korunan += 1
                 continue
             st = os.stat(p)
             if st.st_mtime > cutoff:
-                korunan += 1           # yetim ama henüz genç (yükleme yarışı)
+                korunan += 1           # orphan but still young (upload race)
                 continue
             silinen += 1
             bayt += st.st_size

@@ -1,9 +1,11 @@
-// Board kart şeridinde bir video yükleme kartı (videografçının o hafta yüklediği
-// video — 2026-07-21). Özel gün kartıyla aynı desen; mor/menekşe tema. Lokal kopya
-// varken (ilk 21 gün) video kart içinde oynar; süresi dolunca Drive linkine döner.
+// A video upload card in the board's card strip (the video the videographer uploaded
+// that week — 2026-07-21). Same pattern as the special day card; purple/violet theme.
+// While the local copy exists (first 21 days) it plays inside the video card; once it
+// expires it falls back to the Drive link.
 import { Clapperboard } from "lucide-react"
 
 import { mediaUrl, thumbnailUrl, type VideoUpload } from "@/lib/sharing"
+import { useI18n } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
 const CARD_CLS =
@@ -20,9 +22,10 @@ function Header({ date }: { date: string | null }) {
 }
 
 export function VideoUploadCard({ vu, className }: { vu: VideoUpload; className?: string }) {
+  const { lang } = useI18n()
   const href = vu.file_id ? `https://drive.google.com/file/d/${vu.file_id}/view` : undefined
   const date = vu.uploaded_at
-    ? new Date(vu.uploaded_at).toLocaleDateString("tr-TR", { day: "2-digit", month: "2-digit" })
+    ? new Date(vu.uploaded_at).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { day: "2-digit", month: "2-digit" })
     : null
 
   if (vu.local && vu.file_id) {

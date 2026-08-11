@@ -1,24 +1,25 @@
-"""Haftalık brief fikirlerinden parti görsel üretimi (2026-08-10).
+"""Batch image generation from weekly brief ideas (2026-08-10).
 
-Mevcut Codex hattının (`codex_image`) üzerine oturur: bu modül üretim YAPMAZ, yalnız
-hangi fikirlerin hangi varyantlarla kuyruğa gireceğine karar verir ve `ImageJob`
-satırlarını açar. Üretimin kendisi `ai_worker.codex_image_handler`'ın işidir ve o
-handler bu iş için DEĞİŞMEZ (yalnız prompt kurucusu seçimi eklenir).
+Sits on top of the existing Codex pipeline (`codex_image`): this module does
+NOT generate anything, it only decides which ideas go into the queue with
+which variants and opens `ImageJob` rows. Generation itself is
+`ai_worker.codex_image_handler`'s job, and that handler is UNCHANGED for this
+feature (only the prompt-builder selection is added).
 
-Neden ayrı modül: `imagegen_api.py` bir HTTP katmanı; fikir süzgeci ve idempotency
-kuralları saf mantıktır ve HTTP olmadan test edilebilmelidir.
+Why a separate module: `imagegen_api.py` is an HTTP layer; the idea filter and
+idempotency rules are pure logic and should be testable without HTTP.
 """
 import jobqueue
 from extensions import db
 from models_imagegen import VARIANTS, ImageJob
 
-# Video işareti taşıyan fikirler tek kare görsele dönüştürülmez. `format` alanı bazı
-# brief'lerde boş geliyor, bu yüzden `çekim_tipi` de taranır.
+# Ideas carrying a video marker are not converted into a single-frame image. The
+# `format` field comes back empty in some briefs, so `çekim_tipi` is also scanned.
 REEL_ISARETLERI = ('reel', 'video')
 
 
 def gorsele_uygun(idea):
-    """Bu fikir tek kare görsele dönüştürülebilir mi? (reel/video ise HAYIR)"""
+    """Can this idea be converted into a single-frame image? (NO if reel/video)"""
     if not isinstance(idea, dict):
         return False
     metin = f"{idea.get('format') or ''} {idea.get('çekim_tipi') or ''}".lower()
@@ -26,10 +27,10 @@ def gorsele_uygun(idea):
 
 
 def fikir_basligi(idea, index):
-    """Galeride ve hata mesajlarında kullanılacak insan-okur ad.
+    """Human-readable name for use in the gallery and error messages.
 
-    `başlık` yoksa `ad`a, o da yoksa sıra numarasına düşer — brief AI üretimi,
-    alanların dolu geleceği garanti değil."""
+    Falls back to `ad` if `başlık` is missing, and to the index number if that's
+    missing too — briefs are AI-generated, fields being populated isn't guaranteed."""
     if isinstance(idea, dict):
         for k in ('başlık', 'ad'):
             v = (idea.get(k) or '').strip()
@@ -39,19 +40,19 @@ def fikir_basligi(idea, index):
 
 
 def parti_plani(brief):
-    """Brief'in fikirlerini süz → `{'uygun': [...], 'skipped': [...]}`.
+    """Filters the brief's ideas → `{'uygun': [...], 'skipped': [...]}`.
 
-    DB'ye HİÇBİR ŞEY yazmaz — çağıran önce limit kontrolü yapabilsin diye plan ve
-    uygulama ayrı. `ideas` bozuk/eksikse boş plan döner (500 DEĞİL: brief AI üretimi,
-    şekli bozulabilir ve bu kullanıcıya 'bu brief'te görselleştirilecek fikir yok'
-    olarak gösterilmelidir)."""
+    Writes NOTHING to the DB — plan and apply are kept separate so the caller
+    can check limits first. Returns an empty plan if `ideas` is malformed/missing
+    (NOT a 500: briefs are AI-generated, their shape can break, and this should
+    show the user 'no ideas to visualize in this brief'."""
     ideas = getattr(brief, 'ideas', None)
     if not isinstance(ideas, list):
         return {'uygun': [], 'skipped': []}
     uygun, skipped = [], []
     for i, idea in enumerate(ideas):
         if not isinstance(idea, dict):
-            continue        # düz metin/sayı — kullanıcıya gösterilecek bir şey yok
+            continue        # plain text/number — nothing to show the user
         baslik = fikir_basligi(idea, i)
         if gorsele_uygun(idea):
             uygun.append({'index': i, 'idea': idea, 'baslik': baslik})
@@ -62,10 +63,10 @@ def parti_plani(brief):
 
 
 def mevcut_isler(client_id, week_iso):
-    """O hafta için açılmış işler → `{(brief_idea_index, variant): ImageJob}`.
+    """Jobs already opened for that week → `{(brief_idea_index, variant): ImageJob}`.
 
-    Idempotency'nin temeli: parti ikinci kez tetiklenirse `completed` olanlar atlanır,
-    `failed` olanlar yeniden üretilir (bkz. `uygulanacaklar`)."""
+    The basis of idempotency: if the batch is triggered a second time, `completed`
+    ones are skipped, `failed` ones are regenerated (see `uygulanacaklar`)."""
     rows = (ImageJob.query
             .filter(ImageJob.client_id == client_id,
                     ImageJob.week_iso == week_iso,
@@ -78,11 +79,11 @@ def mevcut_isler(client_id, week_iso):
 
 
 def musteri_logosu(client_id):
-    """Müşterinin aktif logo asset id'si; yoksa None.
+    """The client's active logo asset id; None if there isn't one.
 
-    Kullanıcı kuralı (2026-08-10): her görsel üretimine marka logosu referans olarak
-    gider. Logosu olmayan müşteride üretim ENGELLENMEZ — 29/32 müşteride logo var,
-    3 müşteri yüzünden hattı kilitlemenin karşılığı yok; panel uyarı gösterir."""
+    User rule (2026-08-10): the brand logo goes along as a reference in every
+    image generation. Generation is NOT BLOCKED for a client without a logo —
+    29/32 clients have one, locking the pipeline over 3 clients isn't worth it; the panel shows a warning instead."""
     from models import ClientAsset
     row = (ClientAsset.query
            .filter(ClientAsset.client_id == client_id,
@@ -92,21 +93,22 @@ def musteri_logosu(client_id):
            .first())
     return row.id if row is not None else None
 
-# Parti üretimi v1'de tek oran kullanır. `çekim_tipi`'nden oran türetmek v2 işidir
-# (spec §5); şimdi türetmek, brief metnine dayalı kırılgan bir tahmin olurdu.
+# Batch generation v1 uses a single aspect ratio. Deriving the ratio from
+# `çekim_tipi` is v2's job (spec §5); deriving it now would be a fragile guess based on brief text.
 BATCH_ASPECT = 'social_post_4_5'
 
-# Tamamlanmış iş yeniden üretilmez; bunun dışındaki her durum (failed/cancelled/yarım
-# kalmış queued) yeniden kuyruğa alınabilir.
+# A completed job is not regenerated; every other status (failed/cancelled/a
+# half-finished queued) can be re-queued.
 _ATLANACAK_DURUMLAR = ('completed',)
 
 
 def uygulanacaklar(plan, mevcut):
-    """Plandaki fikir × varyant kombinasyonlarından GERÇEKTEN üretilecek olanlar.
+    """Of the idea × variant combinations in the plan, the ones that will
+    ACTUALLY be generated.
 
-    `mevcut` (bkz. `mevcut_isler`) idempotency sağlar: `completed` bir satır varsa o
-    kombinasyon atlanır, `failed` varsa satır yeniden kullanılır. Böylece düğmeye
-    ikinci kez basmak kalanı tamamlar, olanı ikizlemez."""
+    `mevcut` (see `mevcut_isler`) provides idempotency: if a `completed` row
+    exists, that combination is skipped; if it's `failed`, the row is reused.
+    So pressing the button a second time completes what's left without duplicating what's done."""
     isler = []
     for u in plan['uygun']:
         for variant in VARIANTS:
@@ -120,14 +122,15 @@ def uygulanacaklar(plan, mevcut):
 
 
 def parti_uygula(client, brief, isler, requested_by):
-    """`ImageJob` satırlarını aç/sıfırla ve `codex_image` işlerini kuyruğa bas.
+    """Open/reset `ImageJob` rows and push `codex_image` jobs to the queue.
 
-    `resolved_prompt` BURADA KURULMAZ: onu handler kurar (`codex_image_handler`), çünkü
-    iş kuyrukta beklerken brief güncellenebilir ve üretim anındaki brief geçerli olmalı.
-    Handler'ın hangi kurucuyu çağıracağını `brief_idea_index`'in dolu olması belirler.
+    `resolved_prompt` is NOT BUILT HERE: the handler builds it
+    (`codex_image_handler`), because the brief can be updated while the job
+    waits in the queue, and the brief valid at generation time must be used.
+    Whether `brief_idea_index` is populated determines which builder the handler calls.
 
-    Her işe müşterinin logosu referans olarak eklenir (kullanıcı kuralı 2026-08-10);
-    logo yoksa liste boş kalır ve prompt'ta logo kısıtı yazılmaz."""
+    The client's logo is added as a reference to every job (user rule
+    2026-08-10); if there's no logo, the list stays empty and no logo constraint is written into the prompt."""
     logo_id = musteri_logosu(client.id)
     created = []
     for is_ in isler:
@@ -135,7 +138,7 @@ def parti_uygula(client, brief, isler, requested_by):
         if row is None:
             row = ImageJob(client_id=client.id, provider='codex_exec')
             db.session.add(row)
-        # Yeniden üretimde eski hatayı ve çıktıyı temizle — panelde bayat veri kalmasın.
+        # Clear the old error and output on regeneration — no stale data left in the panel.
         row.brief_id = brief.id
         row.week_iso = brief.week_iso
         row.brief_idea_index = is_['index']
@@ -146,10 +149,10 @@ def parti_uygula(client, brief, isler, requested_by):
         row.reference_asset_ids = [logo_id] if logo_id else []
         row.status = 'queued'
         row.resolved_prompt = None
-        row.prompt_json = None          # yeniden üretimde çeviri de tazelensin
+        row.prompt_json = None          # refresh the translation too on regeneration
         row.output_path = row.output_meta = None
         row.error_code = row.error_public = row.error_internal = None
-        db.session.flush()          # id gerek: dedup anahtarı ondan türüyor
+        db.session.flush()          # id is needed: the dedup key is derived from it
         created.append(row)
     db.session.commit()
 

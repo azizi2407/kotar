@@ -1,10 +1,10 @@
-"""Cutover C2 — yeni müşteri Drive klasör ağacı provizyonu testleri.
+"""Cutover C2 — new client Drive folder tree provisioning tests.
 
-GERÇEK Drive çağrısı YOK: `client_provision.dg` (drive_gateway) mock'lanır.
-Doğrulanan davranışlar:
-  - müşteri create → beklenen klasör ağacı (kök + 1..52 hafta) çağrıları yapılır,
-  - idempotent: mevcut klasör yeniden oluşturulmaz (tekrar provizyon 0 yeni satır),
-  - Drive hatası müşteri create'i BLOKLAMAZ (best-effort; hata yutulur).
+NO REAL Drive calls: `client_provision.dg` (drive_gateway) is mocked.
+Verified behaviors:
+  - client create → the expected folder tree (root + weeks 1..52) calls are made,
+  - idempotent: an existing folder is not recreated (a repeat provision adds 0 new rows),
+  - a Drive error does NOT BLOCK client create (best-effort; the error is swallowed).
 """
 import pytest
 from conftest import DESIGNER, MANAGER, login_as
@@ -18,11 +18,11 @@ CONTENT_ROOT = 'root_content_id'
 
 
 class FakeDrive:
-    """drive_gateway.ensure_subfolder taklidi — bul-veya-oluştur (idempotent)."""
+    """Imitates drive_gateway.ensure_subfolder — find-or-create (idempotent)."""
 
     def __init__(self):
         self.tree = {}          # (parent, name) -> id
-        self.calls = []         # [(parent, name), ...] sırayla
+        self.calls = []         # [(parent, name), ...] in order
         self._n = 0
 
     def ensure_subfolder(self, parent, name):
@@ -36,7 +36,7 @@ class FakeDrive:
 
 @pytest.fixture
 def fake_drive(monkeypatch):
-    """Drive kimliğini 'var' göster, kökü ayarla ve ensure_subfolder'ı mock'la."""
+    """Make Drive identity look 'available', set the root, and mock ensure_subfolder."""
     fake = FakeDrive()
     monkeypatch.setenv('DRIVE_CONTENT_ROOT_ID', CONTENT_ROOT)
     monkeypatch.setattr(cp.dg, 'available', lambda: True)
@@ -51,25 +51,25 @@ def _create(client):
     return r.get_json()['client']
 
 
-# --- Provizyon: klasör ağacı oluşur ---
+# --- Provisioning: folder tree is created ---
 
 def test_create_provizyon_klasor_agaci(client, fake_drive):
     login_as(client, MANAGER)
     data = _create(client)
 
-    # kök klasör içerik kökü altında, ada göre
+    # root folder under the content root, named after the client
     assert fake_drive.calls[0] == (CONTENT_ROOT, 'Örnek Kafe')
     client_root = fake_drive.tree[(CONTENT_ROOT, 'Örnek Kafe')]
-    # ardından 1..52 hafta alt klasörü, müşteri kökü altında, sırayla
+    # then weeks 1..52 subfolders, under the client root, in order
     assert fake_drive.calls[1:] == [(client_root, str(wn)) for wn in range(1, 53)]
 
-    # drive_meta kök linki + 52 ClientWeekFolder satırı yazıldı
+    # drive_meta root link + 52 ClientWeekFolder rows written
     assert data['drive_meta']['client_folder_link'].endswith(client_root)
     rows = ClientWeekFolder.query.filter_by(client_id=data['id']).all()
     assert {r.week_number for r in rows} == set(range(1, 53))
 
 
-# --- İdempotent: tekrar provizyon yeni satır üretmez ---
+# --- Idempotent: repeat provisioning produces no new rows ---
 
 def test_provizyon_idempotent(client, fake_drive):
     login_as(client, MANAGER)
@@ -81,14 +81,14 @@ def test_provizyon_idempotent(client, fake_drive):
 
     assert result == {'client_folder_id': before[(CONTENT_ROOT, 'Örnek Kafe')],
                       'weeks_created': 0}
-    # yeni klasör id üretilmedi (hepsi bul-ile karşılandı)
+    # no new folder ids were generated (all resolved via find)
     assert fake_drive.tree == before
-    # hafta satırı sayısı hâlâ 52 (mükerrer yok)
+    # week row count is still 52 (no duplicates)
     assert ClientWeekFolder.query.filter_by(client_id=c.id).count() == 52
 
 
 def test_provizyon_mevcut_kok_yeni_yaratmaz(client, fake_drive):
-    """drive_meta'da kök zaten kayıtlıysa içerik kökü altında yeni kök AÇILMAZ."""
+    """If the root is already recorded in drive_meta, no new root is OPENED under the content root."""
     login_as(client, MANAGER)
     c = Client(name='Göçen Müşteri',
                drive_meta={'client_folder_link':
@@ -98,12 +98,12 @@ def test_provizyon_mevcut_kok_yeni_yaratmaz(client, fake_drive):
 
     cp.provision_client_folders(c)
 
-    # içerik kökü altında ad-bazlı kök oluşturma çağrısı YOK; hafta klasörleri mevcut kök altında
+    # NO call to create a name-based root under the content root; week folders go under the existing root
     assert (CONTENT_ROOT, 'Göçen Müşteri') not in fake_drive.calls
     assert fake_drive.calls == [('mevcut_kok', str(wn)) for wn in range(1, 53)]
 
 
-# --- Best-effort: Drive hatası create'i bloklamaz ---
+# --- Best-effort: a Drive error doesn't block create ---
 
 def test_drive_hatasi_create_bloklamaz(client, fake_drive, monkeypatch):
     def boom(parent, name):
@@ -114,7 +114,7 @@ def test_drive_hatasi_create_bloklamaz(client, fake_drive, monkeypatch):
 
     r = client.post('/api/clients', json={'name': 'Hata Kafe'},
                     headers=csrf_headers(client))
-    # müşteri yine oluşur (201), sadece Drive provizyonu atlanır
+    # client is still created (201), only Drive provisioning is skipped
     assert r.status_code == 201
     data = r.get_json()['client']
     assert data['drive_meta'] is None
@@ -124,8 +124,8 @@ def test_drive_hatasi_create_bloklamaz(client, fake_drive, monkeypatch):
 
 
 def test_drive_hatasi_provision_failed_bildirimi_gonderir(client, fake_drive, monkeypatch):
-    """Drive hatasında yönetime 'provision_failed' bildirimi gönderilir (best-effort
-    ama sessiz değil — Observer bulgusu: bu davranış hiçbir testle korunmuyordu)."""
+    """On a Drive error, a 'provision_failed' notification is sent to management (best-effort
+    but not silent — Observer finding: this behavior wasn't covered by any test)."""
     def boom(parent, name):
         raise cp.dg.DriveError('drive erişilemedi')
 
@@ -144,15 +144,15 @@ def test_drive_hatasi_provision_failed_bildirimi_gonderir(client, fake_drive, mo
     assert len(notifs) == 1
     n = notifs[0]
     assert n.recipient_sub == MANAGER['sub']
-    assert n.title == 'Drive klasörü kurulamadı'
+    assert n.title == 'Could not set up Drive folder'
     assert 'Hata Kafe' in n.body
     assert n.link == f"/panel/clients/{data['id']}"
 
 
-# --- Kimlik/kök yoksa sessizce atla ---
+# --- Skip silently if identity/root is missing ---
 
 def test_drive_kimligi_yoksa_atlanir(client, monkeypatch):
-    """Drive kimliği yapılandırılmamışsa provizyon hiç çağrı yapmadan atlar."""
+    """If Drive identity isn't configured, provisioning is skipped without making any calls."""
     monkeypatch.setattr(cp.dg, 'available', lambda: False)
     login_as(client, MANAGER)
     data = _create(client)
@@ -172,7 +172,7 @@ def test_content_root_yoksa_atlanir(client, monkeypatch):
     assert data['drive_meta'] is None
 
 
-# --- Elle tamamlama ucu (mevcut müşteri) ---
+# --- Manual completion endpoint (existing client) ---
 
 def test_provision_drive_endpoint(client, fake_drive):
     login_as(client, MANAGER)
@@ -189,7 +189,7 @@ def test_provision_drive_endpoint(client, fake_drive):
 
 
 def test_provision_drive_endpoint_yetki(client, fake_drive):
-    """Yazma yetkisi olmayan rol (designer) provizyon ucunu çağıramaz."""
+    """A role without write permission (designer) cannot call the provisioning endpoint."""
     login_as(client, DESIGNER)
     r = client.post('/api/clients/1/provision-drive', headers=csrf_headers(client))
     assert r.status_code == 403

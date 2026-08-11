@@ -1,5 +1,5 @@
-// Tek kalem durumunu düzenleme diyaloğu (Müşteri Takip).
-// Kaydetme UPSERT'tir: aynı (müşteri, kalem) için satır çoğalmaz.
+// Dialog for editing a single item's status (Client Tracking).
+// Saving is an UPSERT: rows don't multiply for the same (client, item).
 import { useState } from "react"
 import { toast } from "sonner"
 
@@ -8,8 +8,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
+import { useI18n } from "@/lib/i18n"
 import {
-  ENTRY_STATUS_LABELS, useSaveTrackingEntry,
+  useEntryStatusLabels, useSaveTrackingEntry,
   type EntryStatus, type TrackingEntry, type TrackingItem,
 } from "@/lib/musteri-takip"
 
@@ -22,6 +23,8 @@ interface Props {
 }
 
 export function TrackingEntryDialog({ clientId, clientName, item, entry, onClose }: Props) {
+  const { t } = useI18n()
+  const ENTRY_STATUS_LABELS = useEntryStatusLabels()
   const save = useSaveTrackingEntry()
   const [status, setStatus] = useState<EntryStatus>(entry?.status ?? "yok")
   const [statusDate, setStatusDate] = useState(entry?.status_date ?? "")
@@ -34,10 +37,10 @@ export function TrackingEntryDialog({ clientId, clientName, item, entry, onClose
         clientId, itemId: item.id,
         body: { status, status_date: statusDate || null, note: note || null, url: url || null },
       })
-      toast.success(`${item.name} güncellendi`)
+      toast.success(t("components.clientTracking.trackingEntryDialog.updated", { name: item.name }))
       onClose()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Kaydedilemedi")
+      toast.error(e instanceof Error ? e.message : t("components.clientTracking.trackingEntryDialog.saveFailed"))
     }
   }
 
@@ -50,7 +53,7 @@ export function TrackingEntryDialog({ clientId, clientName, item, entry, onClose
         <p className="-mt-2 text-sm text-muted-foreground">{clientName}</p>
         <div className="space-y-3">
           <div className="space-y-1">
-            <Label>Durum</Label>
+            <Label>{t("components.clientTracking.trackingEntryDialog.status")}</Label>
             <select
               className="h-9 w-full rounded-md border bg-background px-2 text-sm"
               value={status}
@@ -63,12 +66,12 @@ export function TrackingEntryDialog({ clientId, clientName, item, entry, onClose
           </div>
           <div className="space-y-1">
             <Label>
-              Tarih <span className="text-xs text-muted-foreground">(ör. tescil/teslim günü)</span>
+              {t("components.clientTracking.trackingEntryDialog.date")} <span className="text-xs text-muted-foreground">{t("components.clientTracking.trackingEntryDialog.dateHint")}</span>
             </Label>
             <Input type="date" value={statusDate} onChange={(e) => setStatusDate(e.target.value)} />
           </div>
           <div className="space-y-1">
-            <Label>Link</Label>
+            <Label>{t("components.clientTracking.trackingEntryDialog.link")}</Label>
             <Input
               placeholder="https://…"
               value={url}
@@ -76,19 +79,19 @@ export function TrackingEntryDialog({ clientId, clientName, item, entry, onClose
             />
           </div>
           <div className="space-y-1">
-            <Label>Not</Label>
+            <Label>{t("components.clientTracking.trackingEntryDialog.note")}</Label>
             <Textarea
               rows={3}
-              placeholder="örn. WordPress, yıllık bakım bizde"
+              placeholder={t("components.clientTracking.trackingEntryDialog.notePlaceholder")}
               value={note}
               onChange={(e) => setNote(e.target.value)}
             />
           </div>
         </div>
         <div className="flex justify-end gap-2 pt-2">
-          <Button variant="ghost" onClick={onClose}>Vazgeç</Button>
+          <Button variant="ghost" onClick={onClose}>{t("components.clientTracking.trackingEntryDialog.cancel")}</Button>
           <Button onClick={submit} disabled={save.isPending}>
-            {save.isPending ? "Kaydediliyor…" : "Kaydet"}
+            {save.isPending ? t("components.clientTracking.trackingEntryDialog.saving") : t("components.clientTracking.trackingEntryDialog.save")}
           </Button>
         </div>
       </DialogContent>

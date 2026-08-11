@@ -1,20 +1,23 @@
-// Codex Görsel Üretimi (2026-08-10) — ChatGPT aboneliği üzerinden `codex exec` +
-// `$imagegen`. Mevcut "AI Görsel Üretimi" sayfasından (Magnific hattı) AYRIDIR ve onu
-// değiştirmez; hangisinin kullanılacağına kullanıcı sayfa seçerek karar verir.
+// Codex Image Generation (2026-08-10) — via ChatGPT subscription using `codex exec` +
+// `$imagegen`. SEPARATE from the existing "AI Image Generation" page (the Magnific pipeline)
+// and doesn't replace it; the user decides which to use by picking a page.
 //
-// v1 kapsamı bilerek dar (kullanıcı kararı): üret → gör → indir. Varyasyon, arşiv,
-// onay/red ve yeniden deneme düğmeleri YOK. Onay kapısı invaryantı, bu görsellerin
-// hiçbir müşteri yüzeyine bağlanmamasıyla korunuyor — indirip mevcut akışa insan koyar.
+// v1 scope is deliberately narrow (user decision): generate → view → download. No variation,
+// archive, approve/reject, or retry buttons. The approval-gate invariant is preserved by these
+// images never being wired into any client-facing surface — downloading and re-inserting into
+// the existing flow keeps a human in the loop.
 import { useMemo, useState } from "react"
 import { Download, ImageOff, Loader2, Sparkles, TriangleAlert } from "lucide-react"
 
 import { useAuth } from "@/lib/auth"
 import { useClients } from "@/lib/clients"
+import { useI18n } from "@/lib/i18n"
 import {
   ASPECTS,
+  IMAGEGEN_TIMEOUT_MARKER,
   MAX_REFERENCES,
-  STATUS_LABEL,
-  VARIANT_LABEL,
+  STATUS_LABEL_KEY,
+  VARIANT_LABEL_KEY,
   generateImage,
   getClientSettings,
   imageUrl,
@@ -41,6 +44,7 @@ const selectCls =
   "h-9 rounded-md border bg-background px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
 
 export function CodexImagePage() {
+  const { t } = useI18n()
   const { isManagement } = useAuth()
   const { data: clients } = useClients({ status: "active", q: "" })
   const [clientId, setClientId] = useState<number | null>(null)
@@ -54,7 +58,7 @@ export function CodexImagePage() {
   const [hata, setHata] = useState<string | null>(null)
   const [hataKodu, setHataKodu] = useState<string | null>(null)
   const [gecmis, setGecmis] = useState<ImageJob[]>([])
-  // --- parti üretimi durumu ---
+  // --- batch generation state ---
   const [haftalar, setHaftalar] = useState<BriefWeek[]>([])
   const [hafta, setHafta] = useState("")
   const [otomatik, setOtomatik] = useState(false)
@@ -88,8 +92,9 @@ export function CodexImagePage() {
       setGecmis([])
     }
     try {
-      // Anahtarın durumu DB'den OKUNUR, varsayılana bırakılmaz — yoksa sayfa her
-      // yenilendiğinde kapalı görünür, DB'de açık olur ve düğme sebepsiz pasif kalır.
+      // The toggle's state is READ FROM the DB, not left at a default — otherwise the page
+      // looks off on every reload while the DB actually has it on, and the button stays
+      // disabled for no apparent reason.
       const ayar = await getClientSettings(id)
       setOtomatik(ayar.auto_image_enabled)
       setKvkk(ayar.ai_image_consent)
@@ -101,8 +106,8 @@ export function CodexImagePage() {
     }
   }
 
-  // "Bu hafta" BİLEREK varsayılan değil: brief'ler gerçek hafta + 2 için üretiliyor
-  // (enqueue_briefs._target_week_iso), içinde bulunulan haftanın brief'i çoğu zaman yok.
+  // "This week" is DELIBERATELY not the default: briefs are generated for the current
+  // week + 2 (enqueue_briefs._target_week_iso), so the current week's brief is usually missing.
   async function haftalariYukle(id: number) {
     const w = await listWeeks(id)
     setHaftalar(w)
@@ -130,11 +135,11 @@ export function CodexImagePage() {
     try {
       const r = await startBatch(clientId, hafta)
       setLogoYok(r.logo_missing)
-      // Her iş tek tek biter; hepsini bekleyip sonra listeyi tazele.
+      // Each job finishes individually; wait for all of them then refresh the list.
       await Promise.allSettled(r.created.map((j) => pollImageJob(j.id)))
       await partiYukle(clientId, hafta)
     } catch (e) {
-      setHata(e instanceof Error ? e.message : "Parti başlatılamadı.")
+      setHata(e instanceof Error ? e.message : t("pages.codexImage.batchStartFailed"))
     } finally {
       setPartiCalisiyor(false)
     }
@@ -164,40 +169,41 @@ export function CodexImagePage() {
         brief_id: briefId ?? undefined,
         reference_asset_ids: refIds,
       })
-      // Codex 1-4 dk sürer; pollImageJob'un timeout'u bunun için 15 dk.
+      // Codex takes 1-4 min; pollImageJob's timeout is 15 min to accommodate this.
       const bitmis = await pollImageJob(image_job.id)
       if (bitmis.status === "completed") {
         setSonuc(bitmis)
       } else {
-        setHata(bitmis.error_public ?? "Görsel üretilemedi.")
+        setHata(bitmis.error_public ?? t("pages.codexImage.generateFailed"))
         setHataKodu(bitmis.error_code)
       }
       setGecmis(await listImageJobs(clientId))
     } catch (e) {
-      setHata(e instanceof Error ? e.message : "Görsel üretimi başlatılamadı.")
+      setHata(e instanceof Error && e.message === IMAGEGEN_TIMEOUT_MARKER
+        ? t("pages.codexImage.timeout")
+        : e instanceof Error ? e.message : t("pages.codexImage.generateStartFailed"))
     } finally {
       setUretiliyor(false)
     }
   }
 
   if (!isManagement) {
-    return <div className="p-6 text-sm text-muted-foreground">Bu sayfa yalnız yönetim içindir.</div>
+    return <div className="p-6 text-sm text-muted-foreground">{t("pages.codexImage.managementOnly")}</div>
   }
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold">Codex Görsel Üretimi</h1>
+        <h1 className="text-xl font-semibold">{t("pages.codexImage.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          ChatGPT aboneliği üzerinden görsel üretir (Magnific kredisi harcamaz). Üretim
-          1-4 dakika sürer. Onaysız müşteride üretim yapılamaz (KVKK).
+          {t("pages.codexImage.subtitle")}
         </p>
       </div>
 
       <div className="grid gap-6 md:grid-cols-[260px_1fr]">
-        {/* müşteri seçimi */}
+        {/* client selection */}
         <div className="space-y-2">
-          <Input placeholder="Müşteri ara…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <Input placeholder={t("pages.codexImage.searchClientPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} />
           <div className="max-h-96 space-y-1 overflow-auto rounded-md border p-1">
             {filtered.map((c) => (
               <button
@@ -213,13 +219,13 @@ export function CodexImagePage() {
           </div>
         </div>
 
-        {/* üretim formu + sonuç */}
+        {/* generation form + result */}
         <div className="space-y-4">
           {clientId == null ? (
-            <div className="text-sm text-muted-foreground">Başlamak için bir müşteri seçin.</div>
+            <div className="text-sm text-muted-foreground">{t("pages.codexImage.selectClientPrompt")}</div>
           ) : (
             <>
-              {/* --- Haftalık parti üretimi: brief fikirlerinden toplu görsel --- */}
+              {/* --- Weekly batch generation: bulk images from brief ideas --- */}
               <div className="space-y-3 rounded-md border p-3">
                 <div className="flex flex-wrap items-end gap-3">
                   <label className="flex items-center gap-2 text-sm">
@@ -232,15 +238,15 @@ export function CodexImagePage() {
                         await setAutoImage(clientId, acik)
                       }}
                     />
-                    Haftalık görsel üretimi açık
+                    {t("pages.codexImage.weeklyAutoLabel")}
                   </label>
                   <select
                     className={selectCls}
                     value={hafta}
                     onChange={(e) => haftaSec(e.target.value)}
-                    aria-label="Hafta"
+                    aria-label={t("pages.codexImage.weekAriaLabel")}
                   >
-                    {haftalar.length === 0 && <option value="">— onaylı brief yok —</option>}
+                    {haftalar.length === 0 && <option value="">{t("pages.codexImage.noApprovedBrief")}</option>}
                     {haftalar.map((w) => (
                       <option key={w.week_iso} value={w.week_iso}>
                         {w.week_iso}
@@ -256,23 +262,23 @@ export function CodexImagePage() {
                     ) : (
                       <Sparkles className="mr-2 size-4" />
                     )}
-                    Bu haftayı üret
+                    {t("pages.codexImage.generateWeekButton")}
                   </Button>
                 </div>
 
                 {!kvkk && (
                   <p className="text-xs text-muted-foreground">
-                    Bu müşteride KVKK görsel onayı yok — üretim yapılamaz.
+                    {t("pages.codexImage.noConsent")}
                   </p>
                 )}
                 {logoYok && (
                   <p className="text-xs text-muted-foreground">
-                    Bu müşteride logo yok — görseller referanssız üretildi.
+                    {t("pages.codexImage.noLogo")}
                   </p>
                 )}
                 {partiCalisiyor && (
                   <p className="text-sm text-muted-foreground">
-                    Parti üretiliyor — her görsel 1-4 dakika sürer, sayfayı kapatmayın.
+                    {t("pages.codexImage.batchRunning")}
                   </p>
                 )}
 
@@ -286,8 +292,8 @@ export function CodexImagePage() {
                         return (
                           <div key={v} className="rounded border p-2 text-xs">
                             <div className="mb-1 flex items-center justify-between">
-                              <Badge variant="secondary">{VARIANT_LABEL[v]}</Badge>
-                              <span>{STATUS_LABEL[job.status] ?? job.status}</span>
+                              <Badge variant="secondary">{t(VARIANT_LABEL_KEY[v])}</Badge>
+                              <span>{job.status in STATUS_LABEL_KEY ? t(STATUS_LABEL_KEY[job.status]) : job.status}</span>
                             </div>
                             {job.has_image ? (
                               <>
@@ -301,12 +307,12 @@ export function CodexImagePage() {
                                   download={`codex-gorsel-${job.id}.png`}
                                   className="underline"
                                 >
-                                  indir
+                                  {t("pages.codexImage.download")}
                                 </a>
                               </>
                             ) : (
                               <p className="text-muted-foreground">
-                                {job.error_public ?? "Bekliyor…"}
+                                {job.error_public ?? t("pages.codexImage.waiting")}
                               </p>
                             )}
                           </div>
@@ -324,11 +330,11 @@ export function CodexImagePage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="codex-istem">İstem</Label>
+                <Label htmlFor="codex-istem">{t("pages.codexImage.promptLabel")}</Label>
                 <Textarea
                   id="codex-istem"
                   rows={4}
-                  placeholder="Ne görmek istediğinizi yazın…"
+                  placeholder={t("pages.codexImage.promptPlaceholder")}
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
                 />
@@ -336,7 +342,7 @@ export function CodexImagePage() {
 
               <div className="flex flex-wrap items-end gap-4">
                 <div className="space-y-1">
-                  <Label htmlFor="codex-oran">En-boy oranı</Label>
+                  <Label htmlFor="codex-oran">{t("pages.codexImage.aspectLabel")}</Label>
                   <select
                     id="codex-oran"
                     className={selectCls}
@@ -352,14 +358,14 @@ export function CodexImagePage() {
                 </div>
 
                 <div className="space-y-1">
-                  <Label htmlFor="codex-brief">Brief (opsiyonel)</Label>
+                  <Label htmlFor="codex-brief">{t("pages.codexImage.briefLabel")}</Label>
                   <select
                     id="codex-brief"
                     className={selectCls}
                     value={briefId ?? ""}
                     onChange={(e) => setBriefId(e.target.value ? Number(e.target.value) : null)}
                   >
-                    <option value="">— yok —</option>
+                    <option value="">{t("pages.codexImage.briefNone")}</option>
                     {(briefs ?? []).map((b) => (
                       <option key={b.id} value={b.id}>
                         {b.week_iso}
@@ -375,16 +381,16 @@ export function CodexImagePage() {
                   ) : (
                     <Sparkles className="mr-2 size-4" />
                   )}
-                  Üret
+                  {t("pages.codexImage.generateButton")}
                 </Button>
               </div>
 
               {(assets ?? []).length > 0 && (
                 <div className="space-y-2">
                   <Label>
-                    Referans görseller{" "}
+                    {t("pages.codexImage.referenceImagesLabel")}{" "}
                     <span className="text-muted-foreground">
-                      (en fazla {MAX_REFERENCES})
+                      {t("pages.codexImage.referenceImagesMax", { count: MAX_REFERENCES })}
                     </span>
                   </Label>
                   <div className="flex flex-wrap gap-2">
@@ -399,7 +405,7 @@ export function CodexImagePage() {
                             : "hover:bg-muted"
                         }`}
                       >
-                        {a.label || a.file_name || (a.kind === "logo" ? "Logo" : "Görsel")}
+                        {a.label || a.file_name || (a.kind === "logo" ? t("pages.codexImage.logoFallback") : t("pages.codexImage.imageFallback"))}
                       </button>
                     ))}
                   </div>
@@ -408,7 +414,7 @@ export function CodexImagePage() {
 
               {uretiliyor && (
                 <p className="text-sm text-muted-foreground">
-                  Görsel üretiliyor — bu işlem 1-4 dakika sürebilir, sayfayı kapatmayın.
+                  {t("pages.codexImage.generating")}
                 </p>
               )}
 
@@ -419,7 +425,7 @@ export function CodexImagePage() {
                     {hata}
                     {hataKodu === "auth" && (
                       <p className="mt-1 font-medium">
-                        Operatör müdahalesi gerekiyor — sunucuda Codex oturumu yenilenmeli.
+                        {t("pages.codexImage.authInterventionNeeded")}
                       </p>
                     )}
                   </div>
@@ -429,7 +435,7 @@ export function CodexImagePage() {
               {sonuc && (
                 <div className="space-y-2 rounded-md border p-3">
                   <div className="flex items-center gap-2 text-sm">
-                    <Badge variant="secondary">{STATUS_LABEL[sonuc.status] ?? sonuc.status}</Badge>
+                    <Badge variant="secondary">{sonuc.status in STATUS_LABEL_KEY ? t(STATUS_LABEL_KEY[sonuc.status]) : sonuc.status}</Badge>
                     {sonuc.output_meta && (
                       <span className="text-muted-foreground">
                         {sonuc.output_meta.width}×{sonuc.output_meta.height}
@@ -438,25 +444,25 @@ export function CodexImagePage() {
                   </div>
                   <img
                     src={imageUrl(sonuc.id)}
-                    alt="Üretilen görsel"
+                    alt={t("pages.codexImage.generatedImageAlt")}
                     className="max-w-full rounded-lg border"
                   />
-                  {/* Button `asChild` desteklemiyor (bu projedeki shadcn sürümü) →
-                      indirme bağlantısı buttonVariants ile stillenir. */}
+                  {/* Button doesn't support `asChild` (the shadcn version in this project) →
+                      the download link is styled with buttonVariants instead. */}
                   <a
                     href={imageUrl(sonuc.id)}
                     download={`codex-gorsel-${sonuc.id}.png`}
                     className={buttonVariants({ variant: "outline", size: "sm" })}
                   >
                     <Download className="mr-2 size-4" />
-                    İndir
+                    {t("pages.codexImage.download")}
                   </a>
                 </div>
               )}
 
               {gecmis.length > 0 && (
                 <div className="space-y-2">
-                  <h2 className="text-sm font-medium">Son üretimler</h2>
+                  <h2 className="text-sm font-medium">{t("pages.codexImage.recentGenerations")}</h2>
                   <div className="grid gap-3 sm:grid-cols-3">
                     {gecmis.map((g) => (
                       <div key={g.id} className="space-y-1 rounded-md border p-2 text-xs">
@@ -473,7 +479,7 @@ export function CodexImagePage() {
                         )}
                         <div className="flex items-center justify-between gap-1">
                           <Badge variant="secondary" className="text-[10px]">
-                            {STATUS_LABEL[g.status] ?? g.status}
+                            {g.status in STATUS_LABEL_KEY ? t(STATUS_LABEL_KEY[g.status]) : g.status}
                           </Badge>
                           {g.has_image && (
                             <a
@@ -481,7 +487,7 @@ export function CodexImagePage() {
                               download={`codex-gorsel-${g.id}.png`}
                               className="underline"
                             >
-                              indir
+                              {t("pages.codexImage.download")}
                             </a>
                           )}
                         </div>

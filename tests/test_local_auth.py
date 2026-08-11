@@ -1,4 +1,4 @@
-"""local_auth.authenticate() — AUTH_MODE=local giriş doğrulaması (DB'li, ağsız)."""
+"""local_auth.authenticate() — AUTH_MODE=local login validation (DB-backed, no network)."""
 import local_auth
 from extensions import db
 from models_auth import LocalUser

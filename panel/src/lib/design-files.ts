@@ -1,6 +1,6 @@
-// Tasarım çalışma dosyaları (2026-08-07) — müşteri bazlı, sürümlü kaynak dosyalar.
-// Dosyalar sunucuda kanonik; indirme /api üzerinden (Drive linki DEĞİL) — yetki
-// her indirmede doğrulanıyor.
+// Design working files (2026-08-07) — versioned source files, per client. Files are
+// canonical on the server; downloads go through /api (NOT a Drive link) — permission
+// is verified on every download.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiDelete, apiGet, apiJson, apiUpload } from "./api"
@@ -14,19 +14,19 @@ export interface DesignVersion {
   file_size: number
   note: string | null
   sha256: string
-  /** Drive kopyası oluştu mu — false ise panelde "Drive'a kopyalanmadı" rozeti. */
+  /** Was a Drive copy created — if false, the panel shows a "not copied to Drive" badge. */
   drive_ok: boolean
   uploader_name: string | null
   uploaded_at: string | null
   can_delete: boolean
-  // Çöp kutusu alanları (2026-08-08) — canlı listede daima null/false döner,
-  // yalnız çöp kutusu yanıtında (`useTrash`) anlamlı.
+  // Trash fields (2026-08-08) — always null/false in the live listing,
+  // only meaningful in the trash response (`useTrash`).
   deleted_at: string | null
   deleted_by: string | null
   deleter_name: string | null
-  /** Geri alma yetkisi BACKEND'te hesaplanır — panel kuralı yeniden kurmaz. */
+  /** Restore permission is computed on the BACKEND — the panel doesn't rebuild the rule. */
   can_restore: boolean
-  /** Kalıcı silme yetkisi yalnız yönetimde — BACKEND'te hesaplanır. */
+  /** Permanent-delete permission is management-only — computed on the BACKEND. */
   can_purge: boolean
 }
 
@@ -39,26 +39,26 @@ export interface DesignFileItem {
   created_at: string | null
   current: DesignVersion | null
   version_count: number
-  /** Silme yetkisi BACKEND'te hesaplanır — panel kuralı yeniden kurmaz. */
+  /** Delete permission is computed on the BACKEND — the panel doesn't rebuild the rule. */
   can_delete: boolean
-  // Çöp kutusu alanları (2026-08-08) — canlı listede daima null/false döner.
+  // Trash fields (2026-08-08) — always null/false in the live listing.
   deleted_at: string | null
   deleted_by: string | null
   deleter_name: string | null
   can_restore: boolean
   can_purge: boolean
-  /** Tasarımcının "kalıcı silinsin" talebi — yalnız işaret, hiçbir şeyi silmez. */
+  /** The designer's "please purge permanently" request — a flag only, deletes nothing. */
   purge_requested_at: string | null
   purge_requested_by: string | null
   purge_requester_name: string | null
 }
 
 export interface DesignTrash {
-  /** Silinmiş DOSYALAR (tüm sürümleriyle birlikte çöpte). */
+  /** DELETED FILES (in the trash along with all their versions). */
   files: DesignFileItem[]
-  /** Hâlâ yaşayan dosyaların TEKİL silinmiş sürümleri. */
+  /** INDIVIDUALLY deleted versions of files that are still alive. */
   versions: DesignVersion[]
-  /** Çöpteki TOPLAM boyut (bayt) — tamamen silinmiş dosyalar + tekil silinmiş sürümler dahil. */
+  /** TOTAL size in trash (bytes) — includes fully deleted files + individually deleted versions. */
   trash_bytes: number
 }
 
@@ -85,8 +85,8 @@ export function useFileVersions(fileId: number | null) {
   })
 }
 
-// Çöp kutusu — yalnız bölüm açılınca mount edilecek bileşenden çağrılır
-// (`SurumGecmisi` ile aynı desen), kapalıyken sorgu atmaz.
+// Trash — called from a component that only mounts when the section is opened
+// (same pattern as `SurumGecmisi`), doesn't fire a query while collapsed.
 export function useTrash(clientId: number | null) {
   return useQuery<DesignTrash>({
     queryKey: ["design-files-trash", clientId],
@@ -116,11 +116,11 @@ export function useUploadDesignFile(clientId: number) {
       form.append("title", title)
       form.append("tags", JSON.stringify(tags))
       if (note) form.append("note", note)
-      // retry KAPALI: bu uç IDEMPOTENT DEĞİL — her POST yeni bir dosya (v1)
-      // yaratır. Bağlantı, sunucu commit'i bitirip yanıt dönerken koparsa
-      // (apiUpload'taki not) status 0 görünür ama yükleme ZATEN olmuştur;
-      // otomatik retry aynı içeriği ikinci kez commit'leyip mükerrer dosya +
-      // çift kota düşümü üretir.
+      // retry DISABLED: this endpoint is NOT IDEMPOTENT — every POST creates a new
+      // file (v1). If the connection drops while the server finishes committing and
+      // returns the response (see the note in apiUpload), status 0 appears even
+      // though the upload has ALREADY happened; an automatic retry would commit the
+      // same content a second time, producing a duplicate file + double quota deduction.
       return apiUpload(`/design-files/client/${clientId}`, form, onProgress, false)
     },
     onSuccess: tazele,
@@ -137,8 +137,8 @@ export function useUploadVersion() {
       const form = new FormData()
       form.append("file", file)
       if (note) form.append("note", note)
-      // retry KAPALI — aynı gerekçe: her POST yeni bir sürüm yaratır (idempotent
-      // değil), yeniden deneme mükerrer sürüm + çift kota düşümüne yol açar.
+      // retry DISABLED — same rationale: every POST creates a new version (not
+      // idempotent), a retry would lead to a duplicate version + double quota deduction.
       return apiUpload(`/design-files/${fileId}/versions`, form, onProgress, false)
     },
     onSuccess: tazele,
@@ -170,7 +170,7 @@ export function useDeleteVersion() {
   })
 }
 
-// --- çöp kutusu: geri alma / kalıcı silme --------------------------------
+// --- trash: restore / permanent delete ------------------------------------
 
 export function useRestoreFile() {
   const tazele = useInvalidator()
@@ -188,7 +188,7 @@ export function useRestoreVersion() {
   })
 }
 
-/** Tasarımcının "kalıcı silinsin" işaretini koy/kaldır — hiçbir şeyi silmez. */
+/** Set/clear the designer's "please purge permanently" flag — deletes nothing. */
 export function usePurgeRequest() {
   const tazele = useInvalidator()
   return useMutation({
@@ -198,7 +198,7 @@ export function usePurgeRequest() {
   })
 }
 
-/** Kalıcı sil — yalnız yönetim, geri alınamaz. */
+/** Purge permanently — management only, cannot be undone. */
 export function usePurgeFile() {
   const tazele = useInvalidator()
   return useMutation({
@@ -226,8 +226,12 @@ export function formatBytes(n: number) {
   return `${Math.max(1, Math.round(n / 1024))} KB`
 }
 
-// Uzantıya göre renk — tasarımcı listeyi tarayarak "psd nerede" diye aramasın.
-export function extBadge(fileName: string) {
+// Color by extension — so the designer doesn't have to scan the list looking for
+// "where's the psd". `noExtFallback`: the label shown for extensionless files — since
+// this file can't use a React hook, the calling component passes its own
+// t("components.designFiles.clientDesignFiles.noExtension") translation; falls back
+// to the English default if not given.
+export function extBadge(fileName: string, noExtFallback = "FILE") {
   const ext = (fileName.split(".").pop() || "").toLowerCase()
   const renk: Record<string, string> = {
     psd: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
@@ -236,5 +240,5 @@ export function extBadge(fileName: string) {
     aep: "bg-purple-500/15 text-purple-700 dark:text-purple-400",
     zip: "bg-muted text-muted-foreground",
   }
-  return { ext: ext.toUpperCase() || "DOSYA", cls: renk[ext] ?? "bg-muted text-muted-foreground" }
+  return { ext: ext.toUpperCase() || noExtFallback, cls: renk[ext] ?? "bg-muted text-muted-foreground" }
 }

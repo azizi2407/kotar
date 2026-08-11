@@ -1,7 +1,8 @@
-// Reklam Takibi veri hook'ları — /api/ads (yalnız management).
+// Ad Tracking data hooks — /api/ads (management only).
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { apiDelete, apiGet, apiJson } from "@/lib/api"
+import { useI18n } from "@/lib/i18n"
 
 export type AdPlatform = "meta" | "google" | "tiktok" | "other"
 export type AdStatus = "planned" | "active" | "finished"
@@ -37,17 +38,23 @@ export interface AdFilters {
   to?: string
 }
 
-export const PLATFORM_LABELS: Record<string, string> = {
-  meta: "Meta (Instagram/Facebook)",
-  google: "Google",
-  tiktok: "TikTok",
-  other: "Diğer",
+export function usePlatformLabels(): Record<string, string> {
+  const { t } = useI18n()
+  return {
+    meta: t("pages.ads.platform.meta"),
+    google: t("pages.ads.platform.google"),
+    tiktok: t("pages.ads.platform.tiktok"),
+    other: t("pages.ads.platform.other"),
+  }
 }
 
-export const STATUS_LABELS: Record<string, string> = {
-  planned: "Planlandı",
-  active: "Aktif",
-  finished: "Bitti",
+export function useStatusLabels(): Record<string, string> {
+  const { t } = useI18n()
+  return {
+    planned: t("pages.ads.status.planned"),
+    active: t("pages.ads.status.active"),
+    finished: t("pages.ads.status.finished"),
+  }
 }
 
 function qs(f: AdFilters) {
@@ -111,7 +118,7 @@ export function useDeleteAd() {
   })
 }
 
-// ₺ biçimlendirme (TR yerel, kuruşlu)
+// ₺ formatting (TR locale, with cents)
 export function fmtTRY(n: number) {
   return new Intl.NumberFormat("tr-TR", {
     style: "currency",
@@ -120,8 +127,8 @@ export function fmtTRY(n: number) {
   }).format(n || 0)
 }
 
-export function fmtDateRange(start: string, end: string | null) {
+export function fmtDateRange(start: string, end: string | null, ongoingLabel: string) {
   const f = (s: string) => new Date(s).toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" })
-  if (!end) return `${f(start)} → devam ediyor`
+  if (!end) return `${f(start)} → ${ongoingLabel}`
   return `${f(start)} → ${f(end)}`
 }

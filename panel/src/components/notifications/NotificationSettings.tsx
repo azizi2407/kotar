@@ -1,9 +1,10 @@
-// Bildirim ayarları kartı (2026-08-05) — kişiye özel ntfy kanalı.
+// Notification settings card (2026-08-05) — a per-user ntfy channel.
 //
-// Panel-içi çan HERKESTE çalışmaya devam eder; bu kart yalnız TELEFON kanalını
-// yönetir ve bilinçli olarak opt-in: `ntfy_enabled` açılmadan hiçbir şey gitmez.
-// Topic yalnız sahibine gösterilir (ntfy'de okuma yetkisi adın gizliliğine
-// dayanıyor) — o yüzden "yenile" düğmesi var: adres sızarsa tek çare değiştirmek.
+// The in-panel bell keeps working for EVERYONE; this card only manages the PHONE
+// channel and is deliberately opt-in: nothing is sent until `ntfy_enabled` is
+// turned on. The topic is only shown to its owner (read access in ntfy relies on
+// the name staying secret) — hence the "refresh" button: if the address leaks,
+// rotating it is the only fix.
 import { useEffect, useState } from "react"
 import { Bell, BellOff, Check, Copy, Loader2, RefreshCw, Send } from "lucide-react"
 import { toast } from "sonner"
@@ -17,21 +18,25 @@ import { Skeleton } from "@/components/ui/skeleton"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
+import { useI18n } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
-// Eşik etiketleri kullanıcı diliyle: "kritik" seçen YALNIZ kritik alır.
-const ESIK_SECENEK: { value: Severity; label: string; hint: string }[] = [
-  { value: "kritik", label: "Yalnız kritik", hint: "Revizyon talebi, müşteri revizesi, sunucu uyarısı" },
-  { value: "normal", label: "Kritik + normal", hint: "Yukarıdakiler + onaylar, başarısız işler, yeni e-posta" },
-  { value: "bilgi", label: "Hepsi", hint: "Arşiv niteliğindeki kayıtlar dahil" },
-]
+// Threshold labels in the user's language: someone who picks "critical" gets ONLY critical.
+function esikSecenek(t: (key: string) => string): { value: Severity; label: string; hint: string }[] {
+  return [
+    { value: "kritik", label: t("components.notifications.notificationSettings.threshold.criticalOnlyLabel"), hint: t("components.notifications.notificationSettings.threshold.criticalOnlyHint") },
+    { value: "normal", label: t("components.notifications.notificationSettings.threshold.criticalNormalLabel"), hint: t("components.notifications.notificationSettings.threshold.criticalNormalHint") },
+    { value: "bilgi", label: t("components.notifications.notificationSettings.threshold.allLabel"), hint: t("components.notifications.notificationSettings.threshold.allHint") },
+  ]
+}
 
 const SAATLER = Array.from({ length: 24 }, (_, i) => i)
 const ss = (h: number) => `${String(h).padStart(2, "0")}:00`
 
-// Etiketli, tek tıkla kopyalanan alan — ntfy kurulumunda sunucu ve konu ayrı ayrı
-// yapıştırılıyor, kullanıcının URL'den parça sökmesi gerekmesin.
+// A labeled, one-click-to-copy field — the ntfy app asks for server and topic to
+// be pasted into separate fields, so the user shouldn't have to pick pieces out of a URL.
 function CopyRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  const { t } = useI18n()
   return (
     <div className="flex flex-wrap items-center gap-2">
       <span className="w-20 shrink-0 text-xs text-muted-foreground">{label}</span>
@@ -41,15 +46,17 @@ function CopyRow({ label, value, mono }: { label: string; value: string; mono?: 
       </code>
       <Button variant="ghost" size="sm" onClick={() => {
         navigator.clipboard.writeText(value)
-        toast.success(`${label} kopyalandı`)
+        toast.success(t("components.notifications.notificationSettings.copied", { label }))
       }}>
-        <Copy className="mr-1 h-3.5 w-3.5" /> Kopyala
+        <Copy className="mr-1 h-3.5 w-3.5" /> {t("components.notifications.notificationSettings.copy")}
       </Button>
     </div>
   )
 }
 
 export function NotificationSettings() {
+  const { t } = useI18n()
+  const ESIK_SECENEK = esikSecenek(t)
   const [prefs, setPrefs] = useState<NotificationPrefs | null>(null)
   const [subscribeUrl, setSubscribeUrl] = useState("")
   const [serverUrl, setServerUrl] = useState("")
@@ -65,7 +72,7 @@ export function NotificationSettings() {
         setServerUrl(d.server_url)
         setChannelReady(d.channel_ready)
       })
-      .catch(() => toast.error("Bildirim ayarları yüklenemedi"))
+      .catch(() => toast.error(t("components.notifications.notificationSettings.loadFailed")))
       .finally(() => setLoading(false))
   }, [])
 
@@ -76,7 +83,7 @@ export function NotificationSettings() {
       setPrefs(d.prefs)
       setSubscribeUrl(d.subscribe_url)
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Kaydedilemedi")
+      toast.error(e instanceof Error ? e.message : t("components.notifications.notificationSettings.saveFailed"))
     } finally {
       setBusy(false)
     }
@@ -86,9 +93,9 @@ export function NotificationSettings() {
     setBusy(true)
     try {
       await sendTestNotification()
-      toast.success("Test bildirimi gönderildi — telefonuna bakabilirsin")
+      toast.success(t("components.notifications.notificationSettings.testSent"))
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Test bildirimi gönderilemedi")
+      toast.error(e instanceof Error ? e.message : t("components.notifications.notificationSettings.testFailed"))
     } finally {
       setBusy(false)
     }
@@ -105,66 +112,79 @@ export function NotificationSettings() {
         <div>
           <div className="flex items-center gap-2 font-medium">
             {prefs.ntfy_enabled ? <Bell className="h-4 w-4 text-primary" /> : <BellOff className="h-4 w-4 text-muted-foreground" />}
-            Telefon bildirimleri
+            {t("components.notifications.notificationSettings.phoneNotifications")}
           </div>
           <p className="text-sm text-muted-foreground">
-            Seçtiğin önemdeki bildirimler telefonuna anında düşer. Panel içi bildirimler
-            bu ayardan bağımsız, her zaman çalışır.
+            {t("components.notifications.notificationSettings.phoneNotificationsHint")}
           </p>
         </div>
         <Button variant={prefs.ntfy_enabled ? "outline" : "default"} size="sm" disabled={busy}
           onClick={() => kaydet({ ntfy_enabled: !prefs.ntfy_enabled })}>
           {busy ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
-          {prefs.ntfy_enabled ? "Kapat" : "Aç"}
+          {prefs.ntfy_enabled ? t("components.notifications.notificationSettings.turnOff") : t("components.notifications.notificationSettings.turnOn")}
         </Button>
       </div>
 
       {!channelReady && (
         <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
-          Bildirim sunucusu yapılandırılmamış — ayarlar kaydedilir ama gönderim yapılmaz.
+          {t("components.notifications.notificationSettings.serverNotConfigured")}
         </p>
       )}
 
       {prefs.ntfy_enabled && (
         <>
-          {/* kurulum — ntfy uygulaması SUNUCU ve KONU'yu ayrı alanlarda ister,
-              o yüzden ikisi ayrı satırda ve ayrı ayrı kopyalanabilir. */}
+          {/* setup — the ntfy app wants SERVER and TOPIC in separate fields,
+              so each is on its own row and separately copyable. */}
           <div className="space-y-2 rounded-md bg-muted/40 p-3">
-            <div className="text-sm font-medium">Telefonu bağla</div>
+            <div className="text-sm font-medium">{t("components.notifications.notificationSettings.connectPhone")}</div>
             <ol className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
-              <li><span className="font-medium text-foreground">ntfy</span> uygulamasını kur (App Store / Google Play).</li>
-              <li>Uygulamada <span className="font-medium text-foreground">+</span> (Abone ol) → <span className="font-medium text-foreground">"Use another server"</span> / "Başka sunucu kullan" seçeneğini aç.</li>
-              <li><span className="font-medium text-foreground">Sunucu</span> ve <span className="font-medium text-foreground">Konu adı</span> alanlarına aşağıdaki değerleri yapıştır.</li>
-              <li><span className="font-medium text-foreground">Test bildirimi</span> düğmesiyle doğrula.</li>
+              <li><span className="font-medium text-foreground">ntfy</span> {t("components.notifications.notificationSettings.step1")}</li>
+              <li>
+                {t("components.notifications.notificationSettings.step2Prefix")}{" "}
+                <span className="font-medium text-foreground">+</span>{" "}
+                {t("components.notifications.notificationSettings.step2Mid")}{" "}
+                <span className="font-medium text-foreground">"Use another server"</span>{" "}
+                {t("components.notifications.notificationSettings.step2Suffix")}
+              </li>
+              <li>
+                <span className="font-medium text-foreground">{t("components.notifications.notificationSettings.serverLabel")}</span>{" "}
+                {t("components.notifications.notificationSettings.andConnector")}{" "}
+                <span className="font-medium text-foreground">{t("components.notifications.notificationSettings.topicLabel")}</span>{" "}
+                {t("components.notifications.notificationSettings.fieldsSuffix")}
+              </li>
+              <li>
+                <span className="font-medium text-foreground">{t("components.notifications.notificationSettings.testNotifLabel")}</span>{" "}
+                {t("components.notifications.notificationSettings.verifyButtonHint")}
+              </li>
             </ol>
 
             <div className="space-y-1.5">
-              <CopyRow label="Sunucu" value={serverUrl} />
-              <CopyRow label="Konu adı" value={prefs.ntfy_topic} mono />
+              <CopyRow label={t("components.notifications.notificationSettings.serverLabel")} value={serverUrl} />
+              <CopyRow label={t("components.notifications.notificationSettings.topicLabel")} value={prefs.ntfy_topic} mono />
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
               <a href={subscribeUrl} target="_blank" rel="noreferrer"
                 className="text-xs text-primary hover:underline">
-                Tarayıcıda aç (tek bağlantı)
+                {t("components.notifications.notificationSettings.openInBrowser")}
               </a>
               <Button variant="ghost" size="sm" disabled={busy} onClick={test}>
-                <Send className="mr-1 h-3.5 w-3.5" /> Test bildirimi
+                <Send className="mr-1 h-3.5 w-3.5" /> {t("components.notifications.notificationSettings.testNotifLabel")}
               </Button>
-              {/* Adres gizli bir anahtar gibi çalışıyor: sızarsa yenilemek tek çözüm.
-                  Yenileyince eski cihazların aboneliği kesilir — bu yüzden onay soruyoruz. */}
+              {/* The address works like a secret key: if it leaks, rotating it is the
+                  only fix. Rotating unsubscribes old devices — hence the confirmation. */}
               <Button variant="ghost" size="sm" disabled={busy} onClick={() => {
-                if (!confirm("Adres yenilenecek. Telefonundaki mevcut abonelik çalışmayı bırakır, yeniden bağlaman gerekir. Devam?")) return
+                if (!confirm(t("components.notifications.notificationSettings.rotateConfirm"))) return
                 kaydet({ rotate_topic: true })
               }}>
-                <RefreshCw className="mr-1 h-3.5 w-3.5" /> Adresi yenile
+                <RefreshCw className="mr-1 h-3.5 w-3.5" /> {t("components.notifications.notificationSettings.rotateAddress")}
               </Button>
             </div>
           </div>
 
-          {/* eşik */}
+          {/* threshold */}
           <div className="space-y-1.5">
-            <div className="text-sm font-medium">Hangi bildirimler gelsin?</div>
+            <div className="text-sm font-medium">{t("components.notifications.notificationSettings.whichNotifications")}</div>
             <div className="grid gap-1.5 sm:grid-cols-3">
               {ESIK_SECENEK.map((o) => (
                 <button key={o.value} type="button" disabled={busy}
@@ -183,15 +203,15 @@ export function NotificationSettings() {
             </div>
           </div>
 
-          {/* sessiz saatler */}
+          {/* quiet hours */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
-              <div className="text-sm font-medium">Sessiz saatler</div>
+              <div className="text-sm font-medium">{t("components.notifications.notificationSettings.quietHours")}</div>
               <Button variant="ghost" size="sm" disabled={busy}
                 onClick={() => kaydet(sessizAcik
                   ? { quiet_start: null, quiet_end: null }
                   : { quiet_start: 22, quiet_end: 8 })}>
-                {sessizAcik ? "Kapat" : "Aç"}
+                {sessizAcik ? t("components.notifications.notificationSettings.turnOff") : t("components.notifications.notificationSettings.turnOn")}
               </Button>
             </div>
             {sessizAcik ? (
@@ -212,12 +232,14 @@ export function NotificationSettings() {
                   </SelectContent>
                 </Select>
                 <span className="text-xs text-muted-foreground">
-                  Bu aralıkta yalnız <span className="font-medium">kritik</span> bildirimler telefonu çaldırır.
+                  {t("components.notifications.notificationSettings.quietHoursHintPrefix")}{" "}
+                  <span className="font-medium">{t("components.notifications.notificationSettings.criticalWord")}</span>{" "}
+                  {t("components.notifications.notificationSettings.quietHoursHintSuffix")}
                 </span>
               </div>
             ) : (
               <p className="text-xs text-muted-foreground">
-                Kapalı — bildirimler saat farkı gözetmeden gelir.
+                {t("components.notifications.notificationSettings.quietHoursOff")}
               </p>
             )}
           </div>

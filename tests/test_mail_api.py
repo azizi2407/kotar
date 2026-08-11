@@ -1,4 +1,4 @@
-"""/api/mail/* — oturum, CSRF, yetki, secret sızmaması, 503 fail-closed."""
+"""/api/mail/* — session, CSRF, authorization, secret not leaking, 503 fail-closed."""
 import mail_gateway as gw
 import mail_service as svc
 from conftest import MANAGER, login_as
@@ -42,7 +42,7 @@ def test_create_rejects_foreign_domain(client):
 
 def test_test_endpoint_blocks_foreign_account(client):
     login_as(client, MANAGER)
-    a = _mk(owner_sub='someone-else')      # MANAGER'ın olmayan özel hesap
+    a = _mk(owner_sub='someone-else')      # a private account that doesn't belong to MANAGER
     r = client.post(f'/api/mail/accounts/{a.id}/test', headers=csrf_headers(client))
     assert r.status_code == 403
 

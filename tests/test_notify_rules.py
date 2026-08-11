@@ -1,7 +1,8 @@
-"""Bildirim önem dereceleri + ntfy gönderim kararı (2026-08-05).
+"""Notification severity levels + ntfy send decision (2026-08-05).
 
-Ağırlık saf karar fonksiyonunda (`should_push_ntfy`): eşik, sessiz saat (gece
-yarısını saran aralık dahil) ve kritik istisnası. Kanalın kendisi (HTTP) mock'lu.
+The weight is in the pure decision function (`should_push_ntfy`): threshold, quiet
+hours (including the range spanning midnight), and the critical exception. The
+channel itself (HTTP) is mocked.
 """
 from types import SimpleNamespace
 
@@ -21,7 +22,7 @@ def _pref(**kw):
 # --- katalog bütünlüğü ------------------------------------------------------
 
 def test_katalogdaki_her_turun_gecerli_severity_si_var():
-    """Yeni bir `kind` eklenip katalog güncellenmezse burası patlar."""
+    """This blows up if a new `kind` is added without updating the catalog."""
     from notifications import CATALOG
     assert CATALOG, 'katalog boş olamaz'
     for kind, entry in CATALOG.items():
@@ -30,18 +31,19 @@ def test_katalogdaki_her_turun_gecerli_severity_si_var():
 
 
 def test_tetikleyicilerin_kullandigi_her_kind_katalogda():
-    """TÜM modüllerde push edilen tür adları ile katalog ayrışmasın.
+    """The type names pushed across ALL modules must not diverge from the catalog.
 
-    Tarama bilerek `notifications.py` ile sınırlı DEĞİL: `provision_failed`
-    (client_provision.py) ve `mail` (mail_service.py) gibi türler dışarıdan
-    push ediliyor ve ilk sürümde biri katalogda yanlış adla durup sessizce
-    NORMAL'e düşmüştü (2026-08-05). Bu test o sınıf hatayı yakalar."""
+    The scan is deliberately NOT limited to `notifications.py`: types like
+    `provision_failed` (client_provision.py) and `mail` (mail_service.py) are
+    pushed from outside, and in the first version one of them sat in the catalog
+    under the wrong name and silently fell back to NORMAL (2026-08-05). This test
+    catches that class of bug."""
     import re
     from pathlib import Path
 
     from notifications import CATALOG
     kok = Path(__file__).resolve().parent.parent
-    # push(<herhangi bir alıcı ifadesi>, 'kind', ...) ve _push_to_client_team('kind', ...)
+    # push(<any recipient expression>, 'kind', ...) and _push_to_client_team('kind', ...)
     desenler = (r"push\([^,]+,\s*'([a-z_]+)'", r"_push_to_client_team\('([a-z_]+)'",
                 r"_push_many\([^,]+,\s*'([a-z_]+)'")
     kullanilan = set()
@@ -54,7 +56,7 @@ def test_tetikleyicilerin_kullandigi_her_kind_katalogda():
 
 
 def test_katalogda_olup_hic_kullanilmayan_tur_yok():
-    """Ters yön: katalogda ölü satır birikmesin (tür adı değişince eskisi kalır)."""
+    """Reverse direction: dead entries shouldn't pile up in the catalog (the old one lingers when a type name changes)."""
     import re
     from pathlib import Path
 
@@ -77,7 +79,7 @@ def test_rank_siralamasi():
 # --- eşik -------------------------------------------------------------------
 
 def test_kayit_yoksa_gonderilmez():
-    """ntfy OPT-IN: tercih kaydı olmayan kullanıcıya push YOK."""
+    """ntfy is OPT-IN: NO push for a user without a preference record."""
     assert should_push_ntfy(None, KRITIK, 12) is False
 
 
@@ -121,17 +123,18 @@ def test_eksik_veya_esit_uclar_sessiz_saat_yok():
 
 
 def test_sessiz_saatte_normal_beklenir_kritik_gecer():
-    """Proje sahibi kararı: sessiz saat kritik bildirimi DURDURMAZ."""
+    """Project owner's decision: quiet hours do NOT block critical notifications."""
     pref = _pref(min_severity=BILGI, quiet_start=22, quiet_end=8)
     assert should_push_ntfy(pref, NORMAL, 3) is False
     assert should_push_ntfy(pref, BILGI, 3) is False
     assert should_push_ntfy(pref, KRITIK, 3) is True
-    # aralık dışında normal de geçer
+    # outside the range, normal also passes
     assert should_push_ntfy(pref, NORMAL, 12) is True
 
 
 def test_sessiz_saat_esikten_sonra_degerlendirilir():
-    """Eşik zaten elemişse sessiz saatin bir önemi yok — sıra karışırsa kritik
-    olmayan bir bildirim sessiz saat dışında sızabilirdi."""
+    """If the threshold has already filtered it out, quiet hours don't matter —
+    if the order got mixed up, a non-critical notification could have leaked
+    outside quiet hours."""
     pref = _pref(min_severity=KRITIK, quiet_start=22, quiet_end=8)
     assert should_push_ntfy(pref, NORMAL, 12) is False

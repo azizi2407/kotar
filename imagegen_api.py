@@ -1,11 +1,11 @@
-"""Codex görsel üretim uçları (`/api/imagegen/*`) — yalnız management.
+"""Codex image generation endpoints (`/api/imagegen/*`) — management only.
 
-Bu uçlar YALNIZCA işi kuyruğa alır ve sonucu okur; hiçbir uzun süren işlem web
-sürecinde koşmaz (Codex çağrısı 1-4 dk sürer, gunicorn worker'ı bloklardı).
+These endpoints ONLY enqueue the job and read the result; no long-running operation
+runs in the web process (a Codex call takes 1-4 min, which would block the gunicorn worker).
 
-Üretilen görsel PUBLIC bir route'tan servis EDİLMEZ — `/jobs/<id>/image` rol
-kapısının arkasındadır. v1'de onay/red UI'si yok; onay kapısı invaryantı bu hattın
-çıktısını hiçbir müşteri yüzeyine bağlamayarak korunur (spec §10).
+The generated image is NOT served from a PUBLIC route — `/jobs/<id>/image` sits
+behind the role gate. There's no approve/reject UI in v1; the approval-gate invariant
+is preserved by never linking this pipeline's output to any client-facing surface (spec §10).
 """
 from datetime import timedelta
 
@@ -23,39 +23,39 @@ from models_sharing import WeeklyBrief
 from sso_client import current_user
 
 bp = Blueprint('imagegen', __name__)
-bp.before_request(csrf_protect)  # api ile aynı CSRF (session token)
+bp.before_request(csrf_protect)  # same CSRF as api (session token)
 
-# Kota savunması BİZDE de var: ChatGPT tarafındaki tavana çarpmadan önce kendi
-# sınırımıza çarparız — böylece 'quota' hatası istisna olur, günlük rutin değil.
-# Tek worker ve ~3 dk/üretim ile günde teorik tavan zaten ~200'dür; bu sayılar
-# operasyonun gerçek ihtiyacına göre (40 müşteri) tutuldu.
-DAILY_CLIENT_LIMIT = 20        # müşteri başına / gün
-DAILY_GLOBAL_LIMIT = 60        # tüm sistem / gün
+# We ALSO have quota defense on our side: we hit our own limit before hitting the
+# ceiling on ChatGPT's side — so a 'quota' error becomes the exception, not a daily
+# routine. With a single worker and ~3 min/generation the theoretical daily ceiling
+# is already ~200; these numbers are set to the operation's actual need (40 clients).
+DAILY_CLIENT_LIMIT = 20        # per client / day
+DAILY_GLOBAL_LIMIT = 60        # whole system / day
 
 
 def _require_management():
-    """`sharing._require_management` ile birebir aynı kapı (v1: management-only).
+    """The exact same gate as `sharing._require_management` (v1: management-only).
 
-    Görsel üretimi müşteri markasını üçüncü tarafa gönderir ve kota harcar —
-    üretim rolleri (designer/content_creator) bu hatta v1'de giremez."""
+    Image generation sends the client's brand to a third party and spends quota —
+    production roles (designer/content_creator) can't enter this pipeline in v1."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='no active session'), 401)
     if u.get('role') != 'management':
-        return None, (jsonify(error='bu işlem için yetkiniz yok'), 403)
+        return None, (jsonify(error='you are not authorized for this action'), 403)
     return u, None
 
 
 def _bakim_kapali():
-    """`AppSetting['codex_image_enabled']` == '0' ise hat bakımda (operatör anahtarı)."""
+    """If `AppSetting['codex_image_enabled']` == '0' the pipeline is under maintenance (operator switch)."""
     return AppSetting.get('codex_image_enabled', '1') == '0'
 
 
 def _gunluk_sayim(client_id=None):
-    """Son 24 saatte açılmış ImageJob sayısı.
+    """Count of ImageJobs opened in the last 24 hours.
 
-    Başarısızlar da SAYILIR: her deneme Codex kotasından yer, bu yüzden sınır
-    'başarılı üretim' değil 'deneme' üzerinden işler."""
+    Failures are ALSO COUNTED: every attempt takes from the Codex quota, so the
+    limit operates on 'attempts', not 'successful generations'."""
     q = ImageJob.query.filter(ImageJob.created_at >= utcnow() - timedelta(days=1))
     if client_id is not None:
         q = q.filter_by(client_id=client_id)
@@ -64,46 +64,47 @@ def _gunluk_sayim(client_id=None):
 
 @bp.post('/generate')
 def imagegen_generate():
-    """Üretim işini kuyruğa al.
+    """Enqueue the generation job.
 
-    KVKK ön kontrolü burada (kullanıcıya hızlı geri bildirim; ASIL kapı handler'da),
-    referans sahipliği burada (handler'da tekrar) — iki katman bilinçli."""
+    The KVKK (data-protection) pre-check happens here (fast feedback to the user;
+    the ACTUAL gate is in the handler), reference ownership also here (re-checked
+    in the handler) — the two layers are deliberate."""
     u, err = _require_management()
     if err:
         return err
     if _bakim_kapali():
-        return jsonify(error='Codex görsel üretimi şu anda bakımda.'), 503
+        return jsonify(error='Codex image generation is currently under maintenance.'), 503
     data = request.get_json(silent=True) or {}
     c = db.session.get(Client, data.get('client_id'))
     if c is None or c.status == 'deleted':
-        return jsonify(error='müşteri bulunamadı'), 404
+        return jsonify(error='client not found'), 404
     if _gunluk_sayim(c.id) >= DAILY_CLIENT_LIMIT:
-        return jsonify(error=f'Bu müşteri için günlük üretim sınırına ulaşıldı '
-                             f'({DAILY_CLIENT_LIMIT}). Yarın tekrar deneyin.'), 429
+        return jsonify(error=f'Daily generation limit reached for this client '
+                             f'({DAILY_CLIENT_LIMIT}). Please try again tomorrow.'), 429
     if _gunluk_sayim() >= DAILY_GLOBAL_LIMIT:
-        return jsonify(error=f'Günlük toplam üretim sınırına ulaşıldı '
+        return jsonify(error=f'Daily total generation limit reached '
                              f'({DAILY_GLOBAL_LIMIT}).'), 429
     if not (c.brand_profile or {}).get('ai_image_consent'):
-        return jsonify(error='müşteri AI görsel onayı yok (KVKK). Müşteri kaydında '
-                             'ai_image_consent onayı gerekli.'), 409
+        return jsonify(error='client has not given AI image consent (data protection). '
+                             'The ai_image_consent flag is required on the client record.'), 409
     prompt = (data.get('prompt') or '').strip()
     if not prompt:
-        return jsonify(error='istem boş olamaz'), 400
+        return jsonify(error='prompt cannot be empty'), 400
     aspect = data.get('aspect_ratio') or 'social_post_4_5'
     if aspect not in ASPECTS:
-        return jsonify(error='geçersiz en-boy oranı'), 400
+        return jsonify(error='invalid aspect ratio'), 400
     ref_ids = data.get('reference_asset_ids') or []
     if not isinstance(ref_ids, list):
-        return jsonify(error='reference_asset_ids liste olmalı'), 400
+        return jsonify(error='reference_asset_ids must be a list'), 400
     if len(ref_ids) > image_providers.MAX_REFERENCES:
-        return jsonify(error=f'en fazla {image_providers.MAX_REFERENCES} referans '
-                             f'seçilebilir'), 400
+        return jsonify(error=f'at most {image_providers.MAX_REFERENCES} references '
+                             f'may be selected'), 400
     if ref_ids:
         sahip = ClientAsset.query.filter(ClientAsset.id.in_(ref_ids),
                                          ClientAsset.client_id == c.id,
                                          ClientAsset.deleted_at.is_(None)).count()
         if sahip != len(set(ref_ids)):
-            return jsonify(error='referans görsel bu müşteriye ait değil'), 403
+            return jsonify(error='reference image does not belong to this client'), 403
 
     ij = ImageJob(client_id=c.id, brief_id=data.get('brief_id'),
                   requested_by=u.get('email') or u.get('sub'), provider='codex_exec',
@@ -111,7 +112,7 @@ def imagegen_generate():
                   reference_asset_ids=list(ref_ids), status='queued')
     db.session.add(ij)
     db.session.commit()
-    # dedup ImageJob id'si üzerinden: panelin çift tıklaması ikinci job üretmez.
+    # dedup via the ImageJob id: a double-click in the panel doesn't produce a second job.
     job = jobqueue.enqueue('codex_image', {'image_job_id': ij.id}, priority=0,
                            dedup_key=f'codex_image:{ij.id}', created_by=u.get('sub'))
     return jsonify(image_job=ij.to_dict(), job=job.to_dict()), 202
@@ -119,13 +120,13 @@ def imagegen_generate():
 
 @bp.get('/jobs')
 def imagegen_jobs():
-    """Müşterinin son üretimleri (en yeni önce, en fazla 20)."""
+    """The client's most recent generations (newest first, max 20)."""
     _, err = _require_management()
     if err:
         return err
     client_id = request.args.get('client_id', type=int)
     if not client_id:
-        return jsonify(error='client_id zorunlu'), 400
+        return jsonify(error='client_id is required'), 400
     rows = (ImageJob.query.filter_by(client_id=client_id)
             .order_by(ImageJob.id.desc()).limit(20).all())
     return jsonify(image_jobs=[r.to_dict() for r in rows])
@@ -133,36 +134,36 @@ def imagegen_jobs():
 
 @bp.get('/jobs/<int:job_id>')
 def imagegen_job(job_id):
-    """Tek işin durumu — panel bunu yoklayarak üretimi bekler."""
+    """Status of a single job — the panel polls this while waiting for generation."""
     _, err = _require_management()
     if err:
         return err
     ij = db.session.get(ImageJob, job_id)
     if ij is None:
-        return jsonify(error='iş bulunamadı'), 404
+        return jsonify(error='job not found'), 404
     return jsonify(image_job=ij.to_dict())
 
 
 @bp.get('/jobs/<int:job_id>/image')
 def imagegen_image(job_id):
-    """Görseli rol kapısının arkasından stream et. Lokal depo dışarı açılmaz;
-    dosya adı DB'den gelir ve `abs_path` içinde ayrıca doğrulanır."""
+    """Stream the image from behind the role gate. The local store is never exposed
+    externally; the file name comes from the DB and is separately validated inside `abs_path`."""
     _, err = _require_management()
     if err:
         return err
     ij = db.session.get(ImageJob, job_id)
     if ij is None or not ij.output_path:
-        return jsonify(error='görsel yok'), 404
+        return jsonify(error='no image'), 404
     p = imagegen_store.abs_path(ij.output_path)
     if not p:
-        return jsonify(error='görsel dosyası bulunamadı'), 404
+        return jsonify(error='image file not found'), 404
     return send_file(p, mimetype='image/png', max_age=0)
 
 
 @bp.get('/health')
 def imagegen_health():
-    """Codex kurulumu ve oturum durumu + bakım anahtarı. Sır DÖNMEZ — `health_check`
-    auth dosyasının yalnız VARLIĞINA bakar, içeriğini okumaz."""
+    """Codex setup and session status + maintenance switch. Does NOT return secrets —
+    `health_check` only checks the auth file's EXISTENCE, doesn't read its contents."""
     _, err = _require_management()
     if err:
         return err
@@ -170,42 +171,43 @@ def imagegen_health():
     return jsonify(ok=st['ok'], detail=st['detail'], enabled=not _bakim_kapali())
 
 
-# --- Haftalık parti üretimi (2026-08-10) ---
+# --- Weekly batch generation (2026-08-10) ---
 
 @bp.post('/batch')
 def imagegen_batch_baslat():
-    """Haftanın onaylı brief'inden parti üretimi başlat (spec §3).
+    """Start batch generation from the week's approved brief (spec §3).
 
-    Kontrol sırası: bakım → müşteri → anahtar → KVKK → brief → plan → limit.
-    Limit EN SONDA ama satır açılmadan ÖNCE: parti kaç iş isteyeceğini ancak plan
-    çıkınca biliriz ve limit aşılıyorsa HİÇBİR satır açılmamalıdır (spec §8)."""
+    Check order: maintenance → client → switch → KVKK → brief → plan → limit.
+    Limit is LAST but BEFORE any row is opened: we only know how many jobs the
+    batch will need once the plan comes out, and if the limit would be exceeded, NO
+    row should be opened (spec §8)."""
     u, err = _require_management()
     if err:
         return err
     if _bakim_kapali():
-        return jsonify(error='Codex görsel üretimi şu anda bakımda.'), 503
+        return jsonify(error='Codex image generation is currently under maintenance.'), 503
     data = request.get_json(silent=True) or {}
     c = db.session.get(Client, data.get('client_id'))
     if c is None or c.status == 'deleted':
-        return jsonify(error='müşteri bulunamadı'), 404
+        return jsonify(error='client not found'), 404
     prof = c.brand_profile or {}
     if not prof.get('auto_image_enabled'):
-        return jsonify(error='bu müşteride haftalık görsel üretimi kapalı'), 409
+        return jsonify(error='weekly image generation is disabled for this client'), 409
     if not prof.get('ai_image_consent'):
-        return jsonify(error='müşteri AI görsel onayı yok (KVKK). Müşteri kaydında '
-                             'ai_image_consent onayı gerekli.'), 409
+        return jsonify(error='client has not given AI image consent (data protection). '
+                             'The ai_image_consent flag is required on the client record.'), 409
     week_iso = (data.get('week_iso') or '').strip()
     if not week_iso:
-        return jsonify(error='week_iso zorunlu'), 400
+        return jsonify(error='week_iso is required'), 400
     brief = WeeklyBrief.query.filter_by(client_id=c.id, week_iso=week_iso,
                                         status='approved').first()
     if brief is None:
-        return jsonify(error=f'{week_iso} için onaylı brief yok'), 404
+        return jsonify(error=f'no approved brief for {week_iso}'), 404
 
     plan = imagegen_batch.parti_plani(brief)
     if not plan['uygun']:
-        return jsonify(error="bu brief'te görselleştirilecek fikir yok "
-                             '(hepsi video/reel ya da fikir listesi boş)',
+        return jsonify(error='there is no idea to visualize in this brief '
+                             '(all are video/reel, or the idea list is empty)',
                        skipped=plan['skipped']), 409
 
     mevcut = imagegen_batch.mevcut_isler(c.id, week_iso)
@@ -220,12 +222,12 @@ def imagegen_batch_baslat():
         return jsonify(created=[], skipped=plan['skipped'], already=already,
                        logo_missing=logo_missing), 202
 
-    # Limit: parti TOPLAMI üzerinden. Kısmi üretim yapılmaz.
+    # Limit: applied to the batch TOTAL. No partial generation.
     if _gunluk_sayim(c.id) + len(isler) > DAILY_CLIENT_LIMIT:
-        return jsonify(error=f'Bu parti günlük müşteri sınırını aşıyor '
-                             f'({DAILY_CLIENT_LIMIT}). Yarın tekrar deneyin.'), 429
+        return jsonify(error=f'This batch exceeds the daily client limit '
+                             f'({DAILY_CLIENT_LIMIT}). Please try again tomorrow.'), 429
     if _gunluk_sayim() + len(isler) > DAILY_GLOBAL_LIMIT:
-        return jsonify(error=f'Bu parti günlük toplam sınırı aşıyor '
+        return jsonify(error=f'This batch exceeds the daily total limit '
                              f'({DAILY_GLOBAL_LIMIT}).'), 429
 
     sonuc = imagegen_batch.parti_uygula(c, brief, isler,
@@ -236,14 +238,14 @@ def imagegen_batch_baslat():
 
 @bp.get('/batch')
 def imagegen_batch_listele():
-    """Haftanın işlerini fikir bazında grupla (galeri)."""
+    """Group the week's jobs by idea (gallery)."""
     _, err = _require_management()
     if err:
         return err
     client_id = request.args.get('client_id', type=int)
     week_iso = (request.args.get('week_iso') or '').strip()
     if not client_id or not week_iso:
-        return jsonify(error='client_id ve week_iso zorunlu'), 400
+        return jsonify(error='client_id and week_iso are required'), 400
     brief = WeeklyBrief.query.filter_by(client_id=client_id, week_iso=week_iso,
                                         status='approved').first()
     if brief is None:
@@ -260,15 +262,16 @@ def imagegen_batch_listele():
 
 @bp.get('/weeks')
 def imagegen_weeks():
-    """Müşterinin onaylı brief'i olan haftalar (hafta seçici; en yeni önce).
+    """Weeks the client has an approved brief for (week selector; newest first).
 
-    Yalnız `approved`: taslak brief üretime giremez, seçiciye koymak yanıltır."""
+    `approved` only: a draft brief can't enter generation, listing it in the
+    selector would be misleading."""
     _, err = _require_management()
     if err:
         return err
     client_id = request.args.get('client_id', type=int)
     if not client_id:
-        return jsonify(error='client_id zorunlu'), 400
+        return jsonify(error='client_id is required'), 400
     rows = (WeeklyBrief.query
             .filter_by(client_id=client_id, status='approved')
             .order_by(WeeklyBrief.week_iso.desc()).limit(12).all())
@@ -278,16 +281,16 @@ def imagegen_weeks():
 
 @bp.get('/client-settings')
 def imagegen_client_settings_oku():
-    """Müşterinin iki kapı bayrağı. Panel bunu sayfa açılışında okur; okumasaydı
-    anahtar her yenilemede kapalı görünür, DB'de açık olur ve kullanıcı düğmenin
-    neden pasif olduğunu anlayamazdı."""
+    """The client's two gate flags. The panel reads this on page load; without it,
+    the switch would look off on every refresh while being on in the DB, and the
+    user wouldn't understand why the button is disabled."""
     _, err = _require_management()
     if err:
         return err
     client_id = request.args.get('client_id', type=int)
     c = db.session.get(Client, client_id) if client_id else None
     if c is None or c.status == 'deleted':
-        return jsonify(error='müşteri bulunamadı'), 404
+        return jsonify(error='client not found'), 404
     prof = c.brand_profile or {}
     return jsonify(auto_image_enabled=bool(prof.get('auto_image_enabled')),
                    ai_image_consent=bool(prof.get('ai_image_consent')))
@@ -295,20 +298,20 @@ def imagegen_client_settings_oku():
 
 @bp.patch('/client-settings')
 def imagegen_client_settings():
-    """`auto_image_enabled` anahtarını yaz. `brand_profile` MERGE edilir — üzerine
-    yazmak diğer marka alanlarını silerdi."""
+    """Write the `auto_image_enabled` switch. `brand_profile` is MERGED — overwriting
+    it would erase the other brand fields."""
     _, err = _require_management()
     if err:
         return err
     data = request.get_json(silent=True) or {}
     c = db.session.get(Client, data.get('client_id'))
     if c is None or c.status == 'deleted':
-        return jsonify(error='müşteri bulunamadı'), 404
+        return jsonify(error='client not found'), 404
     if not isinstance(data.get('auto_image_enabled'), bool):
-        return jsonify(error='auto_image_enabled bool olmalı'), 400
+        return jsonify(error='auto_image_enabled must be a boolean'), 400
     bp_ = dict(c.brand_profile) if isinstance(c.brand_profile, dict) else {}
     bp_['auto_image_enabled'] = data['auto_image_enabled']
-    c.brand_profile = bp_          # yeni dict — SQLAlchemy mutasyonu böyle algılar
+    c.brand_profile = bp_          # a new dict — this is how SQLAlchemy detects the mutation
     c.updated_at = utcnow()
     db.session.commit()
     return jsonify(auto_image_enabled=bp_['auto_image_enabled'])

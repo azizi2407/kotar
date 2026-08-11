@@ -7,8 +7,9 @@ worker_class = 'gthread'
 threads = int(os.getenv('GUNICORN_THREADS', '4'))
 preload_app = True
 worker_tmp_dir = '/dev/shm'
-# Büyük dosya yüklemeleri (500 MB'a kadar) istek-içinde Drive'a senkron yüklenir →
-# worker'ın timeout'a takılmaması için 1200 sn (nginx proxy/body timeout'larıyla hizalı).
+# Large file uploads (up to 500 MB) are uploaded to Drive synchronously within
+# the request → 1200s so the worker doesn't hit a timeout (aligned with nginx
+# proxy/body timeouts).
 timeout = int(os.getenv('GUNICORN_TIMEOUT', '1200'))
 graceful_timeout = 30
 keepalive = 5
@@ -18,24 +19,27 @@ loglevel = os.getenv('GUNICORN_LOG_LEVEL', 'info')
 
 
 def post_fork(server, worker):
-    """Fork'tan miras kalan Postgres bağlantısını çocukta havuzdan düşür.
+    """Drop the Postgres connection inherited from the fork out of the pool in the child.
 
-    `preload_app=True` uygulamayı MASTER süreçte kuruyor; `app.py`'nin sonundaki
-    `create_app()` → `db.create_all()` orada gerçek bir Postgres bağlantısı açıp
-    SQLAlchemy havuzunda bırakıyor. Master fork edince bu soket İKİ worker'a
-    birden miras kalıyor ve iki süreç aynı TCP soketinde konuşmaya başlıyor →
-    psycopg protokolü bozuluyor. Canlıda 2026-08-09 18:07 restart'ından sonra
-    tam olarak bu görüldü: 18:09-18:15 arası `IndexError: tuple index out of
-    range`, `ResourceClosedError`, sonunda `server closed the connection
-    unexpectedly` (PATCH /api/planning/boards/user:1/items 500 döndü). Soket
-    ölüp havuzdan düşünce hata kendiliğinden durdu — yani belirti HER restart'ın
-    ardından birkaç dakika sürüp kayboluyordu, bu yüzden gözden kaçıyordu.
+    `preload_app=True` builds the app in the MASTER process; `create_app()` →
+    `db.create_all()` at the end of `app.py` opens a real Postgres connection
+    there and leaves it in the SQLAlchemy pool. When the master forks, this
+    socket is inherited by BOTH workers at once, and the two processes start
+    talking on the same TCP socket → the psycopg protocol breaks. This is
+    exactly what was seen live after the 2026-08-09 18:07 restart: between
+    18:09-18:15, `IndexError: tuple index out of range`, `ResourceClosedError`,
+    and finally `server closed the connection unexpectedly` (PATCH
+    /api/planning/boards/user:1/items returned 500). Once the socket died and
+    dropped from the pool, the error stopped on its own — meaning the symptom
+    lasted a few minutes after EVERY restart and then vanished, which is why it
+    kept going unnoticed.
 
-    `pool_pre_ping` bunu YAKALAYAMAZ: bağlantı ölü değil, paylaşılmış.
+    `pool_pre_ping` CANNOT CATCH THIS: the connection isn't dead, it's shared.
 
-    `close=False` kritik — soketi gerçekten kapatmayız, yalnız bu sürecin
-    havuzundan bırakırız; kapatsaydık kardeş worker'ın hâlâ geçerli sayfa
-    kopyasını da yıkardık (SQLAlchemy'nin fork için önerdiği yol).
+    `close=False` is critical — we don't actually close the socket, we only drop
+    it from this process's pool; closing it would also tear down the sibling
+    worker's still-valid copy of the same page (the approach SQLAlchemy
+    recommends for fork).
     """
     from app import app
     from extensions import db

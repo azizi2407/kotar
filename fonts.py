@@ -1,14 +1,17 @@
-"""Font havuzu API'si (2026-08-05) — `/api/fonts`.
+"""Font pool API (2026-08-05) — `/api/fonts`.
 
-Havuz merkezî: her font dosyası tek satır, müşterilere N:N atanır. Dosyalar
-**sunucuda** (`data/fonts/<sha256>.<ext>`), Drive'a gitmez — önizleme sayfası her
-fontu tarayıcıya indiriyor ve Drive proxy'si 30 fontluk bir sayfayı yavaşlatırdı.
+The pool is centralized: each font file is a single row, assigned to clients N:N.
+Files live **on the server** (`data/fonts/<sha256>.<ext>`), not on Drive — the preview
+page downloads every font to the browser, and a Drive proxy would slow down a
+30-font page.
 
-**Doğrulama uzantıya değil İMZAYA bakar.** `/fonts/<id>/file` ucu dosyayı tarayıcıya
-`as_attachment=False` ile veriyor; "adı .ttf olan her şey" kabul edilemez.
+**Validation checks the SIGNATURE, not the extension.** The `/fonts/<id>/file`
+endpoint serves the file to the browser with `as_attachment=False`; "anything named
+.ttf" can't be accepted.
 
-Yetki: okuma/indirme dört üretim rolü (Marka Rehberi kapısıyla aynı — tasarımcı,
-içerikçi ve videograf da fonta bakar), yazma (yükle/sil/ata) **management + designer**.
+Authorization: read/download is open to the four production roles (same as the Brand
+Guide gate — designer, content_creator and videographer also look at fonts), write
+(upload/delete/assign) is **management + designer**.
 """
 import hashlib
 import io
@@ -33,19 +36,19 @@ bp.before_request(csrf_protect)
 READ_ROLES = ('management', 'designer', 'content_creator', 'videographer')
 WRITE_ROLES = ('management', 'designer')
 
-MAX_FONT_BYTES = 10 * 1024 * 1024        # fontlar 100–500 KB; 10 MB bol bir tavan
-# Zip sınırları (2026-08-06): font siteleri 1–5 MB arşiv veriyor; tavanlar
-# zip-bomb'a karşı. Açılmış toplam boyut sıkıştırılmış boyuttan bağımsız kontrol
-# edilir — 50 MB'lık bir arşiv 5 GB'a açılabilir.
+MAX_FONT_BYTES = 10 * 1024 * 1024        # fonts are 100–500 KB; 10 MB is a generous ceiling
+# Zip limits (2026-08-06): font sites give 1–5 MB archives; the ceilings guard
+# against zip-bombs. Total extracted size is checked independently of compressed
+# size — a 50 MB archive can extract to 5 GB.
 ZIP_MAX_BYTES = 50 * 1024 * 1024
 ZIP_MAX_TOTAL_BYTES = 100 * 1024 * 1024
 ZIP_MAX_ENTRIES = 200
 STORE_DIR = os.environ.get('FONT_STORE_DIR') or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'data', 'fonts')
 
-# Dosya imzaları (ilk 4 bayt). TTF'nin iki geçerli başlangıcı var: sürüm 1.0
-# (0x00010000) ve eski Apple 'true'; 'ttcf' koleksiyon dosyasıdır (birden çok
-# font içerir, tarayıcı yine oynatır).
+# File signatures (first 4 bytes). TTF has two valid headers: version 1.0
+# (0x00010000) and the old Apple 'true'; 'ttcf' is a collection file (contains
+# multiple fonts, the browser still plays it).
 _IMZALAR = (
     (b'wOF2', 'woff2'),
     (b'wOFF', 'woff'),
@@ -55,14 +58,14 @@ _IMZALAR = (
     (b'ttcf', 'ttf'),
 )
 
-# "Montserrat-BoldItalic.ttf" → aile "Montserrat", stil "Bold Italic".
+# "Montserrat-BoldItalic.ttf" → family "Montserrat", style "Bold Italic".
 _STIL_SOZCUKLERI = ('Thin', 'ExtraLight', 'UltraLight', 'Light', 'Regular', 'Normal',
                     'Book', 'Medium', 'SemiBold', 'DemiBold', 'Bold', 'ExtraBold',
                     'UltraBold', 'Black', 'Heavy', 'Italic', 'Oblique')
 
 
 def _format_of(data):
-    """Dosya imzasından format; tanınmazsa None."""
+    """Format from the file signature; None if unrecognized."""
     for imza, fmt in _IMZALAR:
         if data[:4] == imza:
             return fmt
@@ -70,10 +73,11 @@ def _format_of(data):
 
 
 def _stilleri_ayikla(metin):
-    """Metinden stil sözcüklerini çıkar. Eşleşenler UZUNDAN KISAYA aranır ve
-    bulunan parça metinden düşülür: aksi halde "ExtraBold" içinde "Bold" da
-    eşleşir ve stil "Bold ExtraBold" olurdu. Arama case-SENSITIVE — font adları
-    CamelCase ve `re.I` "BoldItalic"teki sınırları bozuyor."""
+    """Extract style words from text. Matches are searched LONGEST TO SHORTEST, and
+    the matched piece is removed from the text: otherwise "Bold" would also match
+    inside "ExtraBold" and the style would end up "Bold ExtraBold". The search is
+    case-SENSITIVE — font names are CamelCase and `re.I` breaks the boundaries in
+    "BoldItalic"."""
     kalan, bulunan = metin, []
     for s in sorted(_STIL_SOZCUKLERI, key=len, reverse=True):
         if s in kalan:
@@ -83,26 +87,26 @@ def _stilleri_ayikla(metin):
 
 
 def _tahmin(file_name):
-    """Dosya adından (aile, stil) tahmini. fontTools bağımlılığı BİLEREK yok —
-    isim kullanıcı tarafından düzeltilebiliyor (`PUT /fonts/<id>`)."""
+    """Guess (family, style) from the file name. fontTools dependency is DELIBERATELY
+    absent — the name can be corrected by the user (`PUT /fonts/<id>`)."""
     kok = re.sub(r'\.(ttf|otf|woff2?|ttc)$', '', file_name or '', flags=re.I)
-    # Variable font eksenleri: "Montserrat[wght].ttf", "Inter[opsz,wght].ttf" —
-    # köşeli parantez aile adının parçası değil, eksen listesi (2026-08-06).
+    # Variable font axes: "Montserrat[wght].ttf", "Inter[opsz,wght].ttf" — the
+    # square brackets aren't part of the family name, they're the axis list (2026-08-06).
     degisken = '[' in kok
     kok = re.sub(r'\[[^\]]*\]', '', kok).strip('-_ ')
     parcalar = [p for p in re.split(r'[-_\s]+', kok) if p]
     aile = parcalar[0] if parcalar else kok
     bulunan = _stilleri_ayikla(''.join(parcalar[1:]))
-    # Ayırıcı yoksa ("MontserratBold.ttf") stil gövdenin sonundadır.
+    # If there's no separator ("MontserratBold.ttf") the style is at the end of the stem.
     if not bulunan:
         for s in sorted(_STIL_SOZCUKLERI, key=len, reverse=True):
             if kok.endswith(s) and len(kok) > len(s):
                 bulunan, aile = [s], kok[:-len(s)].strip('-_ ') or kok
                 break
-    # Çıktı sırası sabit olsun ("Bold Italic", hiçbir zaman "Italic Bold").
+    # Keep the output order fixed ("Bold Italic", never "Italic Bold").
     stil = ' '.join(s for s in _STIL_SOZCUKLERI if s in bulunan)
     if degisken:
-        # Tek dosya tüm ağırlıkları taşıyor; "Regular" demek yanıltıcı olurdu.
+        # A single file carries all weights; calling it "Regular" would be misleading.
         stil = f'Variable {stil}'.strip()
     return (aile or 'Bilinmeyen'), (stil or 'Regular')
 
@@ -114,19 +118,20 @@ def _path_of(font):
 def _require(roles):
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='not authenticated'), 401)
     if u.get('role') not in roles:
-        return None, (jsonify(error='bu işlem için yetkiniz yok'), 403)
+        return None, (jsonify(error='you are not authorized for this action'), 403)
     return u, None
 
 
 def _silebilir(u, font):
-    """Bu kullanıcı bu fontu havuzdan kaldırabilir mi (2026-08-06, proje sahibi).
+    """Can this user remove this font from the pool (2026-08-06, project owner).
 
-    Yönetim ayrımsız; **tasarımcı YALNIZ kendi yüklediğini**. Önceden designer da
-    her fontu silebiliyordu — 230 fontluk ortak havuzun (Google Fonts içe aktarımı)
-    tek tıkla boşaltılabilmesi demekti. Kural TEK yerde: hem uç hem listedeki
-    `can_delete` bayrağı buradan okur, ayrışırsa düğme yalan söylerdi.
+    Management can remove any; **designer can remove ONLY what they uploaded**.
+    Previously designer could delete any font — meaning the shared 230-font pool
+    (imported from Google Fonts) could be wiped out with one click. The rule lives
+    in ONE place: both the endpoint and the list's `can_delete` flag read from here,
+    so the button never lies by diverging.
     """
     if not u:
         return False
@@ -136,7 +141,7 @@ def _silebilir(u, font):
 
 
 def _client_map(font_ids):
-    """{font_id: [{id, name}]} — TEK sorgu (font başına lazy erişim N+1 olurdu)."""
+    """{font_id: [{id, name}]} — ONE query (lazy access per font would be N+1)."""
     if not font_ids:
         return {}
     rows = (db.session.query(FontClient.font_id, Client.id, Client.name)
@@ -155,8 +160,8 @@ def _uploader_names():
 
 @bp.get('/fonts')
 def fonts_list():
-    """Havuzun tamamı; her fontta atandığı müşteriler. Aile+stil sıralı — panel
-    aileye göre grupluyor, sıralamayı burada yapmak orada `sort` gerektirmez."""
+    """The entire pool; each font with its assigned clients. Sorted by family+style —
+    the panel groups by family, doing the sort here means it doesn't need `sort` there."""
     _, err = _require(READ_ROLES)
     if err:
         return err
@@ -173,7 +178,7 @@ def fonts_list():
 
 @bp.get('/clients/<int:client_id>/fonts')
 def client_fonts(client_id):
-    """Müşteriye atanan fontlar (müşteri medya sayfasının 'İlgili fontlar' bölümü)."""
+    """Fonts assigned to the client (the 'Related fonts' section on the client media page)."""
     _, err = _require(READ_ROLES)
     if err:
         return err
@@ -186,8 +191,8 @@ def client_fonts(client_id):
 
 
 def _ata(font, client_id, sub):
-    """Yükleme müşteri sayfasından geldiyse atama aynı istekte yapılır (kullanıcı
-    'yükle → sonra ata' iki adımına zorlanmasın). Idempotent."""
+    """If the upload came from the client page, assignment happens in the same
+    request (so the user isn't forced through the two-step 'upload → then assign'). Idempotent."""
     if not client_id or db.session.get(Client, client_id) is None:
         return
     if FontClient.query.filter_by(font_id=font.id, client_id=client_id).first() is None:
@@ -195,23 +200,24 @@ def _ata(font, client_id, sub):
 
 
 def _kaydet(data, file_name, sub, family=None, style=None):
-    """Tek font dosyasını havuza al. `(font, hata)` döner — hata bir metin.
+    """Take a single font file into the pool. Returns `(font, error)` — error is text.
 
-    Tek dosya ve zip yolları BU fonksiyonu paylaşır: doğrulama, dedup, diske yazma
-    ve canlandırma kuralları iki yerde ayrı yazılsaydı zamanla ayrışırdı.
-    COMMIT ETMEZ — çağıran (tek dosyada bir, zipte hepsi için bir) commit atar."""
+    The single-file and zip paths SHARE this function: if validation, dedup,
+    disk write and revival rules were written separately in two places they'd
+    drift apart over time. Does NOT COMMIT — the caller commits (once for a single
+    file, once for all of a zip)."""
     if not data:
-        return None, 'dosya boş'
+        return None, 'file is empty'
     if len(data) > MAX_FONT_BYTES:
-        return None, 'font dosyası 10 MB sınırını aşıyor'
+        return None, 'font file exceeds the 10 MB limit'
     fmt = _format_of(data)
     if fmt is None:
-        return None, 'geçerli bir font dosyası değil (ttf, otf, woff, woff2)'
+        return None, 'not a valid font file (ttf, otf, woff, woff2)'
 
     sha = hashlib.sha256(data).hexdigest()
     mevcut = Font.query.filter_by(sha256=sha).order_by(Font.id.desc()).first()
     if mevcut is not None and mevcut.deleted_at is None:
-        return mevcut, 'bu font zaten havuzda'
+        return mevcut, 'this font is already in the pool'
 
     os.makedirs(STORE_DIR, exist_ok=True)
     yol = os.path.join(STORE_DIR, f'{sha}.{fmt}')
@@ -223,7 +229,7 @@ def _kaydet(data, file_name, sub, family=None, style=None):
     aile = (family or '').strip() or aile_t
     stil = (style or '').strip() or stil_t
 
-    if mevcut is not None:                    # soft-delete edilmişti → canlandır
+    if mevcut is not None:                    # had been soft-deleted → revive it
         mevcut.deleted_at = None
         mevcut.family, mevcut.style = aile, stil
         mevcut.uploaded_by, mevcut.uploaded_at = sub, utcnow()
@@ -242,16 +248,18 @@ def _zip_mi(data):
 
 
 def _zipten_fontlar(data):
-    """Zip içindeki font dosyalarını `[(ad, bytes), …]` olarak çıkar; `(liste, atlanan)`.
+    """Extract the font files inside a zip as `[(name, bytes), …]`; returns `(list, skipped)`.
 
-    Font siteleri zip'i lisans PDF'i, önizleme JPG'si ve okuma notlarıyla birlikte
-    veriyor (örnek: Bigbelow.otf + Bigbelow.ttf + Bigbelow.jpg + More Info.txt +
-    Read Me.pdf) — font olmayan her şey atlanır ve **raporlanır**, sessizce yutulmaz.
+    Font sites ship the zip together with a license PDF, a preview JPG and readme
+    notes (example: Bigbelow.otf + Bigbelow.ttf + Bigbelow.jpg + More Info.txt +
+    Read Me.pdf) — everything that isn't a font is skipped and **reported**, not
+    silently swallowed.
 
-    Güvenlik: yol BİLGİSİ kullanılmaz (yalnız basename) → zip-slip imkânsız; açılan
-    toplam boyut ve dosya sayısı sınırlı → zip bomb erken durur. macOS'un
-    `__MACOSX/` ve `._` AppleDouble kayıtları rapora bile girmez (kullanıcı onları
-    kendisi koymadı, 'atlandı' listesinde gürültü yaparlar)."""
+    Security: path INFORMATION is never used (only the basename) → zip-slip is
+    impossible; extracted total size and file count are limited → a zip bomb stops
+    early. macOS's `__MACOSX/` and `._` AppleDouble entries don't even make it into
+    the report (the user didn't put them there themselves, they'd just be noise in
+    the 'skipped' list)."""
     fontlar, atlanan, toplam = [], [], 0
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         for info in z.infolist()[:ZIP_MAX_ENTRIES]:
@@ -260,15 +268,15 @@ def _zipten_fontlar(data):
                     or info.filename.startswith('__MACOSX/'):
                 continue
             if info.file_size > MAX_FONT_BYTES:
-                atlanan.append(f'{ad} (10 MB üstü)')
+                atlanan.append(f'{ad} (over 10 MB)')
                 continue
             toplam += info.file_size
             if toplam > ZIP_MAX_TOTAL_BYTES:
-                atlanan.append('… (arşiv açılmış boyut sınırını aştı)')
+                atlanan.append('… (archive exceeded the extracted size limit)')
                 break
             icerik = z.read(info)
             if _format_of(icerik) is None:
-                atlanan.append(ad)          # jpg / pdf / txt — beklenen durum
+                atlanan.append(ad)          # jpg / pdf / txt — expected case
                 continue
             fontlar.append((ad, icerik))
     return fontlar, atlanan
@@ -276,38 +284,39 @@ def _zipten_fontlar(data):
 
 @bp.post('/fonts')
 def font_upload():
-    """Font yükle (multipart: file, family?, style?, client_id?).
+    """Upload a font (multipart: file, family?, style?, client_id?).
 
-    `file` bir **ZIP** olabilir (2026-08-06): içindeki font dosyaları alınır, geri
-    kalanı (lisans PDF'i, önizleme görseli, okuma notu) atlanır ve yanıtta
-    `skipped` ile raporlanır. Zip yanıtı `{fonts: [...], skipped: [...]}`, tek
-    dosya yanıtı `{font: {...}}` — panel ikisini de işler.
+    `file` can be a **ZIP** (2026-08-06): the font files inside are taken, the rest
+    (license PDF, preview image, readme note) is skipped and reported in the
+    response as `skipped`. Zip response is `{fonts: [...], skipped: [...]}`, single
+    file response is `{font: {...}}` — the panel handles both.
 
-    Dedup içerik hash'iyle: aynı dosya silinmemiş bir kayıtta duruyorsa tek dosyada
-    409 + mevcut kayıt döner; zipte o dosya `skipped`'a yazılır ve kalanı yüklenir
-    (bir zipte hem yeni hem eski font olması normal). Soft-delete edilmiş kayıt
-    CANLANDIRILIR — dosya diskte zaten var."""
+    Dedup by content hash: if the same file already exists as a non-deleted record,
+    a single-file upload returns 409 + the existing record; in a zip that file is
+    written to `skipped` and the rest is uploaded (having both a new and an existing
+    font in one zip is normal). A soft-deleted record is REVIVED — the file already
+    exists on disk."""
     u, err = _require(WRITE_ROLES)
     if err:
         return err
     f = request.files.get('file')
     if f is None or not f.filename:
-        return jsonify(error='file zorunlu'), 400
+        return jsonify(error='file is required'), 400
     data = f.read()
     if not data:
-        return jsonify(error='dosya boş'), 400
+        return jsonify(error='file is empty'), 400
     client_id = request.form.get('client_id', type=int)
 
     if _zip_mi(data):
         if len(data) > ZIP_MAX_BYTES:
-            return jsonify(error='arşiv 50 MB sınırını aşıyor'), 413
+            return jsonify(error='archive exceeds the 50 MB limit'), 413
         try:
             adaylar, atlanan = _zipten_fontlar(data)
         except (zipfile.BadZipFile, RuntimeError) as e:
             log.warning('zip okunamadı (%s): %s', f.filename, e)
-            return jsonify(error='arşiv okunamadı (bozuk veya parola korumalı)'), 400
+            return jsonify(error='could not read the archive (corrupt or password protected)'), 400
         if not adaylar:
-            return jsonify(error='arşivde font dosyası bulunamadı (ttf, otf, woff, woff2)',
+            return jsonify(error='no font file found in the archive (ttf, otf, woff, woff2)',
                            skipped=atlanan), 400
         eklenen = []
         for ad, icerik in adaylar:
@@ -324,7 +333,7 @@ def font_upload():
 
     font, hata = _kaydet(data, f.filename, u['sub'],
                          request.form.get('family'), request.form.get('style'))
-    if hata == 'bu font zaten havuzda':
+    if hata == 'this font is already in the pool':
         cmap = _client_map([font.id])
         return jsonify(error=hata, font=font.to_dict(clients=cmap.get(font.id, []))), 409
     if hata:
@@ -337,18 +346,18 @@ def font_upload():
 
 @bp.put('/fonts/<int:font_id>')
 def font_update(font_id):
-    """Aile/stil adını düzelt — tahmin dosya adından geldiği için sık gerekir."""
+    """Correct the family/style name — needed often since the guess comes from the file name."""
     _, err = _require(WRITE_ROLES)
     if err:
         return err
     font = Font.query.filter_by(id=font_id, deleted_at=None).first()
     if font is None:
-        return jsonify(error='font bulunamadı'), 404
+        return jsonify(error='font not found'), 404
     data = request.get_json(silent=True) or {}
     if 'family' in data:
         aile = (data.get('family') or '').strip()
         if not aile:
-            return jsonify(error='aile adı boş olamaz'), 400
+            return jsonify(error='family name cannot be empty'), 400
         font.family = aile[:160]
     if 'style' in data:
         font.style = ((data.get('style') or '').strip() or 'Regular')[:64]
@@ -359,19 +368,20 @@ def font_update(font_id):
 
 @bp.delete('/fonts/<int:font_id>')
 def font_delete(font_id):
-    """Havuzdan kaldır (soft). Disk dosyası KALIR: aynı hash yeniden yüklenirse
-    kayıt canlandırılıyor ve indirme masrafı tekrarlanmıyor. Atamalar da kalır —
-    font geri gelirse müşteri bağları da geri gelsin.
+    """Remove from the pool (soft). The disk file STAYS: if the same hash is
+    uploaded again, the record is revived and the download cost isn't repeated.
+    Assignments also stay — if the font comes back, the client links should come
+    back with it.
 
-    Yetki `_silebilir`: yönetim ayrımsız, tasarımcı yalnız kendi yüklediğini."""
+    Authorization via `_silebilir`: management can remove any, designer only what they uploaded."""
     u, err = _require(WRITE_ROLES)
     if err:
         return err
     font = Font.query.filter_by(id=font_id, deleted_at=None).first()
     if font is None:
-        return jsonify(error='font bulunamadı'), 404
+        return jsonify(error='font not found'), 404
     if not _silebilir(u, font):
-        return jsonify(error='yalnız kendi yüklediğiniz fontu kaldırabilirsiniz'), 403
+        return jsonify(error='you can only remove fonts you uploaded yourself'), 403
     font.deleted_at = utcnow()
     db.session.commit()
     return jsonify(ok=True)
@@ -379,17 +389,17 @@ def font_delete(font_id):
 
 @bp.post('/fonts/<int:font_id>/clients')
 def font_assign(font_id):
-    """{client_id, assigned} — müşteriye ata / atamayı kaldır. Idempotent."""
+    """{client_id, assigned} — assign to client / remove assignment. Idempotent."""
     u, err = _require(WRITE_ROLES)
     if err:
         return err
     font = Font.query.filter_by(id=font_id, deleted_at=None).first()
     if font is None:
-        return jsonify(error='font bulunamadı'), 404
+        return jsonify(error='font not found'), 404
     data = request.get_json(silent=True) or {}
     client_id = data.get('client_id')
     if not isinstance(client_id, int) or db.session.get(Client, client_id) is None:
-        return jsonify(error='müşteri bulunamadı'), 404
+        return jsonify(error='client not found'), 404
 
     row = FontClient.query.filter_by(font_id=font_id, client_id=client_id).first()
     if data.get('assigned', True):
@@ -407,26 +417,26 @@ def _send(font, indir):
     yol = _path_of(font)
     if not os.path.exists(yol):
         log.warning('font dosyası diskte yok: %s', yol)
-        return jsonify(error='font dosyası sunucuda bulunamadı'), 404
+        return jsonify(error='font file not found on server'), 404
     resp = send_file(yol, mimetype=FONT_MIMES.get(font.format, 'application/octet-stream'),
                      as_attachment=indir, download_name=font.file_name,
                      conditional=True)
-    # Panel önizlemesi aynı fontu her yeniden çizimde istemesin. `private`: dosya
-    # oturumlu uçtan geliyor, paylaşımlı vekilde saklanmamalı.
+    # So the panel preview doesn't re-request the same font on every redraw. `private`:
+    # the file comes from an authenticated endpoint, must not be cached in a shared proxy.
     resp.headers['Cache-Control'] = 'private, max-age=86400'
     return resp
 
 
 @bp.get('/fonts/<int:font_id>/file')
 def font_file(font_id):
-    """`@font-face` kaynağı — INLINE (as_attachment=False). Bu uç yüzünden yükleme
-    tarafında imza doğrulaması zorunlu."""
+    """`@font-face` source — INLINE (as_attachment=False). Because of this endpoint,
+    signature validation is mandatory on the upload side."""
     _, err = _require(READ_ROLES)
     if err:
         return err
     font = Font.query.filter_by(id=font_id, deleted_at=None).first()
     if font is None:
-        return jsonify(error='font bulunamadı'), 404
+        return jsonify(error='font not found'), 404
     return _send(font, indir=False)
 
 
@@ -437,5 +447,5 @@ def font_download(font_id):
         return err
     font = Font.query.filter_by(id=font_id, deleted_at=None).first()
     if font is None:
-        return jsonify(error='font bulunamadı'), 404
+        return jsonify(error='font not found'), 404
     return _send(font, indir=True)

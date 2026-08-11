@@ -1,11 +1,12 @@
-// Bildirimler sayfası — tüm bildirimler (okunmuş + okunmamış) detaylı + geçmiş.
-// Bell (AppLayout) sadece son birkaçını gösterir; burası tam liste + sayfalama.
+// Notifications page — all notifications (read + unread) in detail + history.
+// The bell (AppLayout) only shows the last few; this is the full list + pagination.
 import { useEffect, useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { Megaphone } from "lucide-react"
 import { toast } from "sonner"
 
 import { useAuth } from "@/lib/auth"
+import { useI18n } from "@/lib/i18n"
 
 import {
   fetchNotifications, markAllNotificationsRead, markNotificationRead,
@@ -20,51 +21,58 @@ import { cn } from "@/lib/utils"
 
 const PAGE = 25
 
-// Önem rozeti (2026-08-05). Renk kodu yalnız kritik ve normal için anlamlı —
-// "bilgi" sessiz kalsın diye nötr, listeyi gürültüye boğmasın.
-const SEVERITY_STIL: Record<Severity, { label: string; cls: string }> = {
-  kritik: { label: "Kritik", cls: "bg-red-500/15 text-red-700 dark:text-red-400" },
-  normal: { label: "Normal", cls: "bg-amber-500/15 text-amber-700 dark:text-amber-400" },
-  bilgi: { label: "Bilgi", cls: "bg-muted text-muted-foreground" },
+// Severity badge (2026-08-05). Color coding is only meaningful for critical and
+// normal — "info" stays neutral so it doesn't drown the list in noise.
+function severityStil(t: (key: string) => string): Record<Severity, { label: string; cls: string }> {
+  return {
+    kritik: { label: t("pages.notifications.severity.critical"), cls: "bg-red-500/15 text-red-700 dark:text-red-400" },
+    normal: { label: t("pages.notifications.severity.normal"), cls: "bg-amber-500/15 text-amber-700 dark:text-amber-400" },
+    bilgi: { label: t("pages.notifications.severity.info"), cls: "bg-muted text-muted-foreground" },
+  }
 }
 
-const FILTRELER: { value: "hepsi" | Severity; label: string }[] = [
-  { value: "hepsi", label: "Hepsi" },
-  { value: "kritik", label: "Kritik" },
-  { value: "normal", label: "Normal" },
-  { value: "bilgi", label: "Bilgi" },
-]
-
-// Bildirim türü → Türkçe etiket (rozet).
-const KIND_LABEL: Record<string, string> = {
-  revision_requested: "Revizyon talebi",
-  revision_resolved: "Revizyon çözüldü",
-  client_review: "Müşteri incelemesi",
-  ops_digest_report: "Ops Digest raporu",
-  job_failed: "İş başarısız",
-  job_stuck: "İş takıldı",
-  provision_failed: "Klasör kurulamadı",
-  pre_approval: "Ön onay",
-  old_video_removed: "Eski video silindi",
-  old_video_kept: "Eski video korundu",
-  similarity_report: "Benzerlik raporu",
-  mail: "Yeni e-posta",
-  // 2026-08-05 ile gelenler
-  announcement: "Anons",
-  priority_marked: "Öncelikli müşteri",
-  planning_changed: "Planlama panosu",
-  photos_uploaded: "Çekim fotoğrafı",
-  video_uploaded: "Video yüklendi",
-  content_uploaded: "İçerik yüklendi",
-  special_day_soon: "Yarının özel günü",
-  ad_ending: "Reklam bitiyor",
-  depot_quota: "Depo kotası",
+function filtreler(t: (key: string) => string): { value: "hepsi" | Severity; label: string }[] {
+  return [
+    { value: "hepsi", label: t("pages.notifications.severity.all") },
+    { value: "kritik", label: t("pages.notifications.severity.critical") },
+    { value: "normal", label: t("pages.notifications.severity.normal") },
+    { value: "bilgi", label: t("pages.notifications.severity.info") },
+  ]
 }
 
-// Panel içinde gerçekten var olan route'lar — bildirim linki bunlardan birine
-// çözülüyorsa "Git" düğmesi gösterilir (yoksa gizli; kırık yönlendirme olmasın).
-// 2026-08-05: yeni bildirim türlerinin hedefleri eklendi — listede olmayan bir yol
-// "Git" düğmesini sessizce gizler, yani eksik bir kayıt bildirimi tıklanamaz yapar.
+// Notification kind → label (badge).
+function kindLabel(t: (key: string) => string): Record<string, string> {
+  return {
+    revision_requested: t("pages.notifications.kind.revisionRequested"),
+    revision_resolved: t("pages.notifications.kind.revisionResolved"),
+    client_review: t("pages.notifications.kind.clientReview"),
+    ops_digest_report: t("pages.notifications.kind.opsDigestReport"),
+    job_failed: t("pages.notifications.kind.jobFailed"),
+    job_stuck: t("pages.notifications.kind.jobStuck"),
+    provision_failed: t("pages.notifications.kind.provisionFailed"),
+    pre_approval: t("pages.notifications.kind.preApproval"),
+    old_video_removed: t("pages.notifications.kind.oldVideoRemoved"),
+    old_video_kept: t("pages.notifications.kind.oldVideoKept"),
+    similarity_report: t("pages.notifications.kind.similarityReport"),
+    mail: t("pages.notifications.kind.mail"),
+    // Added with 2026-08-05
+    announcement: t("pages.notifications.kind.announcement"),
+    priority_marked: t("pages.notifications.kind.priorityMarked"),
+    planning_changed: t("pages.notifications.kind.planningChanged"),
+    photos_uploaded: t("pages.notifications.kind.photosUploaded"),
+    video_uploaded: t("pages.notifications.kind.videoUploaded"),
+    content_uploaded: t("pages.notifications.kind.contentUploaded"),
+    special_day_soon: t("pages.notifications.kind.specialDaySoon"),
+    ad_ending: t("pages.notifications.kind.adEnding"),
+    depot_quota: t("pages.notifications.kind.depotQuota"),
+  }
+}
+
+// Routes that actually exist in the panel — the "Go" button is shown if the
+// notification link resolves to one of these (otherwise hidden, to avoid a
+// broken redirect). 2026-08-05: added targets for new notification kinds — a
+// path missing from this list silently hides the "Go" button, i.e. a missing
+// entry makes a notification unclickable.
 const KNOWN = ["/sharing", "/clients", "/brief", "/designer", "/videographer",
   "/special-days", "/canvas", "/tools", "/notifications", "/planlama", "/reklam",
   "/videograf-deposu", "/musteri-takip", "/posta", "/marka-rehberi", "/server", "/"]
@@ -82,6 +90,7 @@ function fullTime(iso: string) {
 }
 
 export function NotificationsPage() {
+  const { t } = useI18n()
   const [items, setItems] = useState<Notification[]>([])
   const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -90,6 +99,9 @@ export function NotificationsPage() {
   const [announceOpen, setAnnounceOpen] = useState(false)
   const { isManagement } = useAuth()
   const navigate = useNavigate()
+  const SEVERITY_STIL = severityStil(t)
+  const FILTRELER = filtreler(t)
+  const KIND_LABEL = kindLabel(t)
 
   async function loadFirst() {
     setLoading(true)
@@ -98,7 +110,7 @@ export function NotificationsPage() {
       setItems(d.notifications)
       setHasMore(Boolean(d.has_more))
     } catch {
-      toast.error("Bildirimler yüklenemedi")
+      toast.error(t("pages.notifications.loadFailed"))
     } finally {
       setLoading(false)
     }
@@ -111,7 +123,7 @@ export function NotificationsPage() {
       setItems((prev) => [...prev, ...d.notifications])
       setHasMore(Boolean(d.has_more))
     } catch {
-      toast.error("Daha fazla yüklenemedi")
+      toast.error(t("pages.notifications.loadMoreFailed"))
     } finally {
       setLoadingMore(false)
     }
@@ -123,9 +135,9 @@ export function NotificationsPage() {
   }, [])
 
   const unreadCount = useMemo(() => items.filter((n) => !n.read_at).length, [items])
-  // Filtre CLIENT tarafında: sayfalama offset'i sunucuda, oraya severity süzgeci
-  // eklemek "daha fazla yükle"nin sayfa sınırlarını karıştırırdı. Liste zaten
-  // sayfa başına 25 satır.
+  // Filtering is CLIENT-side: pagination offset lives server-side, and adding
+  // a severity filter there would confuse "load more"'s page boundaries. The
+  // list is already 25 rows per page.
   const gorunen = useMemo(
     () => (filtre === "hepsi" ? items : items.filter((n) => n.severity === filtre)),
     [items, filtre])
@@ -136,7 +148,7 @@ export function NotificationsPage() {
         await markNotificationRead(n.id)
         setItems((prev) => prev.map((it) => (it.id === n.id
           ? { ...it, read_at: new Date().toISOString() } : it)))
-      } catch { /* yoksay */ }
+      } catch { /* ignore */ }
     }
     const path = resolveLink(n.link)
     if (path) navigate(path)
@@ -146,9 +158,9 @@ export function NotificationsPage() {
     try {
       await markAllNotificationsRead()
       setItems((prev) => prev.map((it) => ({ ...it, read_at: it.read_at || new Date().toISOString() })))
-      toast.success("Tümü okundu işaretlendi")
+      toast.success(t("pages.notifications.allMarkedRead"))
     } catch {
-      toast.error("İşlem başarısız")
+      toast.error(t("pages.notifications.actionFailed"))
     }
   }
 
@@ -156,19 +168,21 @@ export function NotificationsPage() {
     <div className="mx-auto max-w-3xl space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold">Bildirimler</h1>
+          <h1 className="text-xl font-semibold">{t("pages.notifications.title")}</h1>
           <p className="text-sm text-muted-foreground">
-            Tüm bildirim geçmişin{unreadCount > 0 ? ` · ${unreadCount} okunmamış` : ""}.
+            {unreadCount > 0
+              ? t("pages.notifications.subtitleUnread", { count: unreadCount })
+              : t("pages.notifications.subtitle")}
           </p>
         </div>
         <div className="flex items-center gap-2">
           {isManagement && (
             <Button size="sm" onClick={() => setAnnounceOpen(true)}>
-              <Megaphone className="mr-1 h-4 w-4" /> Anons gönder
+              <Megaphone className="mr-1 h-4 w-4" /> {t("pages.notifications.sendAnnouncement")}
             </Button>
           )}
           {unreadCount > 0 && (
-            <Button variant="outline" size="sm" onClick={onReadAll}>Tümünü okundu işaretle</Button>
+            <Button variant="outline" size="sm" onClick={onReadAll}>{t("pages.notifications.markAllRead")}</Button>
           )}
         </div>
       </div>
@@ -176,7 +190,7 @@ export function NotificationsPage() {
       {isManagement && (
         <AnnounceDialog open={announceOpen} onOpenChange={(o) => {
           setAnnounceOpen(o)
-          if (!o) loadFirst()        // gönderilen anons listede hemen görünsün
+          if (!o) loadFirst()        // sent announcement should appear in the list right away
         }} />
       )}
 
@@ -198,7 +212,7 @@ export function NotificationsPage() {
         </div>
       ) : gorunen.length === 0 ? (
         <p className="py-12 text-center text-sm text-muted-foreground">
-          {items.length === 0 ? "Henüz bildirim yok." : "Bu önem derecesinde bildirim yok."}
+          {items.length === 0 ? t("pages.notifications.empty") : t("pages.notifications.emptyForSeverity")}
         </p>
       ) : (
         <ul className="space-y-2">
@@ -232,10 +246,10 @@ export function NotificationsPage() {
                   </div>
                   <div className="flex shrink-0 flex-col items-end gap-1.5">
                     {!n.read_at && (
-                      <Button variant="ghost" size="sm" onClick={() => onOpen(n)}>Okundu</Button>
+                      <Button variant="ghost" size="sm" onClick={() => onOpen(n)}>{t("pages.notifications.markRead")}</Button>
                     )}
                     {target && (
-                      <Button variant="outline" size="sm" onClick={() => onOpen(n)}>Git</Button>
+                      <Button variant="outline" size="sm" onClick={() => onOpen(n)}>{t("pages.notifications.go")}</Button>
                     )}
                   </div>
                 </div>
@@ -248,7 +262,7 @@ export function NotificationsPage() {
       {hasMore && !loading && (
         <div className="flex justify-center pt-2">
           <Button variant="outline" onClick={loadMore} disabled={loadingMore}>
-            {loadingMore ? "Yükleniyor…" : "Daha fazla yükle"}
+            {loadingMore ? t("pages.notifications.loading") : t("pages.notifications.loadMore")}
           </Button>
         </div>
       )}

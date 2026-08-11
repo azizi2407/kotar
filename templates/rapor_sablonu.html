@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Casaba Mahir - Aylık Rapor</title>
+    <title>Casaba Mahir - Monthly Report</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@400;500;600&display=swap&subset=latin,latin-ext" rel="stylesheet">
@@ -850,7 +850,7 @@
                 <div class="r-header">
                     <div>
                         <div class="r-brand-name">${brandName}<span class="colon">:</span></div>
-                        <div class="r-report-subtitle">Aylık Sosyal Medya Performans Raporu</div>
+                        <div class="r-report-subtitle">Monthly Social Media Performance Report</div>
                     </div>
                     <div class="r-logo">
                         <img src="logo.png" alt="Kotar">
@@ -859,14 +859,14 @@
 
                 <!-- INTRO -->
                 <div class="r-intro">
-                    <strong>${brandName}</strong> markasının dijital görünürlüğü, güçlü organik büyüme
-                    ve etkili içerik stratejileri ile bu ay önemli bir başarıya ulaşmıştır.
+                    <strong>${brandName}</strong>'s digital visibility achieved significant success this month
+                    through strong organic growth and effective content strategies.
                 </div>
 
                 <!-- INSTAGRAM LABEL -->
                 <div class="r-section-label">
                     <span class="r-badge ig">Instagram</span>
-                    <span class="r-label-text">Genel Performans Özeti</span>
+                    <span class="r-label-text">General Performance Summary</span>
                     <span class="r-label-rule"></span>
                 </div>
 
@@ -879,9 +879,9 @@
                                 <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z"/>
                                 <circle cx="8" cy="8" r="2"/>
                             </svg>
-                            <span class="r-stat-label">Toplam Görüntüleme</span>
+                            <span class="r-stat-label">Total Views</span>
                         </div>
-                        <div class="r-stat-desc">Tüm içeriklerin toplam izlenme sayısı</div>
+                        <div class="r-stat-desc">Total view count across all content</div>
                     </div>
                     <div class="r-stat">
                         <div class="r-stat-num">${formatNumber(totalReach)}</div>
@@ -891,9 +891,9 @@
                                 <path d="M5 10.5c.8-.8 1.8-1.2 3-1.2s2.2.4 3 1.2"/>
                                 <circle cx="8" cy="7.5" r="1.2" fill="currentColor" stroke="none"/>
                             </svg>
-                            <span class="r-stat-label">Toplam Erişim</span>
+                            <span class="r-stat-label">Total Reach</span>
                         </div>
-                        <div class="r-stat-desc">İçeriklerin ulaştığı tekil kullanıcı sayısı</div>
+                        <div class="r-stat-desc">Number of unique users reached by the content</div>
                     </div>
                     <div class="r-stat">
                         <div class="r-stat-num">${formatNumber(profileVisits)}</div>
@@ -902,9 +902,9 @@
                                 <circle cx="8" cy="5.5" r="2.5"/>
                                 <path d="M2.5 14c0-2.8 2.5-5 5.5-5s5.5 2.2 5.5 5"/>
                             </svg>
-                            <span class="r-stat-label">Profil Ziyareti</span>
+                            <span class="r-stat-label">Profile Visits</span>
                         </div>
-                        <div class="r-stat-desc">Kullanıcıların profil sayfasını ziyaret etme sıklığı</div>
+                        <div class="r-stat-desc">How often users visited the profile page</div>
                     </div>
                     <div class="r-stat">
                         <div class="r-stat-num">${formatNumber(linkClicks)}</div>
@@ -912,38 +912,38 @@
                             <svg class="r-stat-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M3.5 2L13 8l-4.5 1.2L6.5 14 3.5 2z"/>
                             </svg>
-                            <span class="r-stat-label">Bağlantı Tıklaması</span>
+                            <span class="r-stat-label">Link Clicks</span>
                         </div>
-                        <div class="r-stat-desc">Yönlendirme bağlantılarına yapılan tıklama sayısı</div>
+                        <div class="r-stat-desc">Number of clicks on outbound links</div>
                     </div>
                 </div>
 
                 <!-- FOLLOWER LABEL -->
                 <div class="r-section-label on-off-white">
-                    <span class="r-badge followers">Takipçi</span>
-                    <span class="r-label-text">Büyüme Analizi</span>
+                    <span class="r-badge followers">Followers</span>
+                    <span class="r-label-text">Growth Analysis</span>
                     <span class="r-label-rule"></span>
                 </div>
 
                 <!-- FOLLOWER BAND -->
                 <div class="r-follower-band">
                     <div>
-                        <div class="r-follower-eyebrow">Net Takipçi Artışı</div>
+                        <div class="r-follower-eyebrow">Net Follower Growth</div>
                         <div class="r-follower-num"><span class="plus">+</span>${formatNumber(netFollowers)}</div>
                         <div class="r-follower-details">
                             <div class="r-fd-row">
                                 <span class="r-fd-dot organic"></span>
                                 <span class="r-fd-num">${formatNumber(organicFollowersSafe)}</span>
-                                <span>organik takipçi</span>
+                                <span>organic followers</span>
                             </div>
                             ${adFollowers > 0 ? `
                             <div class="r-fd-row">
                                 <span class="r-fd-dot ad"></span>
                                 <span class="r-fd-num">${formatNumber(adFollowers)}</span>
-                                <span>reklam takipçisi</span>
+                                <span>ad followers</span>
                             </div>` : `
                             <div class="r-fd-row" style="font-size:10px; color:#9ca3af; font-style:italic; margin-top:2px;">
-                                Bu dönemde reklam yayınlanmadı
+                                No ads ran during this period
                             </div>`}
                         </div>
                         <div class="r-follower-split">
@@ -955,7 +955,7 @@
                         ${createSvgDonut(organicFollowersSafe, adFollowers)}
                         <div class="r-donut-center">
                             <div class="r-donut-pct">${organicRate}%</div>
-                            <div class="r-donut-lbl">Organik<br>Büyüme</div>
+                            <div class="r-donut-lbl">Organic<br>Growth</div>
                         </div>
                     </div>
                 </div>
@@ -963,7 +963,7 @@
                 <!-- ADS LABEL -->
                 <div class="r-section-label on-dark">
                     <span class="r-badge ads">Meta</span>
-                    <span class="r-label-text light">Reklam Metrikleri</span>
+                    <span class="r-label-text light">Ad Metrics</span>
                     <span class="r-label-rule dark"></span>
                 </div>
 
@@ -973,28 +973,28 @@
                     <div class="r-ads-top">
                         <div>
                             <div class="r-ads-spend-num">${formatCurrency(totalSpend)} TRY</div>
-                            <div class="r-ads-spend-label">Toplam Harcama</div>
+                            <div class="r-ads-spend-label">Total Spend</div>
                         </div>
-                        <div class="r-ads-campaign-label">Kampanya Performansı</div>
+                        <div class="r-ads-campaign-label">Campaign Performance</div>
                     </div>
                     <div class="r-ads-metrics-grid">
                         <div class="r-ads-metric">
                             <div class="r-ads-metric-val">%${ctr.toFixed(2).replace(".", ",")}</div>
-                            <div class="r-ads-metric-lbl">CTR — Tıklama Oranı</div>
+                            <div class="r-ads-metric-lbl">CTR — Click-Through Rate</div>
                             <div class="r-ads-bar-track">
                                 <div class="r-ads-bar-fill" style="--w:${Math.min(ctr/5*100,100).toFixed(1)}%; --delay:0.1s"></div>
                             </div>
                         </div>
                         <div class="r-ads-metric">
                             <div class="r-ads-metric-val">${formatCurrency(avgCpm)}</div>
-                            <div class="r-ads-metric-lbl">Ort. CPM (TRY)</div>
+                            <div class="r-ads-metric-lbl">Avg. CPM (TRY)</div>
                             <div class="r-ads-bar-track">
                                 <div class="r-ads-bar-fill" style="--w:${Math.min(avgCpm/80*100,100).toFixed(1)}%; --delay:0.2s"></div>
                             </div>
                         </div>
                         <div class="r-ads-metric">
                             <div class="r-ads-metric-val">${formatCurrency(costPerFollower)}</div>
-                            <div class="r-ads-metric-lbl">Takipçi Başına (TRY)</div>
+                            <div class="r-ads-metric-lbl">Per Follower (TRY)</div>
                             <div class="r-ads-bar-track">
                                 <div class="r-ads-bar-fill" style="--w:${Math.min(costPerFollower/30*100,100).toFixed(1)}%; --delay:0.3s"></div>
                             </div>
@@ -1004,7 +1004,7 @@
                 ` : `
                 <div class="r-ads-band">
                     <div class="r-ads-empty">
-                        <p>Bu dönemde yayınlanan reklam bulunmamaktadır.</p>
+                        <p>No ads ran during this period.</p>
                     </div>
                 </div>
                 `}
@@ -1012,7 +1012,7 @@
                 <!-- CONTENT LABEL -->
                 <div class="r-section-label">
                     <span class="r-badge content">★</span>
-                    <span class="r-label-text">En İyi Performans Gösteren İçerikler</span>
+                    <span class="r-label-text">Top Performing Content</span>
                     <span class="r-label-rule"></span>
                 </div>
 
@@ -1021,20 +1021,20 @@
                     <div class="r-content-grid">
                         <div>
                             <div class="r-highlight">
-                                <div class="r-highlight-eyebrow">En Başarılı Gönderi</div>
+                                <div class="r-highlight-eyebrow">Top Performing Post</div>
                                 <div class="r-highlight-text">
-                                    "${topPost}" içeriği <strong>${formatNumber(topPostReach)}</strong> erişimle
-                                    ayın birincisi oldu.
+                                    "${topPost}" reached <strong>${formatNumber(topPostReach)}</strong> people,
+                                    making it the top post of the month.
                                 </div>
                             </div>
                             <div class="r-story-block">
                                 <div class="r-story-date-txt">${storyDate}</div>
                                 <div class="r-story-num">${formatNumber(storyRecord)}</div>
-                                <div class="r-story-lbl">Hikaye Görüntüleme</div>
+                                <div class="r-story-lbl">Story Views</div>
                             </div>
                         </div>
                         <div>
-                            <div style="font-size:8.5px;font-weight:600;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-soft);padding:0 0 8px;border-bottom:2px solid var(--ink);">En İyi 5 Gönderi</div>
+                            <div style="font-size:8.5px;font-weight:600;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-soft);padding:0 0 8px;border-bottom:2px solid var(--ink);">Top 5 Posts</div>
                             <div class="r-bar-chart" id="topPostsTable"></div>
                         </div>
                     </div>

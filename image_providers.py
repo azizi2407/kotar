@@ -1,12 +1,13 @@
-"""Görsel üretim sağlayıcıları — arayüz + Codex CLI implementasyonu.
+"""Image generation providers — interface + Codex CLI implementation.
 
-Neden soyutlama: bugün üretim ChatGPT aboneliği üzerinden `codex exec` ile yapılıyor.
-Kota, kararlılık ya da işletim nedeniyle resmi OpenAI Image Generation API'ye geçmek
-gerekirse handler ve API katmanı DEĞİŞMEZ — yalnız buraya ikinci bir sınıf eklenir
-ve `ImageJob.provider` onu işaret eder.
+Why the abstraction: today generation is done via `codex exec` under a ChatGPT
+subscription. If we need to switch to the official OpenAI Image Generation API for
+quota, stability, or operational reasons, the handler and API layer DON'T CHANGE —
+only a second class is added here and `ImageJob.provider` points to it.
 
-Mevcut Magnific/Mystic hattı (ai_worker._magnific_generate / _mcp_generate) bu
-soyutlamaya BİLEREK taşınmadı: o hat çalışıyor ve dokunulmaması kullanıcı kararı.
+The existing Magnific/Mystic pipeline (ai_worker._magnific_generate /
+_mcp_generate) was DELIBERATELY NOT moved into this abstraction: that pipeline
+works, and leaving it untouched was the user's decision.
 """
 import os
 import shutil
@@ -21,12 +22,13 @@ import codex_runner
 import imagegen_store
 from models_imagegen import ASPECTS
 
-OUTPUT_NAME = 'output.png'     # sabit ad — kullanıcı girdisinden ASLA türetilmez
+OUTPUT_NAME = 'output.png'     # fixed name — NEVER derived from user input
 MAX_REFERENCES = 3
 
 
 class GenerateRequest:
-    """Sağlayıcıya giden istek. `resolved_prompt` çağıran tarafta kurulur (ai_context)."""
+    """The request sent to the provider. `resolved_prompt` is built on the caller's
+    side (ai_context)."""
 
     def __init__(self, client_id, resolved_prompt, aspect_ratio, reference_paths):
         self.client_id = client_id
@@ -48,15 +50,15 @@ class ImageGenerationProvider(ABC):
 
     @abstractmethod
     def generate(self, req):
-        """İstekten görsel üret → `GenerateResult`."""
+        """Generate an image from the request → `GenerateResult`."""
 
     def edit(self, req):
-        """v1'de yok: referansla dönüştürme `generate()` içinden yapılıyor."""
+        """Not in v1: reference-based transformation is done inside `generate()`."""
         raise NotImplementedError('bu sağlayıcı düzenlemeyi desteklemiyor')
 
     @abstractmethod
     def health_check(self):
-        """`{ok: bool, detail: str}` — sır İÇERMEZ."""
+        """`{ok: bool, detail: str}` — contains NO secrets."""
 
     def capabilities(self):
         return {'aspect_ratios': sorted(ASPECTS), 'max_references': MAX_REFERENCES,
@@ -72,11 +74,12 @@ def job_root(create=False):
 
 
 class CodexExecImageProvider(ImageGenerationProvider):
-    """`codex exec` + `$imagegen`. İş başına efemer, git'li bir çalışma dizini kullanır.
+    """`codex exec` + `$imagegen`. Uses an ephemeral, git-initialized working
+    directory per job.
 
-    Neden `git init`: `codex exec` git deposu olmayan dizinde uyarı verip
-    `--skip-git-repo-check` ister; boş bir depo açmak o bayrağı gereksiz kılar ve
-    çalışma alanının sınırını Codex'in kendi kontrolüne de bildirir."""
+    Why `git init`: `codex exec` warns in a directory without a git repo and asks
+    for `--skip-git-repo-check`; opening an empty repo makes that flag unnecessary
+    and also tells Codex's own sandbox where the workspace boundary is."""
     name = 'codex_exec'
 
     def generate(self, req):
@@ -93,28 +96,29 @@ class CodexExecImageProvider(ImageGenerationProvider):
             try:
                 meta = imagegen_store.validate(cikti, workdir)
             except imagegen_store.OutputError as e:
-                # Codex'in son mesajını hataya EKLE: "dosya oluşmadı" tek başına kök
-                # nedeni gizliyor. 2026-08-10'da Codex "Please attach the brand logo
-                # image..." diyordu ama bu kayboluyor, teşhis elle yeniden çalıştırma
-                # gerektiriyordu.
+                # ADD Codex's last message to the error: "file wasn't created" alone
+                # hides the root cause. On 2026-08-10 Codex was saying "Please attach
+                # the brand logo image..." but that got lost, and diagnosis required
+                # manually rerunning it.
                 aciklama = (out.get('text') or '').strip()
                 raise imagegen_store.OutputError(
                     f'{e} · Codex: {aciklama[:600]}' if aciklama else str(e)) from e
             rel = imagegen_store.store(req.client_id, cikti)
             return GenerateResult(rel, meta, thread_id, out.get('usage'))
         finally:
-            # Codex'in ev dizinindeki kopyası ve efemer dizin HER KOŞULDA gider —
-            # hata yolunda da müşteri görseli arkada kalmamalı.
+            # Codex's copy in the home directory and the ephemeral directory are
+            # ALWAYS removed — even on the error path, a client image shouldn't be
+            # left behind.
             if thread_id:
                 codex_runner.cleanup_generated(thread_id)
             shutil.rmtree(workdir, ignore_errors=True)
 
     def _kopyala(self, workdir, paths):
-        """Referansları iş dizinine kopyala → Codex'e verilecek yollar.
+        """Copy the references into the working directory → paths to give Codex.
 
-        Yolu kullanıcı belirlemez: çağıran `ClientAsset` sahipliğini doğrulayıp
-        mutlak yolları verir. Kopyalama şart — Codex sandbox'ı iş dizinini görür,
-        depo/geçici dizinleri değil."""
+        The path isn't chosen by the user: the caller verifies `ClientAsset`
+        ownership and supplies absolute paths. Copying is required — Codex's
+        sandbox sees the working directory, not the storage/temp directories."""
         hedefler = []
         for i, p in enumerate(paths[:MAX_REFERENCES]):
             hedef = os.path.join(workdir, f'ref{i}.png')
@@ -123,7 +127,8 @@ class CodexExecImageProvider(ImageGenerationProvider):
         return hedefler
 
     def health_check(self):
-        """Codex kurulu ve oturum dosyası yerinde mi? Dosyanın İÇERİĞİ OKUNMAZ."""
+        """Is Codex installed and is the session file in place? The file's CONTENT
+        is NOT read."""
         try:
             r = subprocess.run([codex_runner.CODEX_BIN, '--version'],
                                capture_output=True, text=True, timeout=15)
@@ -139,7 +144,7 @@ class CodexExecImageProvider(ImageGenerationProvider):
 
 
 class FakeImageProvider(ImageGenerationProvider):
-    """Testler için deterministik sağlayıcı — gerçek Codex çağrısı YOK."""
+    """Deterministic provider for tests — NO real Codex call."""
     name = 'fake'
 
     def generate(self, req):
@@ -163,8 +168,8 @@ _PROVIDERS = {'codex_exec': CodexExecImageProvider, 'fake': FakeImageProvider}
 
 
 def get_provider(name):
-    """Ada göre sağlayıcı örneği. Bilinmeyen ad → ValueError (sessiz fallback YOK:
-    yanlış sağlayıcıya sessizce düşmek üretimi izlenemez kılar)."""
+    """Provider instance by name. Unknown name → ValueError (NO silent fallback:
+    silently falling back to the wrong provider would make generation untraceable)."""
     cls = _PROVIDERS.get(name)
     if cls is None:
         raise ValueError(f'bilinmeyen sağlayıcı: {name}')

@@ -1,10 +1,10 @@
-// Planlama Panosu — kişi eksenli, React Flow tuvali (2026-07-26 geçişi).
+// Planning Board — person-centric, React Flow canvas (2026-07-26 migration).
 //
-// Panolar: 'management' (yönetim ortak) + 'user:<sub>' (kişi başına ortak alan).
-// Rol kapısı BACKEND'de: API tek pano döndürürse seçici hiç render edilmez.
+// Boards: 'management' (shared management space) + 'user:<sub>' (per-person shared space).
+// Role gate lives on the BACKEND: if the API returns a single board, the picker isn't rendered at all.
 //
-// Üç görünüm aynı veriyi okur: Tuval (React Flow) · Liste · Takvim.
-// Yazma her üçünde de tek yoldan gider: `usePlanningStore` → delta PATCH.
+// Three views read the same data: Canvas (React Flow) · List · Calendar.
+// Writes go through a single path in all three: `usePlanningStore` → delta PATCH.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import { ReactFlowProvider } from "@xyflow/react"
@@ -20,12 +20,13 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useAuth } from "@/lib/auth"
+import { useI18n } from "@/lib/i18n"
 import {
-  COLORS, DEFAULT_SIZE, ITEM_STATUS_LABELS, MANAGEMENT_KEY, newItemKey,
+  COLORS, DEFAULT_SIZE, itemStatusLabels, MANAGEMENT_KEY, newItemKey,
   useAssigned, useBoard, useBoards, useBoardVersion,
   type PlanningItem, type PlanningItemType,
 } from "@/lib/planlama"
-import { chunkForPatch, TEMPLATES } from "@/lib/planlama-templates"
+import { chunkForPatch, getTemplates } from "@/lib/planlama-templates"
 import { usePlanningStore, type ItemPatch } from "@/lib/usePlanningStore"
 import { trFold } from "@/lib/week"
 import { cn } from "@/lib/utils"
@@ -34,6 +35,9 @@ type ViewMode = "canvas" | "list" | "calendar"
 
 export function PlanlamaPage() {
   const { user } = useAuth()
+  const { t } = useI18n()
+  const templates = useMemo(() => getTemplates(t), [t])
+  const statusLabels = useMemo(() => itemStatusLabels(t), [t])
   const [params, setParams] = useSearchParams()
   const boardsQ = useBoards()
   const boards = useMemo(() => boardsQ.data ?? [], [boardsQ.data])
@@ -55,12 +59,12 @@ export function PlanlamaPage() {
   const [fAssignee, setFAssignee] = useState("")
   const [fStatus, setFStatus] = useState("")
   const viewportRef = useRef<HTMLDivElement | null>(null)
-  // Tuvale emir kanalı: öğe ekleme viewport dönüşümünü bildiği yerde yapılmalı.
+  // Command channel to the canvas: item creation must happen where the viewport transform is known.
   const flowRef = useRef<PlanningFlowHandle | null>(null)
 
   const assignedQ = useAssigned(null, !!user)
 
-  // --- uzak sürüm takibi ----------------------------------------------------
+  // --- remote version tracking ----------------------------------------------------
   const [seenVersion, setSeenVersion] = useState(0)
   const versionQ = useBoardVersion(boardKey, !!boardQ.data)
   useEffect(() => { if (serverVersion) setSeenVersion(serverVersion) }, [serverVersion])
@@ -68,8 +72,8 @@ export function PlanlamaPage() {
   const remoteVersion = versionQ.data?.version ?? 0
   const remoteAhead = remoteVersion > seenVersion
 
-  // `store.interacting` / `store.status` deps'TE: eskiden yoktu ve effect
-  // etkileşim yüzünden erken dönünce bir daha hiç çalışmıyordu → pano bayat kalıyordu.
+  // `store.interacting` / `store.status` ARE IN the deps: they used to be missing and
+  // once the effect returned early due to interaction, it never ran again → the board went stale.
   useEffect(() => {
     if (!remoteAhead) return
     if (store.interacting || store.hasPending() || store.status === "saving") return
@@ -80,14 +84,15 @@ export function PlanlamaPage() {
 
   useEffect(() => {
     if (store.conflicts.length) {
-      toast.warning(`${store.conflicts.length} kartı başkası da düzenledi — son yazan geçerli.`)
+      toast.warning(t("pages.planning.conflictWarning", { count: store.conflicts.length }))
       store.clearConflicts()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.conflicts])
 
   useEffect(() => {
-    if (store.status === "error") toast.error("Kaydedilemedi — bağlantı koptu, yeniden denenecek.")
+    if (store.status === "error") toast.error(t("pages.planning.saveError"))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.status])
 
   useEffect(() => {
@@ -103,22 +108,22 @@ export function PlanlamaPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.flush])
 
-  // Ctrl+Z / Ctrl+Shift+Z. `contenteditable` ve `<select>` de dışlanır —
-  // eski kontrol yalnız INPUT/TEXTAREA bakıyordu ve select odaktayken pano undo'su yapıyordu.
+  // Ctrl+Z / Ctrl+Shift+Z. `contenteditable` and `<select>` are also excluded —
+  // the old check only looked at INPUT/TEXTAREA, so a focused select would still trigger board undo.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      const t = document.activeElement as HTMLElement | null
-      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return
+      const active = document.activeElement as HTMLElement | null
+      if (active && (active.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName))) return
       if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "z") return
       e.preventDefault()
       const ok = e.shiftKey ? store.redo() : store.undo()
-      if (!ok) toast.info(e.shiftKey ? "İleri alınacak bir şey yok." : "Geri alınacak bir şey yok.")
+      if (!ok) toast.info(e.shiftKey ? t("pages.planning.nothingToRedo") : t("pages.planning.nothingToUndo"))
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [store])
+  }, [store, t])
 
-  // --- filtre ---------------------------------------------------------------
+  // --- filter ---------------------------------------------------------------
 
   const filterActive = !!(q.trim() || fAssignee || fStatus)
   const matches = useCallback((it: PlanningItem) => {
@@ -145,20 +150,20 @@ export function PlanlamaPage() {
     return [...m.entries()]
   }, [store.items])
 
-  // --- ekleme ---------------------------------------------------------------
+  // --- adding ---------------------------------------------------------------
 
   const onPatch = useCallback((key: string, patch: Partial<PlanningItem>) => {
     store.commit([{ item_key: key, ...patch }])
   }, [store])
 
-  /** Öğe ekleme.
+  /** Add an item.
    *
-   *  ESKİ DAVRANIŞ (hata, 2026-08-09'da düzeltildi): öğe `maxX + 260`'a, yani en
-   *  sağdaki öğenin sağına konuyordu; kamera oynamadığı için `fitView` yapılmış bir
-   *  panoda düğme HİÇBİR ŞEY YAPMAMIŞ gibi görünüyordu. Viewport dönüşümü yalnız
-   *  `ReactFlowProvider`ın İÇİNDE bilindiğinden hesap tuvale taşındı; burası artık
-   *  yalnız emri iletiyor. Liste/takvim görünümündeyken tuval mount değil, o yüzden
-   *  orada eski "en sağa ekle" davranışı korunuyor (kamera kavramı yok). */
+   *  OLD BEHAVIOR (bug, fixed 2026-08-09): the item was placed at `maxX + 260`, i.e. to
+   *  the right of the rightmost item; since the camera didn't move, on a board that had
+   *  been `fitView`'d, the button looked like it DID NOTHING. The viewport transform is
+   *  only known INSIDE `ReactFlowProvider`, so the computation was moved to the canvas —
+   *  this function now just relays the command. In list/calendar view the canvas isn't
+   *  mounted, so the old "add to the far right" behavior is kept there (no concept of a camera). */
   function addItem(type: PlanningItemType) {
     if (view === "canvas" && flowRef.current) {
       flowRef.current.addItem(type)
@@ -172,8 +177,9 @@ export function PlanlamaPage() {
     const y = store.items.length ? minY : Math.round((r?.height ?? 600) / 2 - d.height / 2)
     store.commit([{
       item_key: newItemKey(), type,
-      title: type === "region" ? "Bölge" : type === "card" ? "Yeni kart" : null,
-      text: type === "note" ? "Not…" : null,
+      title: type === "region" ? t("components.planlama.planningFlow.regionDefaultTitle")
+           : type === "card" ? t("components.planlama.planningFlow.newCardTitle") : null,
+      text: type === "note" ? t("components.planlama.planningFlow.newNoteText") : null,
       color: type === "region" ? "#f1f5f9" : COLORS[store.items.length % COLORS.length],
       x, y, width: d.width, height: d.height,
       z: type === "region" ? -1 : 0, status: "open",
@@ -181,27 +187,28 @@ export function PlanlamaPage() {
   }
 
   function applyTemplate(id: string) {
-    const t = TEMPLATES.find((x) => x.id === id)
-    if (!t) return
+    const tmpl = templates.find((x) => x.id === id)
+    if (!tmpl) return
     const maxY = store.items.length ? Math.max(...store.items.map((i) => i.y + (i.height || 120))) : 0
-    const items = t.build(0, store.items.length ? maxY + 60 : 0)
-    // MAX_BATCH=200 — büyük şablon tek PATCH'e sığmazsa parçalanır.
+    const items = tmpl.build(0, store.items.length ? maxY + 60 : 0)
+    // MAX_BATCH=200 — a large template that doesn't fit in one PATCH gets chunked.
     for (const chunk of chunkForPatch(items)) store.commit(chunk as ItemPatch[])
-    toast.success(`${t.name} eklendi (${items.length} öğe).`)
+    toast.success(t("pages.planning.templateAdded", { name: tmpl.name, count: items.length }))
   }
 
   const detailItem = detail ? store.byKey.get(detail) ?? null : null
-  const boardTitle = boardQ.data?.board.title ?? "Pano"
+  const boardTitle = boardQ.data?.board.title ?? t("pages.planning.defaultBoardTitle")
 
   return (
     <div className="flex h-[calc(100vh-7rem)] flex-col gap-3">
-      {/* Başlık + pano seçici */}
+      {/* Title + board selector */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Planlama Panosu</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">{t("pages.planning.title")}</h1>
             <p className="text-sm text-muted-foreground">
-              {boardTitle} · {store.items.filter((i) => i.type !== "edge").length} öğe
+              {boardTitle} · {t("pages.planning.itemCount",
+                { count: store.items.filter((i) => i.type !== "edge").length })}
             </p>
           </div>
           {boards.length > 1 && (
@@ -218,35 +225,35 @@ export function PlanlamaPage() {
         </div>
 
         <div className="flex items-center gap-1 rounded-lg border p-1">
-          <ViewBtn active={view === "canvas"} onClick={() => setView("canvas")} icon={<LayoutDashboard className="h-4 w-4" />}>Tuval</ViewBtn>
-          <ViewBtn active={view === "list"} onClick={() => setView("list")} icon={<List className="h-4 w-4" />}>Liste</ViewBtn>
-          <ViewBtn active={view === "calendar"} onClick={() => setView("calendar")} icon={<CalendarDays className="h-4 w-4" />}>Takvim</ViewBtn>
+          <ViewBtn active={view === "canvas"} onClick={() => setView("canvas")} icon={<LayoutDashboard className="h-4 w-4" />}>{t("pages.planning.viewCanvas")}</ViewBtn>
+          <ViewBtn active={view === "list"} onClick={() => setView("list")} icon={<List className="h-4 w-4" />}>{t("pages.planning.viewList")}</ViewBtn>
+          <ViewBtn active={view === "calendar"} onClick={() => setView("calendar")} icon={<CalendarDays className="h-4 w-4" />}>{t("pages.planning.viewCalendar")}</ViewBtn>
         </div>
       </div>
 
-      {/* Araç çubuğu */}
+      {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="ghost" onClick={() => addItem("card")}>
-          <Plus className="mr-1 h-4 w-4" /> Kart
+          <Plus className="mr-1 h-4 w-4" /> {t("pages.planning.addCard")}
         </Button>
         <Button size="sm" variant="ghost" onClick={() => addItem("note")}>
-          <StickyNote className="mr-1 h-4 w-4" /> Not
+          <StickyNote className="mr-1 h-4 w-4" /> {t("pages.planning.addNote")}
         </Button>
         <Button size="sm" variant="ghost" onClick={() => addItem("region")}>
-          <SquareDashed className="mr-1 h-4 w-4" /> Bölge
+          <SquareDashed className="mr-1 h-4 w-4" /> {t("pages.planning.addRegion")}
         </Button>
         <select className="h-8 rounded-md border bg-background px-2 text-sm" value=""
           onChange={(e) => { if (e.target.value) { applyTemplate(e.target.value); e.target.value = "" } }}>
-          <option value="">✨ Şablon…</option>
-          {TEMPLATES.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          <option value="">{t("pages.planning.templatePlaceholder")}</option>
+          {templates.map((tmpl) => <option key={tmpl.id} value={tmpl.id}>{tmpl.name}</option>)}
         </select>
 
         <div className="mx-1 h-6 w-px bg-border" />
-        <Button size="sm" variant="ghost" title="Geri al (Ctrl+Z)" disabled={!store.canUndo}
+        <Button size="sm" variant="ghost" title={t("pages.planning.undo")} disabled={!store.canUndo}
           onClick={() => store.undo()}>
           <RotateCcw className="h-4 w-4" />
         </Button>
-        <Button size="sm" variant="ghost" title="İleri al (Ctrl+Shift+Z)" disabled={!store.canRedo}
+        <Button size="sm" variant="ghost" title={t("pages.planning.redo")} disabled={!store.canRedo}
           onClick={() => store.redo()}>
           <RotateCw className="h-4 w-4" />
         </Button>
@@ -254,38 +261,39 @@ export function PlanlamaPage() {
         <div className="mx-1 h-6 w-px bg-border" />
         <div className="relative min-w-[10rem] flex-1 sm:max-w-xs">
           <Search className="absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input className="h-8 pl-8" placeholder="Kartlarda ara…" value={q}
+          <Input className="h-8 pl-8" placeholder={t("pages.planning.searchPlaceholder")} value={q}
             onChange={(e) => setQ(e.target.value)} />
         </div>
         <select className="h-8 rounded-md border bg-background px-2 text-sm"
           value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
-          <option value="">Tüm durumlar</option>
-          {Object.entries(ITEM_STATUS_LABELS).map(([v, t]) => <option key={v} value={v}>{t}</option>)}
+          <option value="">{t("pages.planning.allStatuses")}</option>
+          {Object.entries(statusLabels).map(([v, label]) => <option key={v} value={v}>{label}</option>)}
         </select>
         {assignees.length > 0 && (
           <select className="h-8 rounded-md border bg-background px-2 text-sm"
             value={fAssignee} onChange={(e) => setFAssignee(e.target.value)}>
-            <option value="">Tüm sorumlular</option>
+            <option value="">{t("pages.planning.allAssignees")}</option>
             {assignees.map(([sub, name]) => <option key={sub} value={sub}>{name}</option>)}
           </select>
         )}
         {filterActive && (
           <Button size="sm" variant="ghost"
-            onClick={() => { setQ(""); setFAssignee(""); setFStatus("") }}>Temizle</Button>
+            onClick={() => { setQ(""); setFAssignee(""); setFStatus("") }}>{t("pages.planning.clearFilters")}</Button>
         )}
 
         <span className="ml-auto text-xs text-muted-foreground">
-          {store.status === "saving" ? "Kaydediliyor…"
-            : store.status === "error" ? "Bağlantı yok — yeniden denenecek"
-            : filterActive ? `${visible.filter((i) => i.type !== "edge").length} eşleşme` : ""}
+          {store.status === "saving" ? t("pages.planning.saving")
+            : store.status === "error" ? t("pages.planning.connectionLost")
+            : filterActive ? t("pages.planning.matchesCount",
+                { count: visible.filter((i) => i.type !== "edge").length }) : ""}
         </span>
       </div>
 
       {remoteAhead && (store.interacting || store.hasPending()) && (
         <div className="flex items-center justify-between gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
-          Başkası bu panoyu güncelledi. Değişikliğin kaydedilince tazelenecek.
+          {t("pages.planning.remoteUpdated")}
           <Button size="sm" variant="outline" className="h-6"
-            onClick={() => { void boardQ.refetch(); setSeenVersion(remoteVersion) }}>Şimdi yenile</Button>
+            onClick={() => { void boardQ.refetch(); setSeenVersion(remoteVersion) }}>{t("pages.planning.refreshNow")}</Button>
         </div>
       )}
 
@@ -294,11 +302,11 @@ export function PlanlamaPage() {
       )}
 
       {boardQ.isLoading && <Skeleton className="flex-1" />}
-      {boardQ.isError && <p className="text-destructive">Pano yüklenemedi.</p>}
+      {boardQ.isError && <p className="text-destructive">{t("pages.planning.boardLoadError")}</p>}
 
       {boardQ.data && view === "canvas" && (
         <div ref={viewportRef} className="min-h-0 flex-1 overflow-hidden rounded-lg border">
-          {/* Provider tuvalin DIŞINDA: useReactFlow yalnız içeride çalışır. */}
+          {/* Provider is OUTSIDE the canvas: useReactFlow only works inside it. */}
           <ReactFlowProvider>
             <PlanningFlow
               ref={flowRef}

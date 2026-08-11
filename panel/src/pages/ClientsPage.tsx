@@ -1,10 +1,11 @@
-// Müşteriler listesi: arama + durum filtresi + tablo. Yazma yalnız management.
+// Client list: search + status filter + table. Write access is management only.
 import { useState } from "react"
 import { Link } from "react-router-dom"
 import { Plus, Search } from "lucide-react"
 
 import { useAuth } from "@/lib/auth"
 import { useClients } from "@/lib/clients"
+import { useI18n } from "@/lib/i18n"
 import type { ClientListItem } from "@/lib/types"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -19,13 +20,15 @@ import {
 import { ClientFormDialog } from "@/components/clients/ClientFormDialog"
 
 function StatusBadge({ status }: { status: string }) {
+  const { t } = useI18n()
   return status === "active"
-    ? <Badge variant="secondary">Aktif</Badge>
-    : <Badge variant="outline" className="text-muted-foreground">Silinmiş</Badge>
+    ? <Badge variant="secondary">{t("pages.clients.status.active")}</Badge>
+    : <Badge variant="outline" className="text-muted-foreground">{t("pages.clients.status.deleted")}</Badge>
 }
 
 export function ClientsPage() {
   const { isManagement } = useAuth()
+  const { t } = useI18n()
   const [status, setStatus] = useState("active")
   const [q, setQ] = useState("")
   const [adding, setAdding] = useState(false)
@@ -35,12 +38,12 @@ export function ClientsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Müşteriler</h1>
-          <p className="text-muted-foreground">Ajans müşteri kartları ve anlaşma bilgileri.</p>
+          <h1 className="text-2xl font-semibold tracking-tight">{t("pages.clients.title")}</h1>
+          <p className="text-muted-foreground">{t("pages.clients.subtitle")}</p>
         </div>
         {isManagement && (
           <Button onClick={() => setAdding(true)}>
-            <Plus className="mr-1 h-4 w-4" /> Yeni Müşteri
+            <Plus className="mr-1 h-4 w-4" /> {t("pages.clients.newClient")}
           </Button>
         )}
       </div>
@@ -48,13 +51,13 @@ export function ClientsPage() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input className="pl-8" placeholder="İsimle ara…"
+          <Input className="pl-8" placeholder={t("pages.clients.searchPlaceholder")}
             value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
         <Tabs value={status} onValueChange={(v) => v && setStatus(v)}>
           <TabsList>
-            <TabsTrigger value="active">Aktif</TabsTrigger>
-            <TabsTrigger value="deleted">Silinmiş</TabsTrigger>
+            <TabsTrigger value="active">{t("pages.clients.status.active")}</TabsTrigger>
+            <TabsTrigger value="deleted">{t("pages.clients.status.deleted")}</TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
@@ -63,10 +66,10 @@ export function ClientsPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Müşteri</TableHead>
-              <TableHead className="hidden sm:table-cell">Sektör</TableHead>
-              <TableHead className="hidden md:table-cell">E-posta</TableHead>
-              <TableHead>Durum</TableHead>
+              <TableHead>{t("pages.clients.table.client")}</TableHead>
+              <TableHead className="hidden sm:table-cell">{t("pages.clients.table.sector")}</TableHead>
+              <TableHead className="hidden md:table-cell">{t("pages.clients.table.email")}</TableHead>
+              <TableHead>{t("pages.clients.table.status")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -80,14 +83,14 @@ export function ClientsPage() {
             {isError && (
               <TableRow>
                 <TableCell colSpan={4} className="py-8 text-center text-destructive">
-                  Liste yüklenemedi.
+                  {t("pages.clients.loadError")}
                 </TableCell>
               </TableRow>
             )}
             {data && data.length === 0 && (
               <TableRow>
                 <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">
-                  {q ? "Eşleşen müşteri yok." : "Henüz müşteri yok."}
+                  {q ? t("pages.clients.noMatch") : t("pages.clients.empty")}
                 </TableCell>
               </TableRow>
             )}

@@ -1,9 +1,10 @@
-"""Revize yüklenince eski sürümün otomatik silinmesi — entegrasyon (2026-08-01).
+"""Auto-deleting the old version when a revision is uploaded — integration (2026-08-01).
 
-Eşleşme KURALININ testleri `test_revision_match.py`'de (saf modül). Burada
-davranış test ediliyor: kim silinir, kim korunur, ne bildirilir.
+The MATCHING RULE's tests live in `test_revision_match.py` (pure module). Here the
+behavior is tested: who gets deleted, who is protected, what gets notified.
 
-Silme geri dönüşü zor (Drive çöpü 30 gün) → koruma kapıları testle çivileniyor.
+Deletion is hard to undo (Drive trash lasts 30 days) → the protection gates are
+nailed down with tests.
 """
 import pytest
 from conftest import MANAGER, login_as
@@ -19,7 +20,7 @@ def cid(client):
 
 
 def _video(cid, ad, file_id, dakika=0):
-    """Bir video yüklemesi kaydı; `dakika` kadar GEÇMİŞE yazar (sıra önemli)."""
+    """A video upload record; writes it `dakika` minutes into the PAST (order matters)."""
     from datetime import timedelta
 
     from extensions import db
@@ -34,8 +35,8 @@ def _video(cid, ad, file_id, dakika=0):
 
 
 def _yeni_yukleme(cid, ad, file_id="YENIFILE001"):
-    """Yeni yüklemeyi kaydedip revize taramasını çalıştır (upload() ucunun
-    Drive'a çıkmayan özü)."""
+    """Record the new upload and run the revision scan (the essence of the upload()
+    endpoint, without reaching out to Drive)."""
     import sharing
     cu = _video(cid, ad, file_id, dakika=0)
     sharing._supersede_previous_videos(cu)
@@ -47,7 +48,7 @@ def _var_mi(upload_id):
     return CardUpload.query.filter_by(id=upload_id).first() is not None
 
 
-# --- silinmesi gerekenler ---
+# --- should be deleted ---
 
 def test_revize_eski_surumu_siler(client, cid, monkeypatch):
     import sharing
@@ -58,7 +59,7 @@ def test_revize_eski_surumu_siler(client, cid, monkeypatch):
 
 
 def test_silme_sunucu_kopyasini_da_kaldirir(client, cid, monkeypatch, tmp_path):
-    """Kalsaydı silinen video /m/<file_id> üzerinden 21 gün daha izlenebilirdi."""
+    """If left in place, the deleted video could still be watched via /m/<file_id> for 21 more days."""
     import media_store
     import sharing
     monkeypatch.setenv("MEDIA_STORE_DIR", str(tmp_path))
@@ -94,10 +95,10 @@ def test_zincirde_ara_surumler_de_gider(client, cid, monkeypatch):
     assert not any(_var_mi(x.id) for x in (a, b, c))
 
 
-# --- korunması gerekenler ---
+# --- should be protected ---
 
 def test_paylasilmis_video_korunur(client, cid, monkeypatch):
-    """Silinseydi müşteri onay sayfasındaki öğe sessizce kırılırdı."""
+    """If deleted, the item on the client approval page would silently break."""
     import sharing
     from extensions import db
     from models_sharing import Share
@@ -125,7 +126,7 @@ def test_musteri_onayina_girmis_video_korunur(client, cid, monkeypatch):
 
 
 def test_silinmis_paylasim_korumaz(client, cid, monkeypatch):
-    """Soft-delete edilmiş paylaşım artık müşteriye görünmüyor → koruma yok."""
+    """A soft-deleted share is no longer visible to the client → no protection."""
     import sharing
     from extensions import db
     from models import utcnow
@@ -142,7 +143,7 @@ def test_silinmis_paylasim_korumaz(client, cid, monkeypatch):
 
 
 def test_baska_musterinin_ayni_adli_videosuna_dokunulmaz(client, monkeypatch):
-    """Ad kalıbı tutsa bile kapsam AYNI MÜŞTERİ ile sınırlı."""
+    """Even if the name pattern matches, the scope is limited to the SAME CLIENT."""
     import sharing
     from extensions import db
     from models import Client
@@ -163,20 +164,20 @@ def test_eslesme_yoksa_hicbir_sey_silinmez(client, cid, monkeypatch):
     monkeypatch.setattr(sharing.dg, "available", lambda: False)
     a = _video(cid, "kids0721.mp4", "DOKUNMA00001", dakika=60)
     b = _video(cid, "albains0723.mp4", "DOKUNMA00002", dakika=30)
-    _yeni_yukleme(cid, "albarev0731.mp4")   # tabanı 'alba0731' — ikisi de değil
+    _yeni_yukleme(cid, "albarev0731.mp4")   # base is 'alba0731' — matches neither
     assert _var_mi(a.id) and _var_mi(b.id)
 
 
 def test_daha_yeni_video_silinmez(client, cid, monkeypatch):
-    """Yalnız DAHA ESKİ kayıtlar süpersede edilebilir."""
+    """Only OLDER records can be superseded."""
     import sharing
     monkeypatch.setattr(sharing.dg, "available", lambda: False)
-    sonraki = _video(cid, "camsaş0728.mp4", "SONRAKI00001", dakika=-60)  # gelecek
+    sonraki = _video(cid, "camsaş0728.mp4", "SONRAKI00001", dakika=-60)  # in the future
     _yeni_yukleme(cid, "camsaşr0728.mp4")
     assert _var_mi(sonraki.id)
 
 
-# --- bildirim ---
+# --- notification ---
 
 def test_silince_bildirim_dusor(client, cid, monkeypatch):
     import sharing
@@ -191,7 +192,7 @@ def test_silince_bildirim_dusor(client, cid, monkeypatch):
 
 
 def test_korununca_uyari_bildirimi_dusor(client, cid, monkeypatch):
-    """Sessiz kalmak olmaz: revize geldi ama eski duruyor — insan karar vermeli."""
+    """Staying silent isn't acceptable: a revision came in but the old one remains — a human must decide."""
     import sharing
     from extensions import db
     from models_sharing import Share

@@ -1,7 +1,7 @@
-"""Font havuzu (2026-08-05) — /api/fonts.
+"""Font pool (2026-08-05) — /api/fonts.
 
-Vurgu: **imza doğrulaması** (bu uçlar dosyayı tarayıcıya inline veriyor), yetki
-matrisi, N:N atama ve içerik hash'iyle dedup.
+Focus: **signature validation** (these endpoints serve the file inline to the browser),
+the permission matrix, N:N assignment, and content-hash dedup.
 """
 import io
 
@@ -9,7 +9,7 @@ import pytest
 from conftest import CONTENT_CREATOR, DESIGNER, MANAGER, VIDEOGRAPHER, login_as
 from test_session_csrf import csrf_headers
 
-# Geçerli imzalar — gerçek font gövdesi gerekmiyor, uç ilk 4 bayta bakıyor.
+# Valid signatures — a real font body isn't needed, the endpoint only checks the first 4 bytes.
 TTF = b"\x00\x01\x00\x00" + b"govde" * 20
 OTF = b"OTTO" + b"govde" * 20
 WOFF = b"wOFF" + b"govde" * 20
@@ -18,7 +18,7 @@ WOFF2 = b"wOF2" + b"govde" * 20
 
 @pytest.fixture(autouse=True)
 def font_store(tmp_path, monkeypatch):
-    """Dosyalar repo içine değil, teste özel geçici dizine yazılsın."""
+    """Files should be written to a test-specific temp directory, not into the repo."""
     import fonts
     monkeypatch.setattr(fonts, "STORE_DIR", str(tmp_path / "fonts"))
     return tmp_path / "fonts"
@@ -39,7 +39,7 @@ def cid(client):
                        headers=csrf_headers(client)).get_json()["client"]["id"]
 
 
-# --- format doğrulama -------------------------------------------------------
+# --- format validation -------------------------------------------------------
 
 @pytest.mark.parametrize("data,fmt", [(TTF, "ttf"), (OTF, "otf"),
                                       (WOFF, "woff"), (WOFF2, "woff2")])
@@ -51,8 +51,8 @@ def test_gecerli_formatlar(client, data, fmt):
 
 
 def test_font_olmayan_dosya_reddedilir(client):
-    """Uzantı .ttf olsa bile imza tutmuyorsa 400 — bu dosya tarayıcıya inline
-    servis ediliyor, uzantıya güvenilemez."""
+    """400 even when the extension is .ttf, if the signature doesn't match — this file
+    is served inline to the browser, so the extension can't be trusted."""
     login_as(client, DESIGNER)
     r = _yukle(client, b"<html>merhaba</html>", name="sahte.ttf")
     assert r.status_code == 400
@@ -71,16 +71,16 @@ def test_boyut_siniri_413(client, monkeypatch):
     assert _yukle(client).status_code == 413
 
 
-# --- ad tahmini -------------------------------------------------------------
+# --- name inference -----------------------------------------------------------
 
 @pytest.mark.parametrize("dosya,aile,stil", [
     ("Montserrat-Bold.ttf", "Montserrat", "Bold"),
     ("Roboto-BoldItalic.otf", "Roboto", "Bold Italic"),
     ("Inter_Regular.woff2", "Inter", "Regular"),
     ("PlayfairDisplay.ttf", "PlayfairDisplay", "Regular"),
-    ("MontserratBold.ttf", "Montserrat", "Bold"),          # ayırıcısız
-    ("Lato-ExtraBold.ttf", "Lato", "ExtraBold"),           # "Bold" yutmamalı
-    # Google Fonts variable dosyaları: köşeli parantez EKSEN listesi, aile adı değil
+    ("MontserratBold.ttf", "Montserrat", "Bold"),          # no separator
+    ("Lato-ExtraBold.ttf", "Lato", "ExtraBold"),           # must not swallow "Bold"
+    # Google Fonts variable files: the bracketed part is an AXIS list, not the family name
     ("Montserrat[wght].ttf", "Montserrat", "Variable"),
     ("Inter[opsz,wght].ttf", "Inter", "Variable"),
     ("Montserrat-Italic[wght].ttf", "Montserrat", "Variable Italic"),
@@ -112,14 +112,14 @@ def test_bos_aile_adi_400(client):
                       headers=csrf_headers(client)).status_code == 400
 
 
-# --- dedup ------------------------------------------------------------------
+# --- dedup ---------------------------------------------------------------------
 
 def test_ayni_dosya_ikinci_kez_409(client):
     login_as(client, DESIGNER)
     _yukle(client)
     r = _yukle(client, name="baska-ad.ttf")
     assert r.status_code == 409
-    assert r.get_json()["font"]["id"]          # mevcut kayıt döner
+    assert r.get_json()["font"]["id"]          # returns the existing record
 
 
 def test_silinen_font_ayni_dosyayla_canlanir(client):
@@ -128,7 +128,7 @@ def test_silinen_font_ayni_dosyayla_canlanir(client):
     client.delete(f"/api/fonts/{fid}", headers=csrf_headers(client))
     r = _yukle(client)
     assert r.status_code == 201
-    assert r.get_json()["font"]["id"] == fid   # yeni satır değil, canlandı
+    assert r.get_json()["font"]["id"] == fid   # revived, not a new row
 
 
 def test_disk_kopyasi_tek(client, font_store):
@@ -139,7 +139,7 @@ def test_disk_kopyasi_tek(client, font_store):
     assert len(list(font_store.iterdir())) == 1
 
 
-# --- atama (N:N) ------------------------------------------------------------
+# --- assignment (N:N) -----------------------------------------------------------
 
 def test_ata_ve_kaldir(client, cid):
     login_as(client, DESIGNER)
@@ -154,7 +154,7 @@ def test_ata_ve_kaldir(client, cid):
 
 
 def test_tekrar_atama_cakismaz(client, cid):
-    """UNIQUE(font_id, client_id) — idempotent olmalı, 500 vermemeli."""
+    """UNIQUE(font_id, client_id) — must be idempotent, must not 500."""
     login_as(client, DESIGNER)
     fid = _yukle(client).get_json()["font"]["id"]
     for _ in range(3):
@@ -178,7 +178,7 @@ def test_bir_font_bircok_musteriye(client, cid):
 
 
 def test_yuklerken_musteriye_atanabilir(client, cid):
-    """'Yükle → sonra ata' iki adımına zorlamamak için client_id form alanı."""
+    """The client_id form field exists so users aren't forced into a two-step 'upload → then assign'."""
     login_as(client, DESIGNER)
     r = _yukle(client, client_id=cid)
     assert [c["id"] for c in r.get_json()["font"]["clients"]] == [cid]
@@ -199,7 +199,7 @@ def test_silinen_font_listelerden_duser(client, cid):
     assert client.get(f"/api/clients/{cid}/fonts").get_json()["fonts"] == []
 
 
-# --- servis uçları ----------------------------------------------------------
+# --- serving endpoints --------------------------------------------------------
 
 def test_inline_servis_dogru_mime(client):
     login_as(client, DESIGNER)
@@ -207,7 +207,7 @@ def test_inline_servis_dogru_mime(client):
     with client.get(f"/api/fonts/{fid}/file") as r:
         assert r.status_code == 200
         assert r.mimetype == "font/woff2"
-        # @font-face kaynağı: attachment OLMAMALI
+        # @font-face source: must NOT be an attachment
         assert "attachment" not in (r.headers.get("Content-Disposition") or "")
         assert r.data == WOFF2
 
@@ -227,7 +227,7 @@ def test_diskte_olmayan_dosya_404(client, font_store):
     assert client.get(f"/api/fonts/{fid}/file").status_code == 404
 
 
-# --- yetki ------------------------------------------------------------------
+# --- permissions ---------------------------------------------------------------
 
 @pytest.mark.parametrize("kullanici", [MANAGER, DESIGNER, CONTENT_CREATOR, VIDEOGRAPHER])
 def test_dort_uretim_rolu_okur(client, kullanici):
@@ -268,17 +268,18 @@ def test_csrf_zorunlu(client):
     assert r.status_code == 403
 
 
-# --- zip yükleme (2026-08-06) ----------------------------------------------
-# Font siteleri fontu tek başına değil, lisans PDF'i + önizleme görseli + okuma
-# notuyla birlikte zip'te veriyor. `tests/fixtures/bigbelow.zip` GERÇEK bir örnek
+# --- zip upload (2026-08-06) ------------------------------------------------
+# Font sites don't give you the font alone — they bundle it in a zip with a license
+# PDF + preview image + read-me. `tests/fixtures/bigbelow.zip` is a REAL example
 # (Bigbelow.otf + Bigbelow.ttf + Bigbelow.jpg + More Info.txt + Read Me.pdf).
 
 import zipfile
 
-# Gerçek arşivin YAPISI (font sitesinden inen bigbelow.zip ile birebir): iki font
-# formatı + önizleme görseli + okuma notu + lisans PDF'i. Lisanslı font dosyasının
-# kendisi repoya KONMADI; kural dosya imzasına baktığı için baytların gerçek font
-# olması gerekmiyor. Gerçek arşiv canlıda ayrıca doğrulandı (2026-08-06).
+# STRUCTURE of a real archive (identical to a bigbelow.zip downloaded from a font
+# site): two font formats + a preview image + a read-me + a license PDF. The actual
+# licensed font file was NOT put in the repo; since the rule checks the file
+# signature, the bytes don't need to be a real font. The real archive was also
+# verified in production (2026-08-06).
 def _font_zipi():
     return _zip_yap([
         ("Bigbelow.jpg", b"\xff\xd8\xff\xe0" + b"jpeg" * 10),
@@ -298,7 +299,7 @@ def _zip_yap(kayitlar):
 
 
 def test_font_sitesi_zipi(client):
-    """Tipik arşiv: 2 font alınır, 3 dosya (jpg/txt/pdf) atlanır ve RAPORLANIR."""
+    """Typical archive: 2 fonts are taken, 3 files (jpg/txt/pdf) are skipped and REPORTED."""
     login_as(client, DESIGNER)
     r = _yukle(client, _font_zipi(), name="bigbelow.zip")
     assert r.status_code == 201, r.get_json()
@@ -321,13 +322,13 @@ def test_zipte_font_yoksa_400(client):
     r = _yukle(client, _zip_yap([("okuma.txt", b"merhaba"), ("kapak.jpg", b"\xff\xd8\xff")]),
                name="fontsuz.zip")
     assert r.status_code == 400
-    assert "font dosyası bulunamadı" in r.get_json()["error"]
+    assert "no font file found" in r.get_json()["error"]
     assert len(r.get_json()["skipped"]) == 2
 
 
 def test_macos_artiklari_rapora_girmez(client):
-    """`__MACOSX/` ve `._` kayıtlarını kullanıcı koymadı; 'atlandı' listesinde
-    gürültü yapmamalılar."""
+    """The user didn't put `__MACOSX/` and `._` entries there; they shouldn't
+    clutter the 'skipped' list."""
     login_as(client, DESIGNER)
     r = _yukle(client, _zip_yap([("Aile-Bold.ttf", TTF),
                                  ("__MACOSX/._Aile-Bold.ttf", b"artik"),
@@ -338,15 +339,15 @@ def test_macos_artiklari_rapora_girmez(client):
 
 
 def test_zipte_mevcut_font_atlanir_kalani_yuklenir(client):
-    """Bir zipte hem yeni hem daha önce yüklenmiş font olması normal — tek dosya
-    yolundaki 409 burada tüm arşivi reddetmemeli."""
+    """It's normal for a zip to contain both new and already-uploaded fonts — the 409
+    from the single-file path must not reject the whole archive here."""
     login_as(client, DESIGNER)
     _yukle(client, TTF, name="Eski-Regular.ttf")
     r = _yukle(client, _zip_yap([("Eski-Regular.ttf", TTF), ("Yeni-Bold.otf", OTF)]),
                name="karisik.zip")
     assert r.status_code == 201
     assert [f["family"] for f in r.get_json()["fonts"]] == ["Yeni"]
-    assert any("zaten havuzda" in a for a in r.get_json()["skipped"])
+    assert any("already in the pool" in a for a in r.get_json()["skipped"])
 
 
 def test_zip_boyut_siniri_413(client, monkeypatch):
@@ -357,25 +358,25 @@ def test_zip_boyut_siniri_413(client, monkeypatch):
 
 
 def test_zip_bomb_acilmis_boyut_siniri(client, monkeypatch):
-    """Sıkıştırılmış boyut küçük olsa da AÇILMIŞ toplam sınırı aşarsa durulur."""
+    """Even if the compressed size is small, it stops if the UNPACKED total exceeds the limit."""
     import fonts
     monkeypatch.setattr(fonts, "ZIP_MAX_TOTAL_BYTES", 100)
     login_as(client, DESIGNER)
     r = _yukle(client, _zip_yap([("a.ttf", TTF), ("b.ttf", b"\x00\x01\x00\x00" + b"x" * 500),
                                  ("c.ttf", OTF)]), name="bomba.zip")
     d = r.get_json()
-    assert any("boyut sınırını aştı" in a for a in d.get("skipped", []))
+    assert any("exceeded the extracted size limit" in a for a in d.get("skipped", []))
 
 
 def test_bozuk_zip_400(client):
     login_as(client, DESIGNER)
     r = _yukle(client, b"PK\x03\x04bozuk-icerik", name="bozuk.zip")
     assert r.status_code == 400
-    assert "arşiv okunamadı" in r.get_json()["error"]
+    assert "could not read the archive" in r.get_json()["error"]
 
 
 def test_zip_icindeki_yol_yok_sayilir(client, font_store):
-    """Zip-slip: girişin yol bilgisi KULLANILMAZ, dosya kendi hash adıyla yazılır."""
+    """Zip-slip: the entry's path info is NOT used, the file is written under its own hash name."""
     login_as(client, DESIGNER)
     r = _yukle(client, _zip_yap([("../../../etc/kotu.ttf", TTF)]), name="slip.zip")
     assert r.status_code == 201
@@ -389,11 +390,11 @@ def test_zip_icerikci_yukleyemez(client):
     assert _yukle(client, _font_zipi(), name="bigbelow.zip").status_code == 403
 
 
-# --- silme yetkisi (2026-08-06) ---------------------------------------------
-# Önceden `WRITE_ROLES` kapısı yeterliydi → HER tasarımcı HER fontu silebiliyordu
-# (230 fontluk ortak havuz dahil). Artık: yönetim ayrımsız, tasarımcı yalnız kendi
-# yüklediğini. Kural `fonts._silebilir`'de tek yerde; liste ucu `can_delete` ile
-# aynı kaynaktan besleniyor.
+# --- delete permission (2026-08-06) -------------------------------------------
+# Previously the `WRITE_ROLES` gate was enough → ANY designer could delete ANY font
+# (including the shared 230-font pool). Now: management can delete anything, a
+# designer only what they uploaded. The rule lives in one place, `fonts._silebilir`;
+# the list endpoint's `can_delete` is fed from the same source.
 
 BASKA_TASARIMCI = {"sub": "77", "email": "diger@test.com", "name": "Diğer Tasarımcı",
                    "role": "designer"}
@@ -408,7 +409,7 @@ def test_tasarimci_kendi_fontunu_silebilir(client):
 
 
 def test_tasarimci_baskasinin_fontunu_silemez(client):
-    """Ortak havuzun (Google Fonts içe aktarımı) korunması bu kurala bağlı."""
+    """Protection of the shared pool (the Google Fonts import) depends on this rule."""
     login_as(client, DESIGNER)
     fid = _yukle(client).get_json()["font"]["id"]
     login_as(client, BASKA_TASARIMCI)
@@ -426,8 +427,8 @@ def test_yonetim_baskasinin_fontunu_silebilir(client):
 
 
 def test_import_scriptinin_fontunu_tasarimci_silemez(client):
-    """`font_import` ile gelen 200+ fontun `uploaded_by`'ı bir SSO sub değil —
-    hiçbir tasarımcıya eşleşmez, dolayısıyla hiçbiri silemez."""
+    """The `uploaded_by` of the 200+ fonts that came in via `font_import` is not an SSO sub —
+    it matches no designer, so none of them can delete it."""
     from extensions import db
     from models_fonts import Font
     db.session.add(Font(family="Montserrat", style="Regular",
@@ -441,24 +442,24 @@ def test_import_scriptinin_fontunu_tasarimci_silemez(client):
 
 
 def test_can_delete_bayragi_ucla_ayni_kurali_soyler(client):
-    """Bayrak ile ucun ayrışması = düğmenin yalan söylemesi. İkisi de `_silebilir`."""
+    """A mismatch between the flag and the endpoint = the button lying. Both use `_silebilir`."""
     login_as(client, DESIGNER)
     benim = _yukle(client, name="Benim-Regular.ttf").get_json()["font"]["id"]
     login_as(client, BASKA_TASARIMCI)
     onun = _yukle(client, OTF, name="Onun-Regular.otf").get_json()["font"]["id"]
 
-    # Diğer tasarımcının gözüyle: yalnız kendi yüklediğinde bayrak açık
+    # From the other designer's point of view: the flag is only on for what they uploaded
     bayraklar = {f["id"]: f["can_delete"] for f in client.get("/api/fonts").get_json()["fonts"]}
     assert bayraklar == {benim: False, onun: True}
 
-    # Yönetimin gözüyle: hepsi açık
+    # From management's point of view: all on
     login_as(client, MANAGER)
     bayraklar = {f["id"]: f["can_delete"] for f in client.get("/api/fonts").get_json()["fonts"]}
     assert bayraklar == {benim: True, onun: True}
 
 
 def test_okuma_rolunde_can_delete_kapali(client):
-    """İçerik üreticisi listeyi görür ama hiçbir fontta silme bayrağı olmaz."""
+    """A content creator sees the list but no font has the delete flag on."""
     login_as(client, DESIGNER)
     _yukle(client)
     login_as(client, CONTENT_CREATOR)

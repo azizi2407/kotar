@@ -1,4 +1,4 @@
-"""drive-counts batch ucu (board açılış thundering herd çözümü)."""
+"""drive-counts batch endpoint (fix for the board-open thundering herd)."""
 from conftest import DESIGNER, MANAGER, login_as
 from test_session_csrf import csrf_headers
 
@@ -18,10 +18,10 @@ def test_drive_counts_batch(client, monkeypatch):
     db.session.add(ClientWeekFolder(client_id=a, week_number=21, folder_id="FA"))
     db.session.add(ClientWeekFolder(client_id=b, week_number=21, folder_id="FB"))
     db.session.commit()
-    # sayımı sahte + Drive "available" sahte
+    # fake the count + fake Drive "available"
     monkeypatch.setattr(drive_gateway, "available", lambda: True)
     monkeypatch.setattr(drive_gateway, "count_files", lambda fid: {"FA": 4, "FB": 7}.get(fid))
-    # cache'i temizle (önceki testlerden kalmasın)
+    # clear the cache (don't let it carry over from previous tests)
     import sharing
     sharing._counts_cache.clear()
     r = client.get("/api/sharing/drive-counts?week_iso=2026-W21")

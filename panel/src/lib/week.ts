@@ -1,9 +1,9 @@
-// ISO hafta yardımcıları. Board ekseni week_iso = "YYYY-Www" (backend ile aynı).
+// ISO week helpers. The board axis week_iso = "YYYY-Www" (matches the backend).
 
 function isoWeekParts(d: Date): { year: number; week: number } {
   const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
-  const dayNum = (date.getUTCDay() + 6) % 7 // Pazartesi=0
-  date.setUTCDate(date.getUTCDate() - dayNum + 3) // o haftanın perşembesi
+  const dayNum = (date.getUTCDay() + 6) % 7 // Monday=0
+  date.setUTCDate(date.getUTCDate() - dayNum + 3) // that week's Thursday
   const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4))
   const firstDayNum = (firstThursday.getUTCDay() + 6) % 7
   firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDayNum + 3)
@@ -21,21 +21,21 @@ export function toWeekIso(d: Date): string {
 }
 
 export function currentWeekIso(): string {
-  // Kullanıcının YEREL takvim gününe göre ISO hafta. toWeekIso iç UTC matematiği kullanır;
-  // bu yüzden yerel y/m/d'yi UTC öğlesine sabitleyip veririz → GMT+3'te (Pzt yerel iken
-  // hâlâ Pazar UTC olabilir) hafta yerel güne göre doğru çıkar.
-  // (Bug'tı: new Date() doğrudan → UTC günü → hafta sınırında bir hafta geri gösteriyordu.)
+  // ISO week based on the user's LOCAL calendar day. toWeekIso uses UTC math internally;
+  // so we pin the local y/m/d to UTC noon before passing it in → at GMT+3 (where it may
+  // still be Sunday in UTC while it's Monday locally) the week comes out correct for the local day.
+  // (Was a bug: passing `new Date()` directly → UTC day → showed a week behind at the week boundary.)
   const n = new Date()
   return toWeekIso(new Date(Date.UTC(n.getFullYear(), n.getMonth(), n.getDate(), 12)))
 }
 
-// Kullanıcının YEREL takvim gününü "YYYY-MM-DD" verir (UTC değil). new Date().toISOString()
-// UTC gün verir → GMT+3'te gece yarısına yakın yanlış gün. "bugün"/tarih damgaları için bunu kullan.
+// Returns the user's LOCAL calendar day as "YYYY-MM-DD" (not UTC). new Date().toISOString()
+// gives the UTC day → wrong day near midnight at GMT+3. Use this for "today"/date stamps.
 export function localDateStr(d: Date = new Date()): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
 }
 
-// ISO haftanın pazartesisi (UTC).
+// The Monday of the ISO week (UTC).
 export function mondayOfIsoWeek(weekIso: string): Date {
   const m = /^(\d{4})-W(\d{2})$/.exec(weekIso)
   if (!m) return new Date()
@@ -56,12 +56,15 @@ export function shiftWeek(weekIso: string, delta: number): string {
   return toWeekIso(monday)
 }
 
-// "12–18 May 2026" gibi okunur aralık.
-export function weekRangeLabel(weekIso: string): string {
+const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+const MONTHS_TR = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
+
+// Readable range, e.g. "12–18 May 2026" (en) / "12–18 May 2026" (tr).
+export function weekRangeLabel(weekIso: string, lang: "tr" | "en" = "en"): string {
   const monday = mondayOfIsoWeek(weekIso)
   const sunday = new Date(monday)
   sunday.setUTCDate(monday.getUTCDate() + 6)
-  const months = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
+  const months = lang === "tr" ? MONTHS_TR : MONTHS_EN
   const d1 = monday.getUTCDate()
   const d2 = sunday.getUTCDate()
   const m1 = months[monday.getUTCMonth()]
@@ -70,7 +73,7 @@ export function weekRangeLabel(weekIso: string): string {
   return m1 === m2 ? `${d1}–${d2} ${m2} ${y}` : `${d1} ${m1} – ${d2} ${m2} ${y}`
 }
 
-// Türkçe-duyarlı arama katlaması ("Şişli" ↔ "sisli").
+// Turkish-aware search folding ("Şişli" ↔ "sisli").
 export function trFold(s: string): string {
   return (s || "")
     .toLocaleLowerCase("tr")

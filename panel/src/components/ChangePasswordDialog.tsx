@@ -1,6 +1,6 @@
-// Parola değiştirme — yalnız AUTH_MODE=local'de gösterilir (bkz. AppLayout).
-// Yönetici tarafından oluşturulan geçici parolayı kullanıcı burada kendi seçtiğiyle
-// değiştirir (bkz. auth.py POST /auth/change-password).
+// Change password — only shown under AUTH_MODE=local (see AppLayout).
+// Here the user replaces the temporary password an admin created with one of
+// their own choosing (see auth.py POST /auth/change-password).
 import { useState, type FormEvent } from "react"
 import { toast } from "sonner"
 

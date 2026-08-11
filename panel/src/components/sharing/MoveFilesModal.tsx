@@ -1,11 +1,12 @@
-// Paylaşılmamış içerik taşıma modalı — önceki/sonraki hafta Drive klasöründeki
-// paylaşılmamış dosyaları seç, bulunduğumuz hafta klasörüne taşı.
+// Unshared content move modal — pick unshared files from the previous/next week's
+// Drive folder and move them into the current week's folder.
 import { useMemo, useState } from "react"
 import { toast } from "sonner"
 
 import {
   thumbnailUrl, useMovableFiles, useMoveFiles, type MovableWeek,
 } from "@/lib/sharing"
+import { useI18n } from "@/lib/i18n"
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog"
@@ -24,11 +25,12 @@ interface Props {
 function WeekSection({ title, week, selected, toggle }: {
   title: string; week: MovableWeek; selected: Set<string>; toggle: (id: string) => void
 }) {
+  const { t } = useI18n()
   if (!week.files.length) {
     return (
       <div>
         <div className="mb-1 text-sm font-medium">{title} · {week.week_iso}</div>
-        <p className="text-xs text-muted-foreground">Paylaşılmamış içerik yok.</p>
+        <p className="text-xs text-muted-foreground">{t("components.sharing.moveFilesModal.noUnshared")}</p>
       </div>
     )
   }
@@ -61,9 +63,10 @@ function WeekSection({ title, week, selected, toggle }: {
 }
 
 export function MoveFilesModal({ open, onOpenChange, clientId, clientName, weekIso }: Props) {
+  const { t } = useI18n()
   const { data, isLoading, isError } = useMovableFiles(clientId, weekIso, open)
   const move = useMoveFiles()
-  // seçim anahtarı: "<kaynak week>:<fileId>" (kaynak hafta taşımada gerekli)
+  // selection key: "<source week>:<fileId>" (source week is needed for the move)
   const [selected, setSelected] = useState<Set<string>>(new Set())
 
   function toggle(week: string, id: string) {
@@ -95,10 +98,10 @@ export function MoveFilesModal({ open, onOpenChange, clientId, clientName, weekI
         if (r.errors?.length) toast.error(r.errors.join(", "))
       }
       setSelected(new Set())
-      if (total) toast.success(`${total} dosya bu haftaya taşındı`)
+      if (total) toast.success(t("components.sharing.moveFilesModal.moved", { count: total }))
       if (total) onOpenChange(false)
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Taşıma başarısız")
+      toast.error(e instanceof Error ? e.message : t("components.sharing.moveFilesModal.moveFailed"))
     }
   }
 
@@ -106,34 +109,40 @@ export function MoveFilesModal({ open, onOpenChange, clientId, clientName, weekI
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-xl max-h-[85vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>İçerik Taşı · {clientName}</DialogTitle>
+          <DialogTitle>{t("components.sharing.moveFilesModal.title", { clientName })}</DialogTitle>
           <DialogDescription>
-            Önceki/sonraki haftanın paylaşılmamış içeriklerini {weekIso} klasörüne taşı.
+            {t("components.sharing.moveFilesModal.description", { weekIso })}
           </DialogDescription>
         </DialogHeader>
 
         {isLoading && <Skeleton className="h-40 w-full" />}
-        {isError && <p className="text-sm text-destructive">İçerik listesi alınamadı (Drive erişimi?).</p>}
+        {isError && <p className="text-sm text-destructive">{t("components.sharing.moveFilesModal.listError")}</p>}
         {data && (
           <div className="space-y-4">
             {weeks.every((w) => !w.files.length) && (
               <p className="py-6 text-center text-sm text-muted-foreground">
-                Taşınabilir paylaşılmamış içerik yok.
+                {t("components.sharing.moveFilesModal.nothingMovable")}
               </p>
             )}
-            <WeekSection title="Önceki hafta" week={data.previous}
+            <WeekSection title={t("components.sharing.moveFilesModal.prevWeek")} week={data.previous}
               selected={selForWeek(data.previous.week_iso)}
               toggle={(id) => toggle(data.previous.week_iso, id)} />
-            <WeekSection title="Sonraki hafta" week={data.next}
+            <WeekSection title={t("components.sharing.moveFilesModal.nextWeek")} week={data.next}
               selected={selForWeek(data.next.week_iso)}
               toggle={(id) => toggle(data.next.week_iso, id)} />
           </div>
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Kapat</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            {t("components.sharing.moveFilesModal.close")}
+          </Button>
           <Button onClick={onMove} disabled={count === 0 || move.isPending}>
-            {move.isPending ? "Taşınıyor…" : `Bu haftaya taşı${count ? ` (${count})` : ""}`}
+            {move.isPending
+              ? t("components.sharing.moveFilesModal.moving")
+              : count
+                ? t("components.sharing.moveFilesModal.moveHereCount", { count })
+                : t("components.sharing.moveFilesModal.moveHere")}
           </Button>
         </DialogFooter>
       </DialogContent>

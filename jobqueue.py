@@ -1,8 +1,9 @@
-"""Postgres SKIP LOCKED iş kuyruğu — worker'lar (proje sahibi bağlamı) çeker, web atar.
+"""Postgres SKIP LOCKED job queue — workers pull (project owner's context), the web enqueues.
 
-enqueue: web (svc-agency) iş ekler. claim: worker atomik olarak bir işi kapar
-(FOR UPDATE SKIP LOCKED, birden çok worker çakışmaz). complete/fail: sonuç yazar.
-fail geçici hatalarda backoff'la requeue eder; reap_stuck takılan job'ları kurtarır.
+enqueue: web (svc-agency) adds a job. claim: a worker atomically claims a job
+(FOR UPDATE SKIP LOCKED, so multiple workers don't collide). complete/fail:
+write the result. fail requeues with backoff on transient errors; reap_stuck
+recovers stuck jobs.
 """
 import threading
 from datetime import timedelta
@@ -13,24 +14,26 @@ from extensions import db
 from models import Job, utcnow
 from notifications import notify_job_failed, notify_job_stuck
 
-# Backoff basamakları (saniye): attempts=1→60, 2→300, 3+→900. Üstel-benzeri, sabit tablo.
+# Backoff steps (seconds): attempts=1->60, 2->300, 3+->900. Exponential-ish, fixed table.
 _BACKOFF = (60, 300, 900)
 
-# --- dedup serileştirme (TOCTOU yarışına karşı) ---
-# enqueue'nun dedup'ı check-then-act: `_active_dupe` SELECT + koşulsuz INSERT. Kilitsiz
-# bırakılırsa iki eşzamanlı istek (gthread 2×4) birbirinin commit'ini görmeden ikisi de
-# check'i "boş" bulup 2 aktif job üretebilir. İki katmanlı serileştirme:
-#   1) Süreç-içi: (type, dedup_key) başına threading.Lock — aynı process'in thread'lerini
-#      (gthread 4 thread/worker) ve sqlite testini deterministik serileştirir.
-#   2) Süreçler-arası: Postgres transaction-scoped advisory lock (pg_advisory_xact_lock) —
-#      2 ayrı gunicorn process'in bağlantılarını da serileştirir; commit'te otomatik bırakılır.
-#      sqlite'ta advisory lock yok → atlanır (tek dosya + süreç-içi kilit yeterli).
+# --- dedup serialization (against the TOCTOU race) ---
+# enqueue's dedup is check-then-act: `_active_dupe` SELECT + an unconditional
+# INSERT. Left unlocked, two concurrent requests (gthread 2x4) could each
+# find the check "empty" without seeing the other's commit and produce 2
+# active jobs. Two-layer serialization:
+#   1) Within-process: a threading.Lock per (type, dedup_key) — deterministically
+#      serializes threads of the same process (gthread 4 threads/worker) and the sqlite test.
+#   2) Across processes: a Postgres transaction-scoped advisory lock
+#      (pg_advisory_xact_lock) — also serializes 2 separate gunicorn
+#      processes' connections; automatically released on commit.
+#      sqlite has no advisory lock -> skipped (single file + the in-process lock is enough).
 _KEY_LOCKS = {}
 _KEY_LOCKS_GUARD = threading.Lock()
 
 
 def _key_lock(job_type, dedup_key):
-    """(type, dedup_key) başına paylaşılan bir threading.Lock döndür (süreç-içi seri)."""
+    """Return a shared threading.Lock per (type, dedup_key) (in-process serialization)."""
     k = (job_type, dedup_key)
     with _KEY_LOCKS_GUARD:
         lock = _KEY_LOCKS.get(k)
@@ -40,15 +43,17 @@ def _key_lock(job_type, dedup_key):
 
 
 def _backoff(n):
-    """attempts sayısına göre backoff saniyesi (tabloyu klemple)."""
+    """Backoff seconds based on the attempts count (clamp the table)."""
     return _BACKOFF[min(max(n, 1), len(_BACKOFF)) - 1]
 
 
 def _active_dupe(job_type, dedup_key):
-    """Aynı type + aktif (queued|running) job'lar arasında payload._dedup_key eşleşeni
-    döndür. TEK ve dialect-bağımsız strateji: aktif kuyruk DAR olduğundan hepsini çekip
-    Python'da eşleriz (PG JSON-path / JSONB indeksine bağımlı DEĞİL; sqlite testte de
-    aynı çalışır). Ölçek sorun olursa ayrı indeksli kolon sonradan eklenir (YAGNI)."""
+    """Return the job among the same type's active (queued|running) jobs
+    whose payload._dedup_key matches. A SINGLE dialect-independent strategy:
+    since the active queue is NARROW, we pull them all and match in Python
+    (NOT dependent on a PG JSON-path / JSONB index; works the same way in
+    the sqlite test). If scale becomes an issue, a separately indexed column
+    can be added later (YAGNI)."""
     actives = Job.query.filter(
         Job.type == job_type, Job.status.in_(('queued', 'running'))).all()
     for j in actives:
@@ -58,51 +63,59 @@ def _active_dupe(job_type, dedup_key):
 
 
 def enqueue(job_type, payload, priority=0, dedup_key=None, created_by=None):
-    """İş ekle. priority: yüksek sayı önce claim edilir (caption=10, batch=0).
-    dedup_key verilmişse payload'a `_dedup_key` olarak yazılır ve DEDUP uygulanır:
-    aynı `type` için aktif (queued|running) bir job aynı dedup_key'i taşıyorsa YENİ
-    INSERT yapılmaz, mevcut job döner (üst üste basma no-op). Aktif job done/failed
-    olduktan sonra aynı key ile enqueue yeni job üretir (dedup yalnız aktif işleri kapsar).
-    dedup_key None ise payload'a dokunulmaz ve dedup uygulanmaz."""
+    """Add a job. priority: a higher number is claimed first (caption=10, batch=0).
+    If dedup_key is given, it's written to the payload as `_dedup_key` and
+    DEDUP is applied: if an active (queued|running) job for the same `type`
+    already carries the same dedup_key, NO new INSERT happens, the existing
+    job is returned (a repeat call is a no-op). Once the active job is
+    done/failed, enqueue with the same key produces a new job (dedup only
+    covers active jobs). If dedup_key is None, the payload is untouched and
+    no dedup is applied."""
     if dedup_key is None:
         j = Job(type=job_type, status='queued', payload=payload,
                 priority=priority, created_by=created_by)
         db.session.add(j)
         db.session.commit()
         return j
-    # dedup: check+insert'i serileştir (TOCTOU yarışını kapat). Süreç-içi kilit +
-    # (PG) transaction-scoped advisory lock birlikte thread ve process çakışmasını keser.
+    # dedup: serialize the check+insert (closes the TOCTOU race). The
+    # in-process lock + the (PG) transaction-scoped advisory lock together
+    # cut off both thread and process collisions.
     with _key_lock(job_type, dedup_key):
         if db.session.get_bind().dialect.name == 'postgresql':
-            # xact lock: bu transaction commit edilene (INSERT görünür olana) kadar
-            # aynı anahtarı bekleyen diğer bağlantılar bloke olur → çift INSERT olmaz.
+            # xact lock: other connections waiting on the same key are
+            # blocked until this transaction commits (the INSERT becomes
+            # visible) -> no double INSERT.
             db.session.execute(
                 text('SELECT pg_advisory_xact_lock(hashtext(:k))'),
                 {'k': f'{job_type}:{dedup_key}'})
         existing = _active_dupe(job_type, dedup_key)
         if existing is not None:
-            # advisory lock'u bırak (yeni INSERT yok). rollback DEĞİL commit: SELECT
-            # hiçbir şey değiştirmedi, ama çağıran enqueue'dan ÖNCE aynı transaction'da
-            # başka pending değişiklikler yapmış olabilir; rollback onları sessizce
-            # silerdi. commit hem transaction-scoped advisory lock'u bırakır hem de
-            # çağıranın pending state'ini korur (normal INSERT yolundaki commit ile tutarlı).
+            # Release the advisory lock (no new INSERT). commit, NOT
+            # rollback: the SELECT changed nothing, but the caller could have
+            # made other pending changes in the same transaction BEFORE
+            # calling enqueue; a rollback would silently discard those.
+            # commit both releases the transaction-scoped advisory lock and
+            # preserves the caller's pending state (consistent with the
+            # commit on the normal INSERT path).
             db.session.commit()
             return existing
         payload = {**(payload or {}), '_dedup_key': dedup_key}
         j = Job(type=job_type, status='queued', payload=payload,
                 priority=priority, created_by=created_by)
         db.session.add(j)
-        db.session.commit()  # advisory lock burada bırakılır
+        db.session.commit()  # the advisory lock is released here
         return j
 
 
 def enqueue_per_client(job_type, client_ids, payload_fn, priority=0,
                        dedup_key_fn=None, created_by=None):
-    """Batch işleri (brief/özel gün) müşteri-başı AYRI job'a fan-out eder — TEK job
-    içinde döngü DEĞİL; kısmi hata izolasyonu (bir müşteri patlarsa diğerleri sürer).
-    Her client_id için `payload_fn(client_id)` ile payload üretir; `dedup_key_fn`
-    verilmişse her müşteri KENDİ anahtarını alır (`dedup_key_fn(client_id)` — tek skaler
-    DEĞİL, müşteri-başı). Yaratılan Job listesini döndürür. Brief/özel gün Faz 2/3 kullanır."""
+    """Fans out batch jobs (brief/special day) into a SEPARATE job per
+    client — NOT a loop inside a single job; this isolates partial failures
+    (if one client blows up, the others still proceed). Builds the payload
+    for each client_id via `payload_fn(client_id)`; if `dedup_key_fn` is
+    given, each client gets ITS OWN key (`dedup_key_fn(client_id)` — per
+    client, NOT a single scalar). Returns the list of created Jobs. Used by
+    brief/special-day Phase 2/3."""
     jobs = []
     for cid in client_ids:
         dedup_key = dedup_key_fn(cid) if dedup_key_fn is not None else None
@@ -112,8 +125,8 @@ def enqueue_per_client(job_type, client_ids, payload_fn, priority=0,
 
 
 def _select_query(types, now, for_update=False):
-    """claim'in temel sorgusu — available_at penceresi dahil. for_update PG dalında
-    SKIP LOCKED üretir (compile testi bu sorguyu doğrular)."""
+    """claim's base query — includes the available_at window. for_update
+    produces SKIP LOCKED on the PG dialect (a compile test validates this query)."""
     q = (Job.query.filter(
             Job.status == 'queued',
             Job.type.in_(types),
@@ -125,11 +138,12 @@ def _select_query(types, now, for_update=False):
 
 
 def claim(types):
-    """Verilen tiplerden claim edilebilir en eski işi atomik kap (status=running).
-    available_at gelecekte olan (backoff'ta bekleyen) job'lar atlanır."""
+    """Atomically claim the oldest claimable job from the given types
+    (status=running). Jobs with an available_at in the future (waiting on
+    backoff) are skipped."""
     now = utcnow()
     pg = db.session.get_bind().dialect.name == 'postgresql'
-    # sqlite (test) — SKIP LOCKED yok, tek süreçli
+    # sqlite (tests) — no SKIP LOCKED, single-process
     job = _select_query(types, now, for_update=pg).first()
     if job is None:
         return None
@@ -148,14 +162,16 @@ def complete(job, result):
 
 
 def fail(job, error, transient=False, max_attempts=3):
-    """İşi başarısız işaretle. transient + attempts<max_attempts ise backoff'la
-    requeue; aksi halde terminal 'failed'. İlk iş: handler'ın kirli/pending-rollback
-    session'ını temizle (yoksa buradaki commit patlar).
+    """Mark the job as failed. Requeues with backoff if transient and
+    attempts<max_attempts; otherwise terminal 'failed'. First thing: clean
+    up the handler's dirty/pending-rollback session (otherwise the commit
+    here blows up).
 
-    Terminal dalda `notifications.push` (flush-only) çağrılır — EK commit YOK, bu
-    fonksiyonun zaten var olan TEK commit'i hem job'u hem bildirimi kalıcılaştırır."""
-    db.session.rollback()  # İLK satır — kirli session'ı temizle, sonra job'u yeniden yükle
-    job = db.session.get(Job, job.id)  # rollback job'u expire etti; taze oku
+    On the terminal branch, `notifications.push` (flush-only) is called —
+    NO extra commit, this function's already-existing SINGLE commit
+    persists both the job and the notification."""
+    db.session.rollback()  # FIRST line — clean the dirty session, then reload the job
+    job = db.session.get(Job, job.id)  # rollback expired the job; read fresh
     if job is None:
         return
     if transient and job.attempts < max_attempts:
@@ -166,14 +182,15 @@ def fail(job, error, transient=False, max_attempts=3):
         job.status = 'failed'
         job.result = {'error': str(error)[:500]}
         job.finished_at = utcnow()
-        notify_job_failed(job)  # flush eder; commit aşağıda tek seferde
+        notify_job_failed(job)  # flushes; commit happens once, below
     db.session.commit()
 
 
 def reap_stuck(timeout_seconds=1800):
-    """'running'de timeout'tan uzun takılı job'ları kuyruğa geri al (janitor).
-    attempts'e dokunmaz; requeue edilen job listesini döndürür. Her requeue için
-    `notifications.push` (flush-only) çağrılır — aşağıdaki TEK commit kalıcılaştırır."""
+    """Reclaim jobs stuck in 'running' longer than the timeout back to the
+    queue (janitor). Doesn't touch attempts; returns the list of requeued
+    jobs. `notifications.push` (flush-only) is called for each requeue —
+    the SINGLE commit below persists all of them."""
     cutoff = utcnow() - timedelta(seconds=timeout_seconds)
     stuck = Job.query.filter(Job.status == 'running', Job.claimed_at < cutoff).all()
     for j in stuck:

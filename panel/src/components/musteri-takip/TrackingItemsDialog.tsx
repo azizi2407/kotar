@@ -1,6 +1,6 @@
-// Kalem kataloğu yönetimi (Müşteri Takip) — ayrı sayfa değil, aynı ekranda diyalog:
-// kalem eklenip sonucu hemen müşteri satırlarında görülsün diye.
-// Sıralama local state'te ↑/↓ ile değişir, "Sırayı kaydet" ile topluca yazılır.
+// Tracking item catalog management (Client Tracking) — not a separate page, a dialog
+// on the same screen: so an added item's effect is visible in client rows right away.
+// Ordering changes in local state via ↑/↓, and gets written in bulk with "Save order".
 import { useEffect, useState } from "react"
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
@@ -10,8 +10,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { useI18n } from "@/lib/i18n"
 import {
-  CATEGORY_LABELS, ITEM_ICONS, itemIcon, useCreateTrackingItem, useDeleteTrackingItem,
+  ITEM_ICONS, itemIcon, useCategoryLabels, useCreateTrackingItem, useDeleteTrackingItem,
   useReorderTrackingItems, useTrackingItems, useUpdateTrackingItem, type TrackingItem,
 } from "@/lib/musteri-takip"
 
@@ -20,6 +21,8 @@ function errText(e: unknown, fallback: string) {
 }
 
 export function TrackingItemsDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useI18n()
+  const CATEGORY_LABELS = useCategoryLabels()
   const itemsQ = useTrackingItems()
   const create = useCreateTrackingItem()
   const update = useUpdateTrackingItem()
@@ -32,7 +35,7 @@ export function TrackingItemsDialog({ onClose }: { onClose: () => void }) {
   const [newCategory, setNewCategory] = useState("diger")
   const [newIcon, setNewIcon] = useState("Tag")
 
-  // Sunucu listesi geldiğinde local sırayı tazele — kullanıcı sırayı bozduysa dokunma.
+  // Refresh the local order when the server list arrives — don't touch it if the user has reordered.
   useEffect(() => {
     if (itemsQ.data && !dirty) setOrder(itemsQ.data)
   }, [itemsQ.data, dirty])
@@ -50,20 +53,20 @@ export function TrackingItemsDialog({ onClose }: { onClose: () => void }) {
     try {
       await reorder.mutateAsync(order.map((i) => i.id))
       setDirty(false)
-      toast.success("Sıra kaydedildi")
+      toast.success(t("components.clientTracking.trackingItemsDialog.orderSaved"))
     } catch (e) {
-      toast.error(errText(e, "Sıra kaydedilemedi"))
+      toast.error(errText(e, t("components.clientTracking.trackingItemsDialog.orderSaveFailed")))
     }
   }
 
   async function addItem() {
-    if (!newName.trim()) { toast.error("Kalem adı gerekli"); return }
+    if (!newName.trim()) { toast.error(t("components.clientTracking.trackingItemsDialog.nameRequired")); return }
     try {
       await create.mutateAsync({ name: newName.trim(), category: newCategory, icon: newIcon })
       setNewName("")
-      toast.success("Kalem eklendi")
+      toast.success(t("components.clientTracking.trackingItemsDialog.itemAdded"))
     } catch (e) {
-      toast.error(errText(e, "Kalem eklenemedi"))
+      toast.error(errText(e, t("components.clientTracking.trackingItemsDialog.itemAddFailed")))
     }
   }
 
@@ -71,18 +74,18 @@ export function TrackingItemsDialog({ onClose }: { onClose: () => void }) {
     try {
       await update.mutateAsync({ id: item.id, body: { active: !item.active } })
     } catch (e) {
-      toast.error(errText(e, "Güncellenemedi"))
+      toast.error(errText(e, t("components.clientTracking.trackingItemsDialog.updateFailed")))
     }
   }
 
   async function deleteItem(item: TrackingItem) {
-    if (!window.confirm(`"${item.name}" kalemi listeden kaldırılsın mı? Girilmiş müşteri kayıtları silinmez.`)) return
+    if (!window.confirm(t("components.clientTracking.trackingItemsDialog.confirmDelete", { name: item.name }))) return
     try {
       await remove.mutateAsync(item.id)
       setDirty(false)
-      toast.success("Kalem kaldırıldı")
+      toast.success(t("components.clientTracking.trackingItemsDialog.itemRemoved"))
     } catch (e) {
-      toast.error(errText(e, "Kaldırılamadı"))
+      toast.error(errText(e, t("components.clientTracking.trackingItemsDialog.itemRemoveFailed")))
     }
   }
 
@@ -90,11 +93,10 @@ export function TrackingItemsDialog({ onClose }: { onClose: () => void }) {
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Takip kalemleri</DialogTitle>
+          <DialogTitle>{t("components.clientTracking.trackingItemsDialog.title")}</DialogTitle>
         </DialogHeader>
         <p className="-mt-2 text-sm text-muted-foreground">
-          Müşterilere satılabilecek iş kalemleri. Pasife alınan kalem yeni satırlarda görünmez,
-          girilmiş kayıtlar durur.
+          {t("components.clientTracking.trackingItemsDialog.subtitle")}
         </p>
 
         <div className="max-h-[50vh] space-y-1 overflow-y-auto pr-1">
@@ -112,57 +114,57 @@ export function TrackingItemsDialog({ onClose }: { onClose: () => void }) {
                 <Switch
                   checked={item.active}
                   onCheckedChange={() => toggleActive(item)}
-                  aria-label={`${item.name} aktif`}
+                  aria-label={t("components.clientTracking.trackingItemsDialog.activeAria", { name: item.name })}
                 />
                 <Button variant="ghost" size="icon-sm" onClick={() => move(index, -1)}
-                  disabled={index === 0} aria-label="Yukarı taşı">
+                  disabled={index === 0} aria-label={t("components.clientTracking.trackingItemsDialog.moveUp")}>
                   <ArrowUp className="h-4 w-4" />
                 </Button>
                 <Button variant="ghost" size="icon-sm" onClick={() => move(index, 1)}
-                  disabled={index === order.length - 1} aria-label="Aşağı taşı">
+                  disabled={index === order.length - 1} aria-label={t("components.clientTracking.trackingItemsDialog.moveDown")}>
                   <ArrowDown className="h-4 w-4" />
                 </Button>
                 <Button variant="ghost" size="icon-sm" onClick={() => deleteItem(item)}
-                  aria-label={`${item.name} kaldır`}>
+                  aria-label={t("components.clientTracking.trackingItemsDialog.removeAria", { name: item.name })}>
                   <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>
               </div>
             )
           })}
-          {itemsQ.isLoading && <p className="py-4 text-center text-sm text-muted-foreground">Yükleniyor…</p>}
+          {itemsQ.isLoading && <p className="py-4 text-center text-sm text-muted-foreground">{t("components.clientTracking.trackingItemsDialog.loading")}</p>}
         </div>
 
         {dirty && (
           <div className="flex items-center justify-between rounded-md border bg-muted/30 px-3 py-2">
-            <span className="text-sm">Sıra değişti.</span>
+            <span className="text-sm">{t("components.clientTracking.trackingItemsDialog.orderChanged")}</span>
             <Button size="sm" onClick={saveOrder} disabled={reorder.isPending}>
-              {reorder.isPending ? "Kaydediliyor…" : "Sırayı kaydet"}
+              {reorder.isPending ? t("components.clientTracking.trackingItemsDialog.saving") : t("components.clientTracking.trackingItemsDialog.saveOrder")}
             </Button>
           </div>
         )}
 
         <div className="grid grid-cols-1 items-end gap-2 border-t pt-3 sm:grid-cols-[1fr_auto_auto_auto]">
           <div className="space-y-1">
-            <Label className="text-xs">Yeni kalem</Label>
-            <Input placeholder="örn. Drone Çekimi" value={newName}
+            <Label className="text-xs">{t("components.clientTracking.trackingItemsDialog.newItem")}</Label>
+            <Input placeholder={t("components.clientTracking.trackingItemsDialog.newItemPlaceholder")} value={newName}
               onChange={(e) => setNewName(e.target.value)} />
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">Kategori</Label>
+            <Label className="text-xs">{t("components.clientTracking.trackingItemsDialog.category")}</Label>
             <select className="h-9 rounded-md border bg-background px-2 text-sm"
               value={newCategory} onChange={(e) => setNewCategory(e.target.value)}>
               {Object.entries(CATEGORY_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
             </select>
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">İkon</Label>
+            <Label className="text-xs">{t("components.clientTracking.trackingItemsDialog.icon")}</Label>
             <select className="h-9 rounded-md border bg-background px-2 text-sm"
               value={newIcon} onChange={(e) => setNewIcon(e.target.value)}>
               {Object.keys(ITEM_ICONS).map((k) => <option key={k} value={k}>{k}</option>)}
             </select>
           </div>
           <Button onClick={addItem} disabled={create.isPending}>
-            <Plus className="mr-1 h-4 w-4" /> Ekle
+            <Plus className="mr-1 h-4 w-4" /> {t("components.clientTracking.trackingItemsDialog.add")}
           </Button>
         </div>
       </DialogContent>

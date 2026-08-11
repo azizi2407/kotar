@@ -1,56 +1,61 @@
-"""Bildirim önem dereceleri ve "telefona gitsin mi" kararı (2026-08-05).
+"""Notification severity levels and the "should it go to the phone" decision
+(2026-08-05).
 
-Bu modül BİLEREK saf: DB'ye, HTTP'ye, Flask isteğine dokunmaz. Karar mantığı tek
-yerde ve tek başına test edilebilir olsun diye — teslimat (`ntfy_gateway`) ve
-tetikleyiciler (`notifications`) bu fonksiyonun cevabına uyar.
+This module is DELIBERATELY pure: it doesn't touch the DB, HTTP, or the Flask
+request. So the decision logic lives in one place and is testable on its own —
+delivery (`ntfy_gateway`) and triggers (`notifications`) follow this function's
+answer.
 
-Üç seviye (proje sahibi kararı 2026-08-05). Ölçüt "kim ne kadar ilgileniyor" değil,
-AKSİYON:
-  kritik — birinin bugün bir şey yapması gerekiyor (revizyon talebi, ops uyarısı)
-  normal — bilmesi gerekiyor ama iş çıkarmıyor (müşteri onayladı, mail geldi)
-  bilgi  — geçmiş kaydı (revizyon çözüldü, job kendi kendine kuyruğa döndü)
+Three levels (project owner decision 2026-08-05). The criterion isn't "how
+interested is who", it's ACTION:
+  kritik (critical) — someone needs to do something today (revision request, ops alert)
+  normal            — needs to be known but doesn't create work (client approved, mail arrived)
+  bilgi (info)       — historical record (revision resolved, job requeued itself)
 """
 
 KRITIK = 'kritik'
 NORMAL = 'normal'
 BILGI = 'bilgi'
 
-# Sıralama karşılaştırma içindir (yüksek = daha önemli). Panelde eşik seçimi de
-# bu sırayı kullanır: "kritik" seçen yalnız kritik alır, "bilgi" seçen hepsini.
+# The ordering is for comparison (higher = more important). The threshold picker in
+# the panel also uses this order: someone who picks "kritik" gets only critical,
+# someone who picks "bilgi" gets everything.
 SEVERITY_ORDER = {BILGI: 0, NORMAL: 1, KRITIK: 2}
 SEVERITIES = tuple(SEVERITY_ORDER)
 
-# ntfy öncelik eşlemesi (1..5). Kritik 5 → telefonda sesli/ısrarlı bildirim.
+# ntfy priority mapping (1..5). Critical is 5 → an audible/persistent notification
+# on the phone.
 NTFY_PRIORITY = {KRITIK: 5, NORMAL: 3, BILGI: 2}
 NTFY_TAGS = {KRITIK: 'rotating_light', NORMAL: 'bell', BILGI: 'information_source'}
 
 
 def rank(severity):
-    """Bilinmeyen severity NORMAL sayılır — yeni bir tür katalogda eksik kalırsa
-    bildirim sessizce kaybolmasın, ortada dursun."""
+    """An unknown severity is treated as NORMAL — if a new type is missing from the
+    catalog, the notification shouldn't silently disappear, it should stay visible."""
     return SEVERITY_ORDER.get(severity, SEVERITY_ORDER[NORMAL])
 
 
 def in_quiet_hours(start_hour, end_hour, now_hour):
-    """Sessiz saat aralığında mıyız? Aralık gece yarısını SARABİLİR (22→08).
+    """Are we inside the quiet-hours window? The range CAN wrap past midnight (22→08).
 
-    Uçlar: başlangıç dahil, bitiş hariç (22–08 → 22:xx sessiz, 08:xx değil).
-    Eksik/eşit değerler "sessiz saat yok" demektir."""
+    Bounds: start inclusive, end exclusive (22–08 → 22:xx is quiet, 08:xx isn't).
+    Missing/equal values mean "no quiet hours"."""
     if start_hour is None or end_hour is None or start_hour == end_hour:
         return False
-    if start_hour < end_hour:                      # 09–18 gibi düz aralık
+    if start_hour < end_hour:                      # a plain range like 09–18
         return start_hour <= now_hour < end_hour
-    return now_hour >= start_hour or now_hour < end_hour   # 22–08 gibi saran aralık
+    return now_hour >= start_hour or now_hour < end_hour   # a wrapping range like 22–08
 
 
 def should_push_ntfy(pref, severity, now_hour):
-    """Bu bildirim bu kullanıcının telefonuna gitmeli mi?
+    """Should this notification go to this user's phone?
 
-    `pref`: `NotificationPref` benzeri bir nesne veya None (kayıt yoksa OPT-IN
-    gereği hiçbir şey gitmez — panel-içi çan zaten herkeste çalışıyor).
+    `pref`: a `NotificationPref`-like object or None (if there's no record, nothing
+    goes out — it's OPT-IN; the in-panel bell already works for everyone).
 
-    Sıra önemli: sessiz saat kontrolü eşikten SONRA gelir ve kritik onu deler
-    (proje sahibi kararı: gece 03:00'teki ops uyarısı beklememeli)."""
+    Order matters: the quiet-hours check comes AFTER the threshold check, and
+    critical punches through it (project owner decision: a 03:00 ops alert
+    shouldn't wait)."""
     if pref is None or not getattr(pref, 'ntfy_enabled', False):
         return False
     if not getattr(pref, 'ntfy_topic', None):

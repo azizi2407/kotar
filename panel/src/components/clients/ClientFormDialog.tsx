@@ -1,5 +1,5 @@
-// Müşteri ekle/düzenle diyaloğu. Yeni kayıtta tüm alanlar; düzenlemede yalnız
-// değişen alanlar PATCH'lenir (form'un tümü gönderilir, backend partial uygular).
+// Add/edit client dialog. All fields for a new record; when editing, only
+// changed fields are PATCHed (the whole form is sent, the backend applies it partially).
 import { useEffect, useMemo, useState } from "react"
 import { toast } from "sonner"
 
@@ -7,6 +7,7 @@ import type { ClientDetail } from "@/lib/types"
 import {
   ROLE_SLOTS, useCreateClient, useUpdateClient, useUsers, type ClientForm,
 } from "@/lib/clients"
+import { useI18n } from "@/lib/i18n"
 import { ApiError } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import {
@@ -54,10 +55,11 @@ function toForm(c: ClientDetail | null): ClientForm {
 interface Props {
   open: boolean
   onOpenChange: (v: boolean) => void
-  client: ClientDetail | null // null => yeni
+  client: ClientDetail | null // null => new
 }
 
 export function ClientFormDialog({ open, onOpenChange, client }: Props) {
+  const { t } = useI18n()
   const editing = client != null
   const [form, setForm] = useState<ClientForm>(() => toForm(client))
   const { data: users } = useUsers()
@@ -65,7 +67,7 @@ export function ClientFormDialog({ open, onOpenChange, client }: Props) {
   const update = useUpdateClient(client?.id ?? 0)
   const busy = create.isPending || update.isPending
 
-  // Diyalog her açıldığında/farklı müşteriye geçildiğinde formu tazele.
+  // Refresh the form every time the dialog opens/switches to a different client.
   useEffect(() => {
     if (open) setForm(toForm(client))
   }, [open, client])
@@ -93,16 +95,18 @@ export function ClientFormDialog({ open, onOpenChange, client }: Props) {
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     if (!form.name.trim()) {
-      toast.error("Müşteri adı zorunlu")
+      toast.error(t("components.clients.clientFormDialog.toast.nameRequired"))
       return
     }
     try {
       if (editing) await update.mutateAsync(form)
       else await create.mutateAsync(form)
-      toast.success(editing ? "Müşteri güncellendi" : "Müşteri eklendi")
+      toast.success(editing
+        ? t("components.clients.clientFormDialog.toast.updated")
+        : t("components.clients.clientFormDialog.toast.created"))
       onOpenChange(false)
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "İşlem başarısız")
+      toast.error(err instanceof ApiError ? err.message : t("components.clients.clientFormDialog.toast.failed"))
     }
   }
 
@@ -112,68 +116,70 @@ export function ClientFormDialog({ open, onOpenChange, client }: Props) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{editing ? "Müşteriyi Düzenle" : "Yeni Müşteri"}</DialogTitle>
+          <DialogTitle>{editing
+            ? t("components.clients.clientFormDialog.titleEdit")
+            : t("components.clients.clientFormDialog.titleNew")}</DialogTitle>
           <DialogDescription>
-            Temel bilgiler, anlaşma ve ekip ataması. Değişiklikler kaydedilince yansır.
+            {t("components.clients.clientFormDialog.description")}
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={submit} className="space-y-5">
-          {/* Genel */}
+          {/* General */}
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5 sm:col-span-2">
-              <Label htmlFor="name">Müşteri Adı *</Label>
+              <Label htmlFor="name">{t("components.clients.clientFormDialog.name")}</Label>
               <Input id="name" value={form.name}
                 onChange={(e) => setField("name", e.target.value)} autoFocus />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="sector">Sektör</Label>
+              <Label htmlFor="sector">{t("components.clients.clientFormDialog.sector")}</Label>
               <Input id="sector" value={form.sector ?? ""}
                 onChange={(e) => setField("sector", e.target.value)} />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="email">E-posta</Label>
+              <Label htmlFor="email">{t("components.clients.clientFormDialog.email")}</Label>
               <Input id="email" type="email" value={form.client_email ?? ""}
                 onChange={(e) => setField("client_email", e.target.value)} />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="ig">Instagram</Label>
+              <Label htmlFor="ig">{t("components.clients.clientFormDialog.instagram")}</Label>
               <Input id="ig" value={form.instagram_url ?? ""}
                 onChange={(e) => setField("instagram_url", e.target.value)} />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="drive">Drive Klasörü</Label>
+              <Label htmlFor="drive">{t("components.clients.clientFormDialog.driveFolder")}</Label>
               <Input id="drive" value={form.google_drive_url ?? ""}
                 onChange={(e) => setField("google_drive_url", e.target.value)} />
             </div>
             <div className="space-y-1.5 sm:col-span-2">
-              <Label htmlFor="notes">Notlar</Label>
+              <Label htmlFor="notes">{t("components.clients.clientFormDialog.notes")}</Label>
               <Textarea id="notes" rows={2} value={form.notes ?? ""}
                 onChange={(e) => setField("notes", e.target.value)} />
             </div>
           </div>
 
-          {/* Anlaşma */}
+          {/* Contract */}
           <div className="space-y-3 rounded-lg border p-3">
-            <div className="text-sm font-medium">Anlaşma & Çekim</div>
+            <div className="text-sm font-medium">{t("components.clients.clientFormDialog.contractSection")}</div>
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="space-y-1.5">
-                <Label>Haftalık İçerik</Label>
+                <Label>{t("components.clients.clientFormDialog.weeklyContent")}</Label>
                 <Input type="number" value={c.weekly_content_count ?? ""}
                   onChange={(e) => setContract({ weekly_content_count: numOrNull(e.target.value) })} />
               </div>
               <div className="space-y-1.5">
-                <Label>Post</Label>
+                <Label>{t("components.clients.clientFormDialog.post")}</Label>
                 <Input type="number" value={c.post_count ?? ""}
                   onChange={(e) => setContract({ post_count: numOrNull(e.target.value) })} />
               </div>
               <div className="space-y-1.5">
-                <Label>Story</Label>
+                <Label>{t("components.clients.clientFormDialog.story")}</Label>
                 <Input type="number" value={c.story_count ?? ""}
                   onChange={(e) => setContract({ story_count: numOrNull(e.target.value) })} />
               </div>
               <div className="space-y-1.5">
-                <Label>KDV %</Label>
+                <Label>{t("components.clients.clientFormDialog.vatRate")}</Label>
                 <Input type="number" value={c.vat_rate ?? ""}
                   onChange={(e) => setContract({ vat_rate: numOrNull(e.target.value) })} />
               </div>
@@ -182,35 +188,35 @@ export function ClientFormDialog({ open, onOpenChange, client }: Props) {
               <label className="flex items-center gap-2 text-sm">
                 <Switch checked={!!c.video_shooting_enabled}
                   onCheckedChange={(v) => setContract({ video_shooting_enabled: v })} />
-                Video çekimi
+                {t("components.clients.clientFormDialog.videoShooting")}
               </label>
               <label className="flex items-center gap-2 text-sm">
                 <Switch checked={!!c.photo_shooting_enabled}
                   onCheckedChange={(v) => setContract({ photo_shooting_enabled: v })} />
-                Foto çekimi
+                {t("components.clients.clientFormDialog.photoShooting")}
               </label>
               <label className="flex items-center gap-2 text-sm">
                 <Switch checked={!!c.drone_usage}
                   onCheckedChange={(v) => setContract({ drone_usage: v })} />
-                Drone
+                {t("components.clients.clientFormDialog.drone")}
               </label>
             </div>
           </div>
 
-          {/* Ekip */}
+          {/* Team */}
           <div className="space-y-3 rounded-lg border p-3">
-            <div className="text-sm font-medium">Ekip Ataması</div>
+            <div className="text-sm font-medium">{t("components.clients.clientFormDialog.teamSection")}</div>
             <div className="grid gap-3 sm:grid-cols-2">
               {ROLE_SLOTS.map((slot) => (
                 <div key={slot.key} className="space-y-1.5">
-                  <Label>{slot.label}</Label>
+                  <Label>{t(slot.labelKey)}</Label>
                   <Select
                     value={form.team_assignments?.[slot.key] ?? UNASSIGNED}
                     onValueChange={(v) => v && setTeam(slot.key, v)}
                   >
                     <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={UNASSIGNED}>— Atanmadı —</SelectItem>
+                      <SelectItem value={UNASSIGNED}>{t("components.clients.clientFormDialog.unassigned")}</SelectItem>
                       {roleOptions.map((o) => (
                         <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
                       ))}
@@ -223,10 +229,12 @@ export function ClientFormDialog({ open, onOpenChange, client }: Props) {
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              İptal
+              {t("components.clients.clientFormDialog.cancel")}
             </Button>
             <Button type="submit" disabled={busy}>
-              {busy ? "Kaydediliyor…" : editing ? "Kaydet" : "Ekle"}
+              {busy
+                ? t("components.clients.clientFormDialog.saving")
+                : editing ? t("components.clients.clientFormDialog.save") : t("components.clients.clientFormDialog.add")}
             </Button>
           </DialogFooter>
         </form>

@@ -1,8 +1,8 @@
-"""/api/admin/* — superadmin kapısı + sso_admin proxy (AUTH_MODE=oidc, HTTP mock'lu).
+"""/api/admin/* — superadmin gate + sso_admin proxy (AUTH_MODE=oidc, HTTP mocked).
 
-Global test varsayılanı AUTH_MODE=local (bkz. conftest.py); bu dosya AUTH_MODE=oidc
-yolunu (admin_api._backend() → sso_admin) `monkeypatch.setenv` ile ayrıca kapsar.
-Yerel (AUTH_MODE=local) admin akışı için bkz. test_local_admin.py."""
+The global test default is AUTH_MODE=local (see conftest.py); this file additionally
+covers the AUTH_MODE=oidc path (admin_api._backend() → sso_admin) via `monkeypatch.setenv`.
+For the local (AUTH_MODE=local) admin flow, see test_local_admin.py."""
 import pytest
 import sso_admin
 from conftest import MANAGER, login_as
@@ -18,7 +18,7 @@ def _oidc_mode(monkeypatch):
 
 def test_list_requires_superadmin(client, monkeypatch):
     monkeypatch.setattr(sso_admin, 'list_users', lambda: [{'id': 1, 'email': 'x@y.com'}])
-    login_as(client, MANAGER)  # management ama superadmin değil
+    login_as(client, MANAGER)  # management but not superadmin
     assert client.get('/api/admin/users').status_code == 403
 
 
@@ -66,11 +66,11 @@ def test_update_proxies(client, monkeypatch):
 
 def test_sso_error_status_propagates(client, monkeypatch):
     def boom(data):
-        raise sso_admin.SsoAdminError('bu e-posta zaten kayıtlı', 409)
+        raise sso_admin.SsoAdminError('this email is already registered', 409)
 
     monkeypatch.setattr(sso_admin, 'create_user', boom)
     login_as(client, SUPERADMIN)
     r = client.post('/api/admin/users', json={'email': 'v@example.com', 'role': 'designer'},
                     headers=csrf_headers(client))
     assert r.status_code == 409
-    assert 'zaten kayıtlı' in r.get_json()['error']
+    assert 'already registered' in r.get_json()['error']

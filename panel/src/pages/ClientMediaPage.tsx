@@ -1,16 +1,16 @@
-// Müşteri medya sayfası (2026-08-04) — /designer/musteri/:id.
+// Client media page (2026-08-04) — /designer/musteri/:id.
 //
-// Tasarım board'unda müşteri adına tıklayınca açılır. İki işi var: müşterinin
-// özet bilgilerini tek yerde göstermek ve — asıl sebep — müşteriye YÜKLENMİŞ tüm
-// görsel/videoyu hafta hafta gösterip haftalar arasında ELLE taşımaya izin vermek.
+// Opens when clicking a client's name on the design board. It does two things: show
+// the client's summary info in one place, and — the main reason — display ALL media
+// UPLOADED for the client week by week and let it be MANUALLY moved between weeks.
 //
-// Taşıma iki yoldan yapılır: kartı başka hafta bloğuna sürükle-bırak (@dnd-kit),
-// veya çoklu seçip üstteki şeritten hedef hafta seç. İkincisi dokunmatik/klavye
-// için yedek yol — sürükleme her ortamda güvenilir değil.
+// Moving is done two ways: drag-and-drop a card onto a different week block
+// (@dnd-kit), or multi-select and pick a target week from the strip at the top. The
+// latter is the fallback for touch/keyboard — dragging isn't reliable in every environment.
 //
-// Rol kapısı ROUTE'tan gelir: `/designer/...` yolu AppLayout'un nav tablosundaki
-// `/designer` kaydıyla prefix eşleşir → management + designer. Bu yüzden sayfa
-// kendi rol kontrolünü yapmaz (backend uçları ayrıca zorlar).
+// The role gate comes from the ROUTE: the `/designer/...` path prefix-matches the
+// `/designer` entry in AppLayout's nav table → management + designer. So the page
+// doesn't do its own role check (the backend endpoints enforce it separately).
 import { useMemo, useRef, useState } from "react"
 import { Link, useParams, useSearchParams } from "react-router-dom"
 import {
@@ -32,6 +32,7 @@ import {
 } from "@/lib/sharing"
 import { currentWeekIso, weekRangeLabel } from "@/lib/week"
 import { useAuth } from "@/lib/auth"
+import { useI18n } from "@/lib/i18n"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -48,23 +49,28 @@ import { ClientDesignFiles } from "@/components/design-files/ClientDesignFiles"
 import { LogoButton } from "@/components/sharing/LogoButton"
 import { UploadModal } from "@/components/sharing/UploadModal"
 
-const CATEGORY_LABELS: Record<string, string> = {
-  post: "Post", story: "Story", video: "Video", linkedin: "LinkedIn",
+function categoryLabels(t: (key: string) => string): Record<string, string> {
+  return {
+    post: t("pages.clientMedia.category.post"),
+    story: t("pages.clientMedia.category.story"),
+    video: t("pages.clientMedia.category.video"),
+    linkedin: t("pages.clientMedia.category.linkedin"),
+  }
 }
 
 function isVideo(up: Upload) {
   return up.category === "video" || Boolean(up.mime_type?.startsWith("video/"))
 }
 
-// İmleç neyin üstündeyse önce onu seç; boşa düşerse rect kesişimine düş.
-// (VideographerBoardPage Kanban'ıyla aynı gerekçe: küçük kartı bloğa bırakırken
-// closestCorners komşu kartı seçip drop'u yutuyor.)
+// Pick whatever's under the pointer first; fall back to rect intersection if nothing
+// hits. (Same rationale as the VideographerBoardPage Kanban: closestCorners would pick
+// the neighboring card when dropping a small card onto a block, swallowing the drop.)
 const collision: CollisionDetection = (args) => {
   const hits = pointerWithin(args)
   return hits.length ? hits : rectIntersection(args)
 }
 
-// --- medya kartı ---
+// --- media card ---
 
 function MediaCard({ up, selected, onToggle, onOpen }: {
   up: Upload
@@ -72,8 +78,10 @@ function MediaCard({ up, selected, onToggle, onOpen }: {
   onToggle: (e: React.MouseEvent) => void
   onOpen: () => void
 }) {
+  const { t } = useI18n()
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: up.id })
   const video = isVideo(up)
+  const labels = categoryLabels(t)
 
   return (
     <div ref={setNodeRef} {...attributes} {...listeners}
@@ -87,20 +95,20 @@ function MediaCard({ up, selected, onToggle, onOpen }: {
       <div className={cn("flex items-center justify-between px-2 py-1 text-[11px] font-semibold",
         up.used ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
           : "bg-muted text-muted-foreground")}>
-        <span>{CATEGORY_LABELS[up.category ?? ""] ?? up.category ?? "—"}</span>
-        {up.used && <span title="Bu dosya için paylaşım kartı açılmış">✓</span>}
+        <span>{labels[up.category ?? ""] ?? up.category ?? "—"}</span>
+        {up.used && <span title={t("pages.clientMedia.mediaCard.usedTitle")}>✓</span>}
       </div>
 
       <div className="relative">
         {up.file_id ? (
-          // `w=800`: kart artık ekran genişliğine göre esniyor (geniş ekranda
-          // ~340 px) — 240 px'lik küçük resim bulanık kalıyordu.
+          // `w=800`: the card now flexes with screen width (~340 px on wide
+          // screens) — a 240 px thumbnail looked blurry.
           <img src={thumbnailUrl(up.file_id, 800)} alt={up.file_name ?? ""} loading="lazy"
             className="aspect-[4/5] w-full bg-muted object-contain"
             onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = "hidden" }} />
         ) : (
           <div className="flex aspect-[4/5] w-full items-center justify-center text-xs text-muted-foreground">
-            görsel yok
+            {t("pages.clientMedia.mediaCard.noImage")}
           </div>
         )}
         {video && (
@@ -113,9 +121,9 @@ function MediaCard({ up, selected, onToggle, onOpen }: {
             <Check className="h-4 w-4" />
           </span>
         )}
-        {/* Büyütme AYRI düğme: karta tıklamak seçim yapıyor, çift-tık ile
-            çakışmasın diye lightbox kendi tetikleyicisine alındı. */}
-        <button type="button" title="Büyüt"
+        {/* Enlarge is a SEPARATE button: clicking the card selects it, so the lightbox
+            got its own trigger to avoid clashing with double-tap. */}
+        <button type="button" title={t("pages.clientMedia.mediaCard.enlarge")}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => { e.stopPropagation(); onOpen() }}
           className="absolute bottom-2 right-2 rounded bg-background/80 p-1.5 text-muted-foreground opacity-0 transition group-hover:opacity-100 hover:text-foreground">
@@ -128,7 +136,7 @@ function MediaCard({ up, selected, onToggle, onOpen }: {
       </div>
       {up.moved_from_week_iso && (
         <div className="truncate bg-amber-500/10 px-2 py-1 text-[11px] text-amber-700 dark:text-amber-400"
-          title={`${up.moved_from_week_iso} haftasından taşındı`}>
+          title={t("pages.clientMedia.mediaCard.movedFromTitle", { week: up.moved_from_week_iso })}>
           ↪ {up.moved_from_week_iso}
         </div>
       )}
@@ -136,7 +144,7 @@ function MediaCard({ up, selected, onToggle, onOpen }: {
   )
 }
 
-// --- hafta bloğu (drop hedefi) ---
+// --- week block (drop target) ---
 
 function WeekBlock({ week, selected, onToggle, onOpen, onUpload, isCurrent }: {
   week: ClientMediaWeek
@@ -146,6 +154,7 @@ function WeekBlock({ week, selected, onToggle, onOpen, onUpload, isCurrent }: {
   onUpload: (weekIso: string) => void
   isCurrent: boolean
 }) {
+  const { t } = useI18n()
   const { setNodeRef, isOver } = useDroppable({ id: `week:${week.week_iso}` })
 
   return (
@@ -156,20 +165,22 @@ function WeekBlock({ week, selected, onToggle, onOpen, onUpload, isCurrent }: {
       <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-3 py-2">
         <span className="font-medium">{week.week_iso}</span>
         <span className="text-xs text-muted-foreground">{weekRangeLabel(week.week_iso)}</span>
-        {isCurrent && <Badge className="bg-primary text-primary-foreground">Bu hafta</Badge>}
-        <Badge variant="outline" className="text-muted-foreground">{week.uploads.length} dosya</Badge>
+        {isCurrent && <Badge className="bg-primary text-primary-foreground">{t("pages.clientMedia.weekBlock.currentWeek")}</Badge>}
+        <Badge variant="outline" className="text-muted-foreground">
+          {t("pages.clientMedia.weekBlock.fileCount", { count: week.uploads.length })}
+        </Badge>
         <Button variant="ghost" size="sm" className="ml-auto"
           onClick={() => onUpload(week.week_iso)}>
-          <UploadIcon className="mr-1 h-3.5 w-3.5" /> Yükle
+          <UploadIcon className="mr-1 h-3.5 w-3.5" /> {t("pages.clientMedia.weekBlock.upload")}
         </Button>
       </div>
 
-      {/* Sabit genişlikli kart yerine esnek ızgara: geniş ekranda kart ~340 px'e
-          çıkar, tasarımcı görseli ayrı ayrı açmadan değerlendirebilsin. */}
+      {/* Flexible grid instead of fixed-width cards: on wide screens the card grows to
+          ~340 px so the designer can evaluate the image without opening it separately. */}
       <div className="p-3">
         {week.uploads.length === 0 ? (
           <p className={cn("py-3 text-sm", isOver ? "text-primary" : "text-muted-foreground")}>
-            {isOver ? "Buraya bırak" : "Bu haftada dosya yok — buraya sürükleyebilirsin."}
+            {isOver ? t("pages.clientMedia.weekBlock.dropHere") : t("pages.clientMedia.weekBlock.empty")}
           </p>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
@@ -184,22 +195,23 @@ function WeekBlock({ week, selected, onToggle, onOpen, onUpload, isCurrent }: {
   )
 }
 
-// --- çekim fotoğrafları (salt okunur; hafta kavramı yok → taşınamaz) ---
+// --- shoot photos (read-only; no week concept → can't be moved) ---
 
 function ShootPhotosBlock({ clientId }: { clientId: number }) {
+  const { t } = useI18n()
   const { data, isLoading, isError } = useVgPhotos(clientId)
   const list = useMemo(
     () => (data ?? []).slice().sort((a, b) => (b.shoot_date ?? "").localeCompare(a.shoot_date ?? "")),
     [data])
 
   if (isLoading) return <Skeleton className="h-28 w-full" />
-  if (isError) return <p className="text-sm text-destructive">Çekim fotoğrafları yüklenemedi.</p>
-  if (!list.length) return <p className="text-sm text-muted-foreground">Çekim fotoğrafı yok.</p>
+  if (isError) return <p className="text-sm text-destructive">{t("pages.clientMedia.shootPhotos.loadError")}</p>
+  if (!list.length) return <p className="text-sm text-muted-foreground">{t("pages.clientMedia.shootPhotos.empty")}</p>
 
   return (
     <div className="space-y-2">
       <p className="text-xs text-muted-foreground">
-        Çekim fotoğrafları çekim tarihine bağlıdır, haftaya taşınmaz.
+        {t("pages.clientMedia.shootPhotos.hint")}
       </p>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
         {list.map((p) => (
@@ -210,7 +222,7 @@ function ShootPhotosBlock({ clientId }: { clientId: number }) {
                 className="aspect-[4/5] w-full bg-muted object-cover" />
             ) : (
               <div className="flex aspect-[4/5] w-full items-center justify-center text-xs text-muted-foreground">
-                görsel yok
+                {t("pages.clientMedia.mediaCard.noImage")}
               </div>
             )}
             <div className="truncate px-2 py-1 text-xs text-muted-foreground">
@@ -223,32 +235,35 @@ function ShootPhotosBlock({ clientId }: { clientId: number }) {
   )
 }
 
-// --- logo önizlemesi ---
+// --- logo preview ---
 
-// Başlıktaki logo (2026-08-04). `LogoButton` logoyu İNDİRİR, göstermez — tasarımcı
-// doğru müşteride olduğunu görsel olarak da anlasın diye küçük önizleme. Görsel
-// `thumbnailUrl` üzerinden gelir: asset'ler arasında PDF/SVG logolar da var, Drive
-// bunlara da küçük resim üretir (asset download ucu `as_attachment`, <img>'e uygun değil).
-// Logo slotu boş olan müşterilerde (ör. Çimsan–Tohum Gübre: iki marka, logo bilerek
-// boş) ilk standart görsele düşülür; hiç asset yoksa hiçbir şey render edilmez.
+// Logo in the header (2026-08-04). `LogoButton` DOWNLOADS the logo, doesn't display
+// it — this is a small preview so the designer can also visually confirm they're on
+// the right client. The image comes via `thumbnailUrl`: some assets are PDF/SVG logos,
+// and Drive generates thumbnails for those too (the asset download endpoint is
+// `as_attachment`, not suitable for an <img>). For clients with an empty logo slot
+// (e.g. Çimsan–Tohum Gübre: two brands, logo left blank on purpose), it falls back to
+// the first standard image; if there are no assets at all, nothing is rendered.
 function ClientLogo({ clientId }: { clientId: number }) {
+  const { t } = useI18n()
   const { data: assets } = useClientAssets(clientId)
   const logo = assets?.find((a) => a.kind === "logo") ?? assets?.[0]
   if (!logo) return null
   return (
     <button type="button" onClick={() => downloadClientAsset(clientId, logo.id)}
-      title={logo.file_name ?? "Logoyu indir"}
+      title={logo.file_name ?? t("pages.clientMedia.clientLogo.downloadTitle")}
       className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-md border bg-background p-1 transition-colors hover:border-primary/50">
-      <img src={thumbnailUrl(logo.file_id, 200)} alt="Müşteri logosu"
+      <img src={thumbnailUrl(logo.file_id, 200)} alt={t("pages.clientMedia.clientLogo.alt")}
         className="max-h-full max-w-full object-contain"
         onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none" }} />
     </button>
   )
 }
 
-// --- müşteri özeti ---
+// --- client summary ---
 
 function ClientSummary({ clientId }: { clientId: number }) {
+  const { t } = useI18n()
   const { data: c } = useClient(clientId)
   const { data: users } = useUsers()
   const { isManagement } = useAuth()
@@ -256,58 +271,58 @@ function ClientSummary({ clientId }: { clientId: number }) {
 
   const nameOf = (sub: string) => users?.find((u) => u.sub === sub)?.name ?? sub
   const team = ROLE_SLOTS
-    .map((s) => ({ label: s.label, sub: c.team_assignments?.[s.key] }))
-    .filter((t) => t.sub)
+    .map((s) => ({ label: t(s.labelKey), sub: c.team_assignments?.[s.key] }))
+    .filter((entry) => entry.sub)
 
   return (
     <div className="grid gap-4 rounded-lg border p-4 sm:grid-cols-2 lg:grid-cols-4">
       <div>
-        <div className="text-xs text-muted-foreground">Sektör</div>
+        <div className="text-xs text-muted-foreground">{t("pages.clientMedia.summary.sector")}</div>
         <div className="text-sm">{c.sector || "—"}</div>
       </div>
       <div>
-        <div className="text-xs text-muted-foreground">Brief</div>
-        <div className="text-sm">{c.brief_enabled ? "Açık" : "Kapalı"}</div>
+        <div className="text-xs text-muted-foreground">{t("pages.clientMedia.summary.brief")}</div>
+        <div className="text-sm">{c.brief_enabled ? t("pages.clientMedia.summary.briefOn") : t("pages.clientMedia.summary.briefOff")}</div>
       </div>
       <div>
-        <div className="text-xs text-muted-foreground">Ekip</div>
+        <div className="text-xs text-muted-foreground">{t("pages.clientMedia.summary.team")}</div>
         <div className="space-y-0.5 text-sm">
-          {team.length === 0 ? "—" : team.map((t) => (
-            <div key={t.label} className="truncate">
-              <span className="text-muted-foreground">{t.label}:</span> {nameOf(t.sub!)}
+          {team.length === 0 ? "—" : team.map((entry) => (
+            <div key={entry.label} className="truncate">
+              <span className="text-muted-foreground">{entry.label}:</span> {nameOf(entry.sub!)}
             </div>
           ))}
         </div>
       </div>
       <div className="space-y-1">
-        <div className="text-xs text-muted-foreground">Bağlantılar</div>
+        <div className="text-xs text-muted-foreground">{t("pages.clientMedia.summary.links")}</div>
         <div className="flex flex-wrap gap-2 text-sm">
-          {/* Marka Rehberi HER üretim rolüne açık (nav: management/designer/
-              content_creator/videographer) — tasarımcı ve videograf marka sesi,
-              yasaklar ve içerik kurallarına buradan tek tıkla ulaşsın.
-              `?client=` derin linki için MarkaRehberiPage seçimi URL'de tutuyor. */}
+          {/* Brand Guide is open to EVERY production role (nav: management/designer/
+              content_creator/videographer) — so the designer and videographer can reach
+              brand voice, prohibitions, and content rules with one click from here.
+              MarkaRehberiPage keeps the selection in the URL for the `?client=` deep link. */}
           <Link to={`/marka-rehberi?client=${clientId}`}
             className="inline-flex items-center gap-1 text-primary hover:underline">
-            <BookOpen className="h-3.5 w-3.5" /> Marka Rehberi
+            <BookOpen className="h-3.5 w-3.5" /> {t("pages.clientMedia.summary.brandGuide")}
           </Link>
           {c.instagram_url && (
             <a href={c.instagram_url} target="_blank" rel="noreferrer"
               className="inline-flex items-center gap-1 text-primary hover:underline">
-              <ExternalLink className="h-3.5 w-3.5" /> Instagram
+              <ExternalLink className="h-3.5 w-3.5" /> {t("pages.clientMedia.summary.instagram")}
             </a>
           )}
           {c.google_drive_url && (
             <a href={c.google_drive_url} target="_blank" rel="noreferrer"
               className="inline-flex items-center gap-1 text-primary hover:underline">
-              <ExternalLink className="h-3.5 w-3.5" /> Drive
+              <ExternalLink className="h-3.5 w-3.5" /> {t("pages.clientMedia.summary.drive")}
             </a>
           )}
-          {/* Tam detay yalnız management'ta: sözleşme/iletişim alanları zaten
-              backend'de rol filtresinden geçiyor (api._client_json). */}
+          {/* Full detail is management-only: contract/contact fields already go
+              through the role filter on the backend (api._client_json). */}
           {isManagement && (
             <Link to={`/clients/${clientId}`}
               className="inline-flex items-center gap-1 text-primary hover:underline">
-              <ExternalLink className="h-3.5 w-3.5" /> Müşteri detayı
+              <ExternalLink className="h-3.5 w-3.5" /> {t("pages.clientMedia.summary.clientDetail")}
             </Link>
           )}
         </div>
@@ -319,19 +334,20 @@ function ClientSummary({ clientId }: { clientId: number }) {
 // --- lightbox ---
 
 function MediaLightbox({ up, onClose }: { up: Upload | null; onClose: () => void }) {
+  const { t } = useI18n()
   if (!up?.file_id) return null
   const video = isVideo(up)
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
-          <DialogTitle className="truncate">{up.file_name ?? "Önizleme"}</DialogTitle>
+          <DialogTitle className="truncate">{up.file_name ?? t("pages.clientMedia.lightbox.previewFallback")}</DialogTitle>
         </DialogHeader>
         {video ? (
           up.local ? (
             <video controls src={mediaUrl(up.file_id)} className="max-h-[70vh] w-full rounded" />
           ) : (
-            // Lokal kopya penceresi (21 gün) dolmuş → Drive'ın gömülü oynatıcısı.
+            // The local copy window (21 days) has expired → fall back to Drive's embedded player.
             <iframe src={drivePreviewUrl(up.file_id)} allow="autoplay"
               className="h-[60vh] w-full rounded border" />
           )
@@ -339,7 +355,7 @@ function MediaLightbox({ up, onClose }: { up: Upload | null; onClose: () => void
           <img src={mediaUrl(up.file_id)} alt={up.file_name ?? ""}
             className="max-h-[70vh] w-full rounded object-contain"
             onError={(e) => {
-              // Lokal orijinal yoksa büyük küçük-resme düş (Drive thumbnail).
+              // No local original → fall back to a large thumbnail (Drive thumbnail).
               (e.currentTarget as HTMLImageElement).src = thumbnailUrl(up.file_id!, 1200)
             }} />
         )}
@@ -347,7 +363,7 @@ function MediaLightbox({ up, onClose }: { up: Upload | null; onClose: () => void
           <span>{up.week_iso}{up.moved_from_week_iso ? ` · ↪ ${up.moved_from_week_iso}` : ""}</span>
           <a href={downloadMediaUrl(up.file_id, up.file_name ?? undefined)}
             className="inline-flex items-center gap-1 text-primary hover:underline">
-            <Download className="h-4 w-4" /> Tam boyutu indir
+            <Download className="h-4 w-4" /> {t("pages.clientMedia.lightbox.downloadFull")}
           </a>
         </div>
       </DialogContent>
@@ -355,13 +371,14 @@ function MediaLightbox({ up, onClose }: { up: Upload | null; onClose: () => void
   )
 }
 
-// --- sayfa ---
+// --- page ---
 
 export function ClientMediaPage() {
+  const { t } = useI18n()
   const { id } = useParams()
   const clientId = Number(id)
   const [params] = useSearchParams()
-  // Geldiğimiz hafta (board'un hafta ekseni) — geri linkinde korunur.
+  // The week we came from (the board's week axis) — preserved in the back link.
   const fromWeek = params.get("week") || currentWeekIso()
 
   const { data: client } = useClient(Number.isFinite(clientId) ? clientId : null)
@@ -387,19 +404,19 @@ export function ClientMediaPage() {
   }, [weeks])
 
   const currentWeek = currentWeekIso()
-  const clientName = client?.name ?? "Müşteri"
+  const clientName = client?.name ?? t("pages.clientMedia.clientFallback")
   const totalFiles = useMemo(
     () => (weeks ?? []).reduce((s, w) => s + w.uploads.length, 0), [weeks])
 
   function toggle(up: Upload, e: React.MouseEvent) {
-    // Sürükleme bittikten sonra tarayıcı aynı kartta click de üretebilir (kısa
-    // mesafeli sürüklemede pointer karttan çıkmaz) — o click seçimi ters çevirip
-    // "sürükledim, seçim değişti" sürprizi yaratırdı. Drag turunu yut.
+    // After a drag ends, the browser can also fire a click on the same card (with a
+    // short-distance drag the pointer never leaves the card) — that click would flip the
+    // selection, creating the surprise "I dragged, and the selection changed". Swallow that click.
     if (suppressClick.current) return
     setSelected((prev) => {
       const next = new Set(prev)
       if (e.shiftKey) {
-        // Shift: aynı hafta bloğundaki komşu aralığı topluca seç.
+        // Shift: bulk-select the contiguous range within the same week block.
         const week = (weeks ?? []).find((w) => w.week_iso === up.week_iso)
         const list = week?.uploads ?? []
         const anchor = list.findIndex((u) => next.has(u.id))
@@ -421,31 +438,31 @@ export function ClientMediaPage() {
     if (!moving.length) return
     try {
       const r = await move.mutateAsync({ upload_ids: moving, to_week_iso: target })
-      if (r.moved) toast.success(`${r.moved} dosya ${target} haftasına taşındı`)
-      // Kısmi başarı: taşınamayanlar ayrı bildirilir, taşınanlar yerinde kalır.
-      if (r.errors?.length) toast.error(`${r.errors.length} dosya taşınamadı — ${r.errors[0]}`)
+      if (r.moved) toast.success(t("pages.clientMedia.toast.moved", { count: r.moved, week: target }))
+      // Partial success: items that couldn't be moved are reported separately; moved ones stay in place.
+      if (r.errors?.length) toast.error(t("pages.clientMedia.toast.moveErrors", { count: r.errors.length, error: r.errors[0] }))
       setSelected(new Set())
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Taşıma başarısız")
+      toast.error(e instanceof Error ? e.message : t("pages.clientMedia.toast.moveFailed"))
     }
   }
 
   function endDrag() {
     setActiveId(null)
     suppressClick.current = true
-    // Sürükleme sonrası click aynı turda gelir; bir tur sonra kilidi aç.
+    // The post-drag click arrives in the same tick; release the lock one tick later.
     setTimeout(() => { suppressClick.current = false }, 0)
   }
 
   function onDragEnd(e: DragEndEvent) {
-    // `activeId` state'i değil `e.active.id` kaynak alınır — state okuması
-    // render turuna bağlı, event yükü değil.
+    // Sourced from `e.active.id`, not the `activeId` state — reading state is tied
+    // to the render cycle, not the event payload.
     const dragged = Number(e.active.id)
     endDrag()
     if (!e.over || !Number.isFinite(dragged)) return
     const overId = String(e.over.id)
     if (!overId.startsWith("week:")) return
-    // Sürüklenen kart seçimin parçasıysa TÜM seçim taşınır; değilse yalnız o kart.
+    // If the dragged card is part of the selection, the WHOLE selection moves; otherwise just that card.
     const ids = selected.has(dragged) ? [...selected] : [dragged]
     moveTo(overId.slice("week:".length), ids)
   }
@@ -454,63 +471,65 @@ export function ClientMediaPage() {
   const dragCount = activeId != null && selected.has(activeId) ? selected.size : 1
 
   if (!Number.isFinite(clientId)) {
-    return <p className="py-8 text-center text-destructive">Geçersiz müşteri.</p>
+    return <p className="py-8 text-center text-destructive">{t("pages.clientMedia.invalidClient")}</p>
   }
 
   return (
     <div className="space-y-5">
-      {/* başlık + aksiyonlar */}
+      {/* title + actions */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-1">
           <Link to={`/designer?week=${encodeURIComponent(fromWeek)}`}
             className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-            <ArrowLeft className="h-4 w-4" /> Tasarım
+            <ArrowLeft className="h-4 w-4" /> {t("pages.clientMedia.backToDesign")}
           </Link>
           <div className="flex items-center gap-3">
             <ClientLogo clientId={clientId} />
             <h1 className="text-2xl font-semibold tracking-tight">{clientName}</h1>
           </div>
           <p className="text-muted-foreground">
-            {totalFiles} dosya · {(weeks ?? []).filter((w) => w.uploads.length).length} hafta
+            {t("pages.clientMedia.fileWeekCount", {
+              files: totalFiles, weeks: (weeks ?? []).filter((w) => w.uploads.length).length,
+            })}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <Button variant="outline" size="sm" onClick={() => setUploadWeek(fromWeek)}>
-            <UploadIcon className="mr-1 h-3.5 w-3.5" /> Yükle
+            <UploadIcon className="mr-1 h-3.5 w-3.5" /> {t("pages.clientMedia.upload")}
           </Button>
           <Button variant="ghost" size="sm" onClick={() => setBriefOpen(true)}>
-            <FileText className="mr-1 h-3.5 w-3.5" /> Brief
+            <FileText className="mr-1 h-3.5 w-3.5" /> {t("pages.clientMedia.brief")}
           </Button>
           <LogoButton clientId={clientId} />
           <Button variant="ghost" size="sm" onClick={() => setSummaryOpen((o) => !o)}>
             <ChevronDown className={cn("mr-1 h-3.5 w-3.5 transition-transform", !summaryOpen && "-rotate-90")} />
-            Bilgiler
+            {t("pages.clientMedia.info")}
           </Button>
         </div>
       </div>
 
       {summaryOpen && <ClientSummary clientId={clientId} />}
 
-      {/* İlgili fontlar (2026-08-05) — havuzun bu müşteriye süzülmüş hâli;
-          önizleme metni müşterinin adı. Bilgiler bloğundan bağımsız, hep açık
-          gelir: tasarımcı üretime başlarken ilk baktığı şeylerden biri. */}
+      {/* Related fonts (2026-08-05) — the pool filtered down to this client;
+          preview text is the client's name. Independent of the info block, always
+          shown expanded: one of the first things a designer looks at before starting work. */}
       <ClientFonts clientId={clientId} clientName={clientName} />
 
-      {/* Çalışma dosyaları (2026-08-07) — .psd/.ai gibi kaynak dosyalar, sürümlü.
-          Fontların hemen altında: ikisi de "üretime başlarken elinin altında
-          olması gereken malzeme"; haftalık teslim ızgarasının üstünde durur. */}
+      {/* Working files (2026-08-07) — versioned source files like .psd/.ai. Placed
+          right under fonts: both are "material that should be at hand before
+          starting production"; sits above the weekly delivery grid. */}
       <ClientDesignFiles clientId={clientId} />
 
-      {/* seçim şeridi — sürükleme yerine hedef hafta menüsü (dokunmatik/klavye yolu) */}
+      {/* selection strip — target-week menu instead of dragging (touch/keyboard path) */}
       {selected.size > 0 && (
         <div className="sticky top-2 z-20 flex flex-wrap items-center gap-2 rounded-lg border bg-background/95 p-2 shadow-sm backdrop-blur">
-          <span className="text-sm font-medium">{selected.size} seçili</span>
+          <span className="text-sm font-medium">{t("pages.clientMedia.selectedCount", { count: selected.size })}</span>
           <DropdownMenu>
             <DropdownMenuTrigger
               disabled={move.isPending}
               className="inline-flex h-8 items-center rounded-md border px-3 text-sm font-medium hover:bg-muted disabled:opacity-50">
               <MoveRight className="mr-1 h-3.5 w-3.5" />
-              {move.isPending ? "Taşınıyor…" : "Haftaya taşı"}
+              {move.isPending ? t("pages.clientMedia.moving") : t("pages.clientMedia.moveToWeek")}
               <ChevronDown className="ml-1 h-3.5 w-3.5" />
             </DropdownMenuTrigger>
             <DropdownMenuContent className="max-h-72 overflow-y-auto">
@@ -523,10 +542,10 @@ export function ClientMediaPage() {
             </DropdownMenuContent>
           </DropdownMenu>
           <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>
-            Seçimi temizle
+            {t("pages.clientMedia.clearSelection")}
           </Button>
           <span className="hidden text-xs text-muted-foreground sm:inline">
-            Kartları başka hafta bloğuna sürükleyerek de taşıyabilirsin.
+            {t("pages.clientMedia.dragHint")}
           </span>
         </div>
       )}
@@ -536,7 +555,7 @@ export function ClientMediaPage() {
           {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-40 w-full" />)}
         </div>
       )}
-      {isError && <p className="text-destructive">Medya listesi yüklenemedi.</p>}
+      {isError && <p className="text-destructive">{t("pages.clientMedia.loadError")}</p>}
 
       {weeks && (
         <DndContext sensors={sensors} collisionDetection={collision}
@@ -553,8 +572,8 @@ export function ClientMediaPage() {
 
           <DragOverlay>
             {activeUpload && (
-              // Sürükleme önizlemesi bilerek karttan KÜÇÜK: imlecin altında
-              // ekranı kapatmasın, altındaki drop hedefi görünür kalsın.
+              // The drag preview is intentionally SMALLER than the card: shouldn't
+              // cover the screen under the pointer, so the drop target underneath stays visible.
               <div className="relative w-40 overflow-hidden rounded-lg border bg-card shadow-lg">
                 {activeUpload.file_id && (
                   <img src={thumbnailUrl(activeUpload.file_id, 400)} alt=""
@@ -571,12 +590,12 @@ export function ClientMediaPage() {
         </DndContext>
       )}
 
-      {/* çekim fotoğrafları — kapalıyken sorgu hiç koşmasın diye koşullu mount */}
+      {/* shoot photos — conditionally mounted so the query never runs while collapsed */}
       <section className="space-y-2">
         <button onClick={() => setPhotosOpen((o) => !o)}
           className="flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground">
           <ChevronDown className={cn("h-4 w-4 transition-transform", !photosOpen && "-rotate-90")} />
-          <Camera className="h-4 w-4" /> Çekim Fotoğrafları
+          <Camera className="h-4 w-4" /> {t("pages.clientMedia.shootPhotos.sectionTitle")}
         </button>
         {photosOpen && <ShootPhotosBlock clientId={clientId} />}
       </section>

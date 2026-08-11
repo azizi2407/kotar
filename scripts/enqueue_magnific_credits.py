@@ -1,9 +1,9 @@
-"""Magnific kredi tazeleme enqueue script'i — `magnific_credits` job'unu kuyruğa atar
-(dedup'lu; aktif varsa yenisi açılmaz). Timer: agency-magnific-credits.timer, günde 2 kez
-(İstanbul 09:00 ve 14:00). Handler: ai_worker.magnific_credits_handler (ücretsiz MCP
-account_balance → AppSetting['magnific_credits'] cache; panel üst bar rozeti okur).
+"""Magnific credit refresh enqueue script — queues the `magnific_credits` job
+(deduped; a new one isn't opened if one is already active). Timer: agency-magnific-credits.timer,
+twice a day (09:00 and 14:00 Istanbul time). Handler: ai_worker.magnific_credits_handler (free MCP
+account_balance → AppSetting['magnific_credits'] cache; the panel top-bar badge reads it).
 
-Kullanım:
+Usage:
     venv/bin/python scripts/enqueue_magnific_credits.py --created-by systemd-timer
 """
 import argparse
@@ -17,8 +17,8 @@ from app import app  # noqa: E402
 
 
 def run(created_by=None):
-    """Tek `magnific_credits` job'u enqueue eder (dedup: aktif varsa onu döndürür).
-    NOT: app context AÇMAZ — çağıranın sorumluluğu (bkz. enqueue_briefs.py)."""
+    """Enqueues a single `magnific_credits` job (dedup: returns the active one if there is one).
+    NOTE: does NOT open an app context — that's the caller's responsibility (see enqueue_briefs.py)."""
     return jobqueue.enqueue('magnific_credits', {}, priority=0,
                             dedup_key='magnific_credits', created_by=created_by)
 
@@ -33,7 +33,7 @@ def main():
     args = build_parser().parse_args()
     with app.app_context():
         job = run(created_by=args.created_by)
-        # NOT: job attribute'ları context İÇİNDE okunmalı (dışarıda DetachedInstanceError).
+        # NOTE: job attributes must be read INSIDE the context (DetachedInstanceError outside it).
         summary = f'{job.id} ({job.status})'
     print(f'[enqueue] magnific_credits job: {summary}')
 

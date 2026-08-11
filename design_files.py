@@ -1,19 +1,20 @@
-"""Tasarım çalışma dosyaları API'si (2026-08-07) — `/api/design-files`.
+"""Design working-file API (2026-08-07) — `/api/design-files`.
 
-Tasarımcıların kaynak dosyaları (`.psd`, `.ai`, `.indd`, `.aep`, paket zip'leri)
-müşteri bazında, SÜRÜMLÜ olarak burada durur.
+Designers' source files (`.psd`, `.ai`, `.indd`, `.aep`, packaged zips) live
+here per client, VERSIONED.
 
-**Dosya sunucuda KANONİK, Drive'da KOPYA.** İndirme yetkisi ancak dosya bizdeyken
-korunabilir: depo (`depot.py`) dosyalarına 'bağlantıya sahip herkes okuyabilir'
-izni veriyor, müşteri kaynak dosyası için bu kabul edilemez. Drive kopyası yedek
-ve ajans dışı paylaşım için var, yüklemesi EN-İYİ-ÇABA (patlarsa `drive_file_id`
-NULL kalır, uç yine 201 döner).
+**File is CANONICAL on the server, Drive holds a COPY.** Download authorization
+can only be enforced while the file is ours: the depot (`depot.py`) grants
+'anyone with the link can view' on its files, which is unacceptable for a
+client's source file. The Drive copy exists for backup and sharing outside the
+agency; its upload is BEST-EFFORT (if it fails, `drive_file_id` stays NULL and
+the endpoint still returns 201).
 
-**Kota müşteri başına 2 GB, her istekte `SUM(file_size)` ile ÖLÇÜLÜR** — sayaç
-kolonu yok (`depot.py` ile aynı gerekçe: sayaç, yükleme ile commit arasındaki her
-çökmede kalıcı drift üretir).
+**Quota is 2 GB per client, MEASURED via `SUM(file_size)` on every request** —
+no counter column (same rationale as `depot.py`: a counter would drift
+permanently on every crash between upload and commit).
 
-CSRF `api.csrf_protect` ile paylaşılır (`depot.py`/`ads.py` deseni).
+CSRF is shared via `api.csrf_protect` (same pattern as `depot.py`/`ads.py`).
 """
 import glob
 import logging
@@ -28,8 +29,9 @@ from sqlalchemy.exc import IntegrityError
 import drive_gateway as dg
 import sha_store
 from api import csrf_protect
-# Yasak uzantı listesi ve ad temizliği depo ile ORTAK: iki liste ayrışırsa biri
-# güvensiz kalır. Bilerek kopyalanmadı, import edildi.
+# Blocked extension list and name sanitization are SHARED with the depot: if
+# the two lists diverge, one of them becomes unsafe. Deliberately imported,
+# not copied.
 from depot import BLOCKED_EXT, _clean_name
 from extensions import db
 from models import Client, UserRef, utcnow
@@ -43,12 +45,12 @@ bp.before_request(csrf_protect)
 
 DESIGN_ROLES = ('management', 'designer')
 
-MAX_FILE_BYTES = 1024 * 1024 * 1024          # tek dosya 1 GB (nginx tavanı 1100m)
-# UYARI: bu değer app.config['MAX_CONTENT_LENGTH']'i (app.py) AŞARSA gövde
-# view'a hiç ulaşmadan Flask'ın global 413'üne takılır — aşağıdaki kontrol sırası
-# (`_dosya_kontrol`) hiçbir zaman çalışmaz (yaşanmış hata, bkz. app.py). Muhafız:
-# tests/test_design_files.py::test_max_file_bytes_uygulama_tavanini_asmiyor.
-QUOTA_BYTES = 2 * 1024 * 1024 * 1024         # müşteri başına 2 GB
+MAX_FILE_BYTES = 1024 * 1024 * 1024          # single file 1 GB (nginx cap is 1100m)
+# WARNING: if this value EXCEEDS app.config['MAX_CONTENT_LENGTH'] (app.py), the
+# body never reaches the view and hits Flask's global 413 instead — the check
+# below (`_dosya_kontrol`) never runs (a bug that actually happened, see
+# app.py). Guard: tests/test_design_files.py::test_max_file_bytes_uygulama_tavanini_asmiyor.
+QUOTA_BYTES = 2 * 1024 * 1024 * 1024         # 2 GB per client
 NOTE_MAX = 300
 TITLE_MAX = 200
 TAG_MAX = 40
@@ -59,31 +61,32 @@ STORE_DIR = os.environ.get('DESIGN_FILES_DIR') or os.path.join(
 
 DRIVE_FOLDER_NAME = 'Çalışma Dosyaları'
 
-# nginx `X-Accel-Redirect` modu: dosyayı Flask DEĞİL nginx akıtır — 1 GB'lık bir
-# indirme bir gunicorn thread'ini dakikalarca tutmasın (2 worker × 4 thread).
-# Kapalıyken (test, `flask run`) `send_file`'a düşer.
+# nginx `X-Accel-Redirect` mode: nginx (NOT Flask) streams the file — so a 1 GB
+# download doesn't tie up a gunicorn thread for minutes (2 workers x 4
+# threads). When off (tests, `flask run`), falls back to `send_file`.
 XACCEL = (os.environ.get('DESIGN_FILES_XACCEL') or '').strip() == '1'
 XACCEL_PREFIX = '/_dsg/'
 
 
-# --- yetki ------------------------------------------------------------------
+# --- authorization ------------------------------------------------------------------
 
 def _require():
-    """(user, err) — çalışma dosyaları yalnız tasarım ekibine ve yönetime açık."""
+    """(user, err) — working files are open only to the design team and management."""
     u = current_user()
     if not u:
-        return None, (jsonify(error='oturum yok'), 401)
+        return None, (jsonify(error='not authenticated'), 401)
     if u.get('role') not in DESIGN_ROLES:
-        return None, (jsonify(error='bu bölüm tasarım ekibine açıktır'), 403)
+        return None, (jsonify(error='this section is only open to the design team'), 403)
     return u, None
 
 
 def _silebilir(u, row):
-    """Yönetim ayrımsız; tasarımcı YALNIZ kendi yüklediğini (fonts `_silebilir`
-    deseni). Kural TEK yerde: hem silme ucu hem listedeki `can_delete` buradan
-    okur — ayrışırsa düğme yalan söyler.
+    """Management can delete anything; a designer can delete ONLY what they
+    uploaded (same pattern as fonts' `_silebilir`). The rule lives in ONE
+    place — both the delete endpoint and the list's `can_delete` read from
+    here, so they can't diverge and make the button lie.
 
-    `row`: DesignFile (o zaman `created_by`) veya DesignFileVersion (`uploaded_by`)."""
+    `row`: DesignFile (uses `created_by`) or DesignFileVersion (`uploaded_by`)."""
     if not u:
         return False
     if u.get('role') == 'management':
@@ -95,7 +98,7 @@ def _silebilir(u, row):
 def _musteri_veya_404(client_id):
     c = db.session.get(Client, client_id)
     if c is None or c.deleted_at is not None:
-        return None, (jsonify(error='müşteri bulunamadı'), 404)
+        return None, (jsonify(error='client not found'), 404)
     return c, None
 
 
@@ -103,11 +106,12 @@ def _uploader_names():
     return {u.sub: (u.name or u.email) for u in UserRef.query.all()}
 
 
-# --- kota -------------------------------------------------------------------
+# --- quota -------------------------------------------------------------------
 
 def _kota(client_id):
-    """Müşterinin kullandığı alan — silinmemiş sürümlerin toplamı. Sayaç kolonu
-    YOK; agregat sorgu (müşteri başına on-yüz satır) sub-ms."""
+    """Space used by the client — sum of non-deleted versions. NO counter
+    column; the aggregate query (tens to hundreds of rows per client) is
+    sub-ms."""
     used = int(db.session.query(
         db.func.coalesce(db.func.sum(DesignFileVersion.file_size), 0))
         .join(DesignFile, DesignFile.id == DesignFileVersion.file_id)
@@ -121,12 +125,12 @@ def _kota(client_id):
 
 
 def _cop_boyutu(client_id):
-    """Çöp kutusundaki toplam boyut — silinmiş dosyaların TÜM silinmiş
-    sürümleri + hâlâ yaşayan dosyaların tekil silinmiş sürümleri, hepsi
-    birden. `DesignFileVersion.deleted_at IS NOT NULL` her iki durumu da
-    kapsıyor (dosya silinince altındaki tüm sürümler de aynı damgayla
-    silinir), ayrı bir dosya-durumu ayrımına gerek yok. TEK agregat sorgu —
-    `_kota` ile aynı gerekçe, Python'da döngüyle toplama YOK."""
+    """Total size in the trash — ALL deleted versions of deleted files, plus
+    individually deleted versions of files that are still alive, all summed
+    together. `DesignFileVersion.deleted_at IS NOT NULL` covers both cases
+    (deleting a file stamps the same timestamp onto all its versions), so no
+    separate file-status distinction is needed. A SINGLE aggregate query —
+    same rationale as `_kota`, NO summing in a Python loop."""
     toplam = int(db.session.query(
         db.func.coalesce(db.func.sum(DesignFileVersion.file_size), 0))
         .join(DesignFile, DesignFile.id == DesignFileVersion.file_id)
@@ -136,20 +140,22 @@ def _cop_boyutu(client_id):
     return toplam
 
 
-# --- listeleme --------------------------------------------------------------
+# --- listing --------------------------------------------------------------
 
 def _guncel_surumler(file_ids, silinmisler_dahil=False):
-    """{file_id: (guncel_surum, surum_adedi)} — TEK sorgu.
+    """{file_id: (current_version, version_count)} — A SINGLE query.
 
-    Dosya başına ayrı `MAX(version_no)` sorgusu N+1 olurdu; tüm sürümleri bir
-    kerede çekip Python'da katlıyoruz (müşteri başına satır sayısı iki haneli).
+    A separate `MAX(version_no)` query per file would be N+1; instead we pull
+    all versions in one go and fold in Python (row count per client is
+    two digits).
 
-    `silinmisler_dahil=True`: çöp kutusundaki DOSYALAR için — bu dosyaların
-    sürümlerinin TAMAMI silinmiş durumda (`file_delete` hepsine aynı damgayı
-    basar), varsayılan filtre (`deleted_at IS NULL`) burada her zaman boş
-    döner. Var olan çağıranlar (canlı liste) parametreyi vermediği için
-    davranışları değişmez — ayrı bir ikiz fonksiyon yerine tek yerde tutmak
-    iki sorgunun zamanla ayrışma riskini kapatıyor."""
+    `silinmisler_dahil=True`: for DELETED files in the trash — ALL of these
+    files' versions are deleted (`file_delete` stamps the same timestamp on
+    all of them), so the default filter (`deleted_at IS NULL`) would always
+    return empty here. Existing callers (the live list) don't pass the
+    parameter, so their behavior is unchanged — keeping this in one place
+    instead of a separate twin function closes off the risk of the two
+    queries drifting apart over time."""
     if not file_ids:
         return {}
     q = DesignFileVersion.query.filter(DesignFileVersion.file_id.in_(file_ids))
@@ -159,13 +165,13 @@ def _guncel_surumler(file_ids, silinmisler_dahil=False):
     out = {}
     for v in rows:
         guncel, adet = out.get(v.file_id, (None, 0))
-        out[v.file_id] = (guncel or v, adet + 1)   # ilk gelen = en yüksek sürüm
+        out[v.file_id] = (guncel or v, adet + 1)   # first one wins = highest version
     return out
 
 
 @bp.get('/client/<int:client_id>')
 def client_files(client_id):
-    """Müşterinin çalışma dosyaları + kota (tek yanıt — panel iki tur atmasın)."""
+    """Client's working files + quota (single response — spare the panel a second round trip)."""
     u, err = _require()
     if err:
         return err
@@ -192,73 +198,80 @@ def client_files(client_id):
 # --- disk -------------------------------------------------------------------
 
 def _uzanti(file_name):
-    """Son uzantı — ortak `sha_store` uygulaması (bkz. o modülün docstring'i)."""
+    """Final extension — shared `sha_store` implementation (see that module's docstring)."""
     return sha_store.uzanti(file_name)
 
 
 def _yol(sha256, file_name):
-    """`data/design-files/<sha[:2]>/<sha>.<ext>` — iki harfli ön ek dizini, tek
-    dizinde on binlerce dosya birikmesin (fonts düz dizin kullanıyor; orada
-    dosyalar KB ölçeğinde)."""
+    """`data/design-files/<sha[:2]>/<sha>.<ext>` — a two-character prefix
+    directory, so tens of thousands of files don't pile up in a single
+    directory (fonts uses a flat directory; files there are KB-scale)."""
     return sha_store.yol(STORE_DIR, sha256, file_name)
 
 
 def _olcu(stream):
-    """Boyut — akışı RAM'e ALMADAN (werkzeug büyük gövdeyi diske spool'lar)."""
+    """Size — WITHOUT loading the stream into RAM (werkzeug spools large bodies to disk)."""
     stream.seek(0, 2)
     n = stream.tell()
     stream.seek(0)
     return n
 
 
-# --- eşzamanlılık: sha kilidi (TOCTOU) ---------------------------------------
+# --- concurrency: sha lock (TOCTOU) ---------------------------------------
 #
-# Yarış: `_diske_yaz` hedef dosya diskte VARSA geçici dosyayı silip hiç yazmaz
-# (dedup) ve yeni `DesignFileVersion` satırı ancak isteğin commit'inde görünür
-# olur. `_purge_disk_dedup` ise sayımı KENDİ (ayrı) transaction'ında, purge'ün
-# DB silmesinden SONRA yapar. Şu sıra mümkündü:
-#   yükleme dedup-atlar (dosya zaten diskte) → purge sayar (yüklemenin henüz
-#   commit OLMAMIŞ yeni satırını göremez, 0 bulur) → purge `os.unlink` → yükleme
-#   commit eder → yeni satır artık DİSKTE OLMAYAN bir dosyaya işaret eder
-#   (indirme kırılır, kanonik kopya kalıcı gitmiştir).
+# Race: if the target file ALREADY EXISTS on disk, `_diske_yaz` deletes the
+# temp file without writing (dedup), and the new `DesignFileVersion` row only
+# becomes visible when the request commits. `_purge_disk_dedup`, on the other
+# hand, does its count in ITS OWN (separate) transaction, AFTER the purge's DB
+# delete. The following order was possible:
+#   upload dedup-skips (file already on disk) -> purge counts (can't see the
+#   upload's not-yet-committed new row, finds 0) -> purge does `os.unlink` ->
+#   upload commits -> the new row now points to a file that's NOT ON DISK
+#   (download breaks, the canonical copy is permanently gone).
 #
-# Çözüm: aynı `sha256` için `pg_advisory_xact_lock` — TRANSACTION kapsamlı,
-# commit/rollback'te KENDİLİĞİNDEN bırakılır (elle "unlock" çağrısı gerekmez).
-# Yükleme tarafı kilidi `_diske_yaz` içinde, hedef dosyanın var olup olmadığına
-# bakmadan HEMEN ÖNCE alır; isteğin (view fonksiyonunun) ilk `db.session.commit()`'i
-# hem yeni satırı görünür yapar hem kilidi bırakır — tam istediğimiz sıralama.
-# Purge tarafı aynı kilidi sayımdan ÖNCE alır (`_purge_disk_dedup`). İki olası
-# sıra da tutarlı sonuç verir: yükleme önce kilitlerse purge, satır commit'lenip
-# görünür olana kadar bekler ve artık ≥1 sayar (dosyayı SİLMEZ); purge önce
-# kilitlerse yükleme, purge diski temizleyip kilidi bırakana kadar bekler ve
-# `os.path.exists` kontrolünü GÜNCEL diskle yapar (dosya artık yok → dedup
-# atlamaz, içeriği yeniden yazar).
+# Fix: `pg_advisory_xact_lock` for the same `sha256` — TRANSACTION scoped,
+# released AUTOMATICALLY on commit/rollback (no manual "unlock" call needed).
+# The upload side takes the lock inside `_diske_yaz`, IMMEDIATELY BEFORE
+# checking whether the target file exists; the request's (view function's)
+# first `db.session.commit()` both makes the new row visible and releases the
+# lock — exactly the ordering we want. The purge side takes the same lock
+# BEFORE counting (`_purge_disk_dedup`). Either possible order gives a
+# consistent result: if the upload locks first, the purge waits until the row
+# is committed and visible, and then counts >=1 (does NOT delete the file);
+# if the purge locks first, the upload waits until the purge clears the disk
+# and releases the lock, and then does its `os.path.exists` check against the
+# UP-TO-DATE disk state (the file is gone now -> dedup doesn't skip, rewrites
+# the content).
 #
-# Anahtar: Python'da sha256'dan int türetmek yerine Postgres'in kendi
-# `hashtext()`'i kullanılıyor — repo'da AYNI desen `jobqueue.py`nin `enqueue`
-# dedup kilidinde de var, string doğrudan veritabanına gidiyor, ekstra
-# bit-çevirme kodu yok. Çakışmayı önlemek için anahtar `design-files:sha:`
-# önekiyle ad alanı ayrılıyor (aksi halde `hashtext` aynı 32-bit uzayı
-# paylaşan başka bir modülün literal anahtar string'iyle çakışabilirdi).
+# Key: instead of deriving an int from the sha256 in Python, Postgres's own
+# `hashtext()` is used — the SAME pattern exists elsewhere in the repo, in
+# `jobqueue.py`'s `enqueue` dedup lock; the string goes straight to the
+# database, no extra bit-conversion code. To avoid collisions the key is
+# namespaced with a `design-files:sha:` prefix (otherwise `hashtext` could
+# collide with a literal key string from another module sharing the same
+# 32-bit space).
 #
-# sqlite'ta (testler) advisory lock YOK — dialect kontrolüyle sessizce atlanır;
-# tek süreçli, tek bağlantılı sqlite testinde bu yarış zaten kurulamıyor (bkz.
-# `tests/test_design_files.py::test_sha_kilidi_yalniz_postgreste_cagrilir`
-# docstring'i — testin ne kanıtlayıp ne kanıtlamadığı orada açık yazılı).
+# sqlite (tests) has NO advisory lock — silently skipped via a dialect check;
+# in a single-process, single-connection sqlite test this race can't arise
+# anyway (see the docstring of
+# `tests/test_design_files.py::test_sha_kilidi_yalniz_postgreste_cagrilir` —
+# it spells out exactly what the test does and doesn't prove).
 #
-# Kilidin yükleme tarafında tuttuğu süre: sha ancak akış TAMAMEN okunup
-# hashlendikten SONRA bilinir, yani kilit büyük dosya G/Ç'sinden (`stream.read`
-# döngüsü) SONRA alınır — 1 GB'lık bir yüklemenin okunma/diske yazılma süresi
-# kilidin DIŞINDA kalır. Kilit yalnız var-olma kontrolü + `os.replace` + DB
-# satırının commit'ine kadarki (küçük, hızlı) pencereyi kapsar. Aynı sha'yı
-# bekleyen başka bir istek varsa yalnız bu pencere kadar bloke olur — aynı
-# sha = aynı içerik olduğu için bu nadir ve doğru bir davranıştır.
+# How long the lock is held on the upload side: the sha is only known AFTER
+# the stream has been FULLY read and hashed, so the lock is taken AFTER the
+# large-file I/O (the `stream.read` loop) — the time spent reading/writing a
+# 1 GB upload stays OUTSIDE the lock. The lock only covers the (small, fast)
+# window from the existence check through `os.replace` up to the DB row's
+# commit. If another request is waiting on the same sha, it's blocked only
+# for this window — since the same sha means the same content, this is rare
+# and correct behavior.
 def _sha_kilidi(sha):
-    """`sha256` için transaction ömürlü advisory lock al — yalnız Postgres'te.
+    """Take a transaction-scoped advisory lock for `sha256` — Postgres only.
 
-    Yukarıdaki blok yorumunu oku: bu fonksiyon yükleme (`_diske_yaz`) ve purge
-    (`_purge_disk_dedup`) arasındaki TOCTOU yarışını kapatan TEK yer, iki yerde
-    de bu çağrılır (ayrışma riskini kapatmak için kilit mantığı burada toplandı)."""
+    Read the block comment above: this function is the ONE place that closes
+    the TOCTOU race between upload (`_diske_yaz`) and purge
+    (`_purge_disk_dedup`); both call it (the lock logic is consolidated here
+    to remove the risk of the two sites drifting apart)."""
     if db.session.get_bind().dialect.name != 'postgresql':
         return
     db.session.execute(
@@ -267,26 +280,29 @@ def _sha_kilidi(sha):
 
 
 def _diske_yaz(stream, file_name):
-    """Akışı diske yaz + sha256; `(sha256, boyut)`. Atomiklik, dedup ve 0644
-    modu ortak `sha_store`'ta — `voice_notes` ile paylaşılır ki 0600 hatası
-    (2026-08-08) iki yerde ayrı ayrı düzeltilmek zorunda kalmasın.
+    """Write the stream to disk + sha256; `(sha256, size)`. Atomicity, dedup,
+    and the 0644 mode live in the shared `sha_store` — shared with
+    `voice_notes` so the 0600 bug (2026-08-08) doesn't need to be fixed
+    separately in two places.
 
-    `on_hashed=_sha_kilidi`: sha hesaplandıktan hemen sonra, hedefin var olup
-    olmadığına bakılmadan ÖNCE `_sha_kilidi` çağrılsın diye — TOCTOU yarışını
-    kapatan kilidin sırası `sha_store`'a devredilmeden ÖNCEKİYLE BİREBİR aynı
-    kalsın (yukarıdaki blok yorumu, `_purge_disk_dedup` ile birlikte okunmalı)."""
+    `on_hashed=_sha_kilidi`: so that `_sha_kilidi` is called right after the
+    sha is computed, BEFORE checking whether the target exists — keeping the
+    lock ordering that closes the TOCTOU race EXACTLY the same as before it
+    was delegated to `sha_store` (read the block comment above together with
+    `_purge_disk_dedup`)."""
     return sha_store.yaz(stream, STORE_DIR, file_name, on_hashed=_sha_kilidi)
 
 
-# --- Drive (en-iyi-çaba) ----------------------------------------------------
+# --- Drive (best-effort) ----------------------------------------------------
 
 def _drive_kopyala(client, version, path):
-    """Dosyayı müşterinin Drive kökü altındaki 'Çalışma Dosyaları'na kopyala.
+    """Copy the file into 'Çalışma Dosyaları' under the client's Drive root.
 
-    EN-İYİ-ÇABA: başarısızlık yüklemeyi bozmaz, `drive_file_id` NULL kalır ve
-    panelde 'Drive'a kopyalanmadı' rozeti çıkar. Kanonik dosya diskte olduğu için
-    kullanıcı bundan etkilenmez (depo'da tersi doğruydu — orada Drive dosyası
-    ürünün kendisiydi). `version.drive_file_id`'yi SET EDER, commit ETMEZ."""
+    BEST-EFFORT: failure doesn't break the upload, `drive_file_id` stays NULL
+    and the panel shows a 'not copied to Drive' badge. The user is unaffected
+    since the canonical file is on disk (the reverse was true in the depot —
+    there the Drive file WAS the product itself). SETS `version.drive_file_id`,
+    does NOT commit."""
     from sharing import _extract_folder_id
     try:
         if not dg.available():
@@ -300,23 +316,25 @@ def _drive_kopyala(client, version, path):
                                   version.mime_type or 'application/octet-stream')
         version.drive_file_id = meta.get('id')
         return bool(version.drive_file_id)
-    except Exception as e:  # noqa: BLE001 — Drive kopyası ürünün kendisi değil
+    except Exception as e:  # noqa: BLE001 — the Drive copy is not the product itself
         log.warning('çalışma dosyası Drive kopyası başarısız (%s): %s',
                     version.file_name, e)
         return False
 
 
-# --- form yardımcıları ------------------------------------------------------
+# --- form helpers ------------------------------------------------------
 
 def _etiketler(raw):
-    """Form'daki JSON diziyi temizlenmiş etiket listesine çevir.
+    """Turn the JSON array from the form into a cleaned tag list.
 
-    Boşlar atılır, kırpılır, TAG_MAX'a kesilir, TAGS_MAX ile sınırlanır. Tekrar
-    ayıklaması Türkçe-duyarlı `client_tracking._fold()` ile yapılır ('Şablon' ve
-    'şablon' aynı etiket) — çıplak `casefold()` DEĞİL: `'İ'.casefold()` normal
-    'i' değil birleşik nokta içeren bir dizge üretir ('İstanbul'/'istanbul' farklı
-    etiket sayılır), repo bu yüzden TR harflerini önce sadeleştiren ortak `_fold`'u
-    kullanıyor. Görüntülemede kullanıcının YAZDIĞI hâl korunur."""
+    Blanks are dropped, values are trimmed, cut to TAG_MAX, and limited to
+    TAGS_MAX. Duplicate elimination uses the Turkish-aware
+    `client_tracking._fold()` ('Şablon' and 'şablon' are the same tag) — NOT
+    plain `casefold()`: `'İ'.casefold()` doesn't produce a plain 'i', it
+    produces a string with a combining dot ('İstanbul'/'istanbul' would count
+    as different tags), which is why the repo uses the shared `_fold` that
+    normalizes Turkish letters first. The display keeps the case the user
+    ENTERED."""
     import json
 
     from client_tracking import _fold
@@ -346,29 +364,31 @@ def _etiketler(raw):
 
 
 def _dosya_kontrol(client_id, f):
-    """(ad, boyut, mime, err) — Drive'a/diske GİTMEDEN önceki kontrol sırası:
-    boyut ölç → 1 GB aşımı 413 → kota aşımı 409 → yasak uzantı 400 (depo deseni)."""
+    """(name, size, mime, err) — the check order BEFORE touching Drive/disk:
+    measure size -> over 1 GB is 413 -> over quota is 409 -> blocked
+    extension is 400 (depot pattern)."""
     if f is None or not f.filename:
-        return None, 0, None, (jsonify(error='dosya yok'), 400)
+        return None, 0, None, (jsonify(error='no file provided'), 400)
     ad = _clean_name(f.filename)
     boyut = _olcu(f.stream)
     if boyut > MAX_FILE_BYTES:
         return None, 0, None, (jsonify(
-            error='Dosya 1 GB sınırını aşıyor.'), 413)
+            error='File exceeds the 1 GB limit.'), 413)
     q = _kota(client_id)
     if boyut > q['remaining']:
         return None, 0, None, (jsonify(
-            error=f'Müşteri alanı dolu — kalan {_mb(q["remaining"])}, '
-                  f'dosya {_mb(boyut)}.', quota=q), 409)
+            error=f'Client storage is full — {_mb(q["remaining"])} remaining, '
+                  f'file is {_mb(boyut)}.', quota=q), 409)
     if _blocked_ext(ad):
         return None, 0, None, (jsonify(
-            error='Bu dosya türü yüklenemez (çalıştırılabilir dosya).'), 400)
+            error='This file type cannot be uploaded (executable file).'), 400)
     mime = f.mimetype or mimetypes.guess_type(ad)[0] or 'application/octet-stream'
-    # DesignFileVersion.mime_type String(120) — istemciden gelen Content-Type
-    # bunu aşarsa (bazı tarayıcı/eklenti kombinasyonları uzun/parametreli değer
-    # yollayabiliyor) Postgres commit'i DataError ile patlar; dosya diske zaten
-    # yazılmış olur ve öksüz kalır. Burada kırpmak hem yeni dosya (v1) hem yeni
-    # sürüm yolunu birden kapatır — ikisi de bu fonksiyona uğrar.
+    # DesignFileVersion.mime_type is String(120) — if the client's Content-Type
+    # exceeds it (some browser/extension combos send long/parameterized
+    # values), the Postgres commit blows up with a DataError; by then the file
+    # is already written to disk and gets orphaned. Truncating here covers both
+    # the new-file (v1) and new-version paths at once — both go through this
+    # function.
     mime = mime[:120]
     return ad, boyut, mime, None
 
@@ -382,7 +402,7 @@ def _mb(n):
 
 
 def _tek_dosya_json(f, u):
-    """Tek dosyanın (güncel sürümüyle) panel sözlüğü — yükleme yanıtında kullanılır."""
+    """A single file's (with its current version) panel dict — used in the upload response."""
     guncel = _guncel_surumler([f.id])
     v, adet = guncel.get(f.id, (None, 0))
     names = _uploader_names()
@@ -393,11 +413,11 @@ def _tek_dosya_json(f, u):
         can_delete=_silebilir(u, f))
 
 
-# --- yükleme ----------------------------------------------------------------
+# --- upload ----------------------------------------------------------------
 
 @bp.post('/client/<int:client_id>')
 def client_file_create(client_id):
-    """Yeni çalışma dosyası + v1 (multipart: file, title, tags?, note?)."""
+    """New working file + v1 (multipart: file, title, tags?, note?)."""
     u, err = _require()
     if err:
         return err
@@ -406,7 +426,7 @@ def client_file_create(client_id):
         return cerr
     title = (request.form.get('title') or '').strip()[:TITLE_MAX]
     if not title:
-        return jsonify(error='başlık zorunlu'), 400
+        return jsonify(error='title is required'), 400
     f = request.files.get('file')
     ad, boyut, mime, ferr = _dosya_kontrol(client_id, f)
     if ferr:
@@ -423,8 +443,8 @@ def client_file_create(client_id):
         file_size=boyut, note=(request.form.get('note') or '').strip()[:NOTE_MAX] or None,
         uploaded_by=u['sub'], uploaded_at=utcnow())
     db.session.add(v)
-    # DB commit'i Drive'dan ÖNCE: kanonik dosya diskte, Drive gecikse de kullanıcı
-    # dosyasını görür ve indirir.
+    # DB commit BEFORE Drive: the canonical file is on disk, so even if Drive
+    # lags the user can see and download their file.
     db.session.commit()
     drive_ok = _drive_kopyala(c, v, _yol(sha, ad))
     db.session.commit()
@@ -432,26 +452,26 @@ def client_file_create(client_id):
                    quota=_kota(client_id)), 201
 
 
-# --- sürümleme ----------------------------------------------------------
+# --- versioning ----------------------------------------------------------
 
 def _dosya_veya_404(file_id):
     f = db.session.get(DesignFile, file_id)
     if f is None or f.deleted_at is not None:
-        return None, (jsonify(error='dosya bulunamadı'), 404)
+        return None, (jsonify(error='file not found'), 404)
     return f, None
 
 
 @bp.get('/<int:file_id>/versions')
 def file_versions(file_id):
-    """Sürüm geçmişi — yeniden eskiye (panel açılır listede aynı sırayı gösterir)."""
+    """Version history — newest to oldest (panel shows the same order in its dropdown)."""
     u, err = _require()
     if err:
         return err
     f, ferr = _dosya_veya_404(file_id)
     if ferr:
         return ferr
-    # Müşteri arşivlenmişse (soft-delete) dosya satırı kalır ama geçmişi
-    # görünmemeli — `client_files`/`file_version_create` ile aynı kontrol.
+    # If the client is archived (soft-deleted), the file row remains but the
+    # history shouldn't show — same check as `client_files`/`file_version_create`.
     _, cerr = _musteri_veya_404(f.client_id)
     if cerr:
         return cerr
@@ -466,12 +486,12 @@ def file_versions(file_id):
 
 @bp.post('/<int:file_id>/versions')
 def file_version_create(file_id):
-    """Yeni sürüm yükle (multipart: file, note?). Sürüm numarası MAX+1.
+    """Upload a new version (multipart: file, note?). Version number is MAX+1.
 
-    Yarış: iki tasarımcı aynı anda yüklerse MAX+1 ikisinde de aynı çıkar ve
-    UNIQUE(file_id, version_no) ikincisini reddeder → 409. Otomatik yeniden
-    denemek (MAX+2) BİLEREK yapılmıyor: kullanıcı diğerinin sürümünü görmeden
-    üstüne yazmış olurdu."""
+    Race: if two designers upload at the same time, MAX+1 comes out the same
+    for both, and UNIQUE(file_id, version_no) rejects the second one -> 409.
+    Automatically retrying (MAX+2) is DELIBERATELY not done: the user would
+    end up overwriting the other's version without seeing it."""
     u, err = _require()
     if err:
         return err
@@ -486,10 +506,10 @@ def file_version_create(file_id):
     if uerr:
         return uerr
 
-    # Bilerek `deleted_at` süzgeci UYGULANMADAN MAX(version_no): silinmiş bir
-    # sürümün numarası yeniden kullanılırsa geçmişteki not/indirme kaydı
-    # yanıltıcı biçimde iki farklı içeriğe işaret eder ("güncel" süzgeci ayrı
-    # tutuluyor, bkz. `_guncel_surumler`).
+    # Deliberately MAX(version_no) WITHOUT applying the `deleted_at` filter:
+    # if a deleted version's number got reused, past notes/download records
+    # would misleadingly point to two different pieces of content (the
+    # "current" filter is kept separate, see `_guncel_surumler`).
     sonraki = 1 + int(db.session.query(
         db.func.coalesce(db.func.max(DesignFileVersion.version_no), 0))
         .filter(DesignFileVersion.file_id == f.id).scalar() or 0)
@@ -503,45 +523,49 @@ def file_version_create(file_id):
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        return jsonify(error='Bu sırada başkası yeni sürüm yükledi — '
-                             'sayfayı tazeleyip tekrar dene.'), 409
+        return jsonify(error='Someone else uploaded a new version in the meantime — '
+                             'refresh the page and try again.'), 409
     drive_ok = _drive_kopyala(c, v, _yol(sha, ad))
     db.session.commit()
     return jsonify(file=_tek_dosya_json(f, u), drive_ok=drive_ok,
                    quota=_kota(f.client_id)), 201
 
 
-# --- indirme ------------------------------------------------------------
+# --- download ------------------------------------------------------------
 
 @bp.get('/versions/<int:version_id>/download')
 def version_download(version_id):
-    """Sürümü indir. Yetki BURADA doğrulanır, akıtma (nginx modunda) nginx'te.
+    """Download the version. Authorization is checked HERE; streaming (in
+    nginx mode) happens in nginx.
 
-    Drive linki verilmiyor: Drive kopyası kısıtlı izinli, ajans Google hesabında
-    olmayan tasarımcı için işe yaramaz; dosya zaten bizde kanonik."""
+    No Drive link is given: the Drive copy has restricted permissions and is
+    useless to a designer without an agency Google account; the file is
+    already canonical on our side."""
     _, err = _require()
     if err:
         return err
     v = db.session.get(DesignFileVersion, version_id)
     if v is None or v.deleted_at is not None:
-        return jsonify(error='sürüm bulunamadı'), 404
+        return jsonify(error='version not found'), 404
     f, ferr = _dosya_veya_404(v.file_id)
     if ferr:
         return ferr
-    # Müşteri arşivlenmişse (soft-delete) dosya satırı kalır ama indirilememeli —
-    # `file_versions`/`file_version_create` ile aynı kural (denetimde işaretlendi).
+    # If the client is archived (soft-deleted), the file row remains but must
+    # not be downloadable — same rule as `file_versions`/`file_version_create`
+    # (flagged in review).
     _, cerr = _musteri_veya_404(f.client_id)
     if cerr:
         return cerr
     yol = _yol(v.sha256, v.file_name)
     if not os.path.exists(yol):
-        # DB satırı var, disk dosyası yok: elle silinmiş ya da göç kazası.
-        # 500 yerine anlaşılır bir durum — panelde "dosya sunucuda bulunamadı".
+        # DB row exists, disk file doesn't: manually deleted, or a migration
+        # mishap. A clear state instead of a 500 — panel shows "file not found
+        # on server".
         log.error('çalışma dosyası diskte yok: version=%s sha=%s', v.id, v.sha256)
-        return jsonify(error='dosya sunucuda bulunamadı'), 410
+        return jsonify(error='file not found on server'), 410
 
     if not XACCEL:
-        # nginx yok (test / `flask run`) → dosyayı Flask servis eder.
+        # No nginx (tests / `flask run`) -> Flask serves the file directly.
         return send_file(yol, mimetype=v.mime_type or 'application/octet-stream',
                          as_attachment=True, download_name=v.file_name,
                          conditional=True)
@@ -550,54 +574,56 @@ def version_download(version_id):
     resp.headers['X-Accel-Redirect'] = (
         XACCEL_PREFIX + f'{v.sha256[:2]}/{v.sha256}.{_uzanti(v.file_name)}')
     resp.headers['Content-Type'] = v.mime_type or 'application/octet-stream'
-    # Diskteki ad hash — kullanıcı ÖZGÜN adı indirsin (Türkçe karakterler UTF-8).
+    # The name on disk is a hash — let the user download the ORIGINAL name
+    # (Turkish characters as UTF-8).
     resp.headers['Content-Disposition'] = (
         "attachment; filename*=UTF-8''" + quote(v.file_name or f'dosya-{v.id}'))
     return resp
 
 
-# --- düzenleme ve silme -------------------------------------------------
+# --- editing and deletion -------------------------------------------------
 
 @bp.patch('/<int:file_id>')
 def file_patch(file_id):
-    """Başlık ve etiketleri düzenle. Dosya içeriğine dokunmaz."""
+    """Edit title and tags. Does not touch the file's content."""
     u, err = _require()
     if err:
         return err
     f, ferr = _dosya_veya_404(file_id)
     if ferr:
         return ferr
-    # Müşteri arşivlenmişse (soft-delete) dosya satırı kalır ama düzenlenememeli —
-    # `file_versions`/`version_download` ile aynı kural.
+    # If the client is archived (soft-deleted), the file row remains but must
+    # not be editable — same rule as `file_versions`/`version_download`.
     _, cerr = _musteri_veya_404(f.client_id)
     if cerr:
         return cerr
     veri = request.get_json(silent=True) or {}
     if 'title' in veri:
         ham_title = veri.get('title')
-        # `{"title": 5}` gibi string-olmayan bir gövde `.strip()`'te AttributeError
-        # fırlatıp 500'e düşerdi — burada anlaşılır 400.
+        # A non-string body like `{"title": 5}` would raise AttributeError in
+        # `.strip()` and fall through to a 500 — a clear 400 here instead.
         if ham_title is not None and not isinstance(ham_title, str):
-            return jsonify(error='başlık metin olmalı'), 400
+            return jsonify(error='title must be text'), 400
         t = (ham_title or '').strip()[:TITLE_MAX]
         if not t:
-            return jsonify(error='başlık boş olamaz'), 400
+            return jsonify(error='title cannot be empty'), 400
         f.title = t
     if 'tags' in veri:
         import json
         ham_tags = veri.get('tags')
-        # `{"tags": "şablon"}` gibi dizi-olmayan bir gövde `_etiketler`'de sessizce
-        # [] döner ve dosyanın TÜM etiketlerini siler — 200 yerine anlaşılır 400.
+        # A non-array body like `{"tags": "şablon"}` would silently return []
+        # from `_etiketler` and delete ALL of the file's tags — a clear 400
+        # instead of a 200.
         if ham_tags is not None and not isinstance(ham_tags, list):
-            return jsonify(error='etiketler liste olmalı'), 400
+            return jsonify(error='tags must be a list'), 400
         f.tags = _etiketler(json.dumps(ham_tags or []))
     db.session.commit()
     return jsonify(file=_tek_dosya_json(f, u))
 
 
 def _drive_cope(version):
-    """Drive kopyasını çöp kutusuna at (30 gün geri alınabilir). EN-İYİ-ÇABA:
-    tek Drive hıçkırığı panel kaydını silinemez yapmamalı (depo deseni)."""
+    """Move the Drive copy to trash (recoverable for 30 days). BEST-EFFORT:
+    a single Drive hiccup shouldn't make the panel record undeletable (depot pattern)."""
     if not version.drive_file_id:
         return True
     try:
@@ -609,10 +635,11 @@ def _drive_cope(version):
 
 
 def _drive_geri_al(version):
-    """Drive kopyasını çöp kutusundan çıkar (`_drive_cope`'un tersi). EN-İYİ-ÇABA:
-    kanonik dosya sunucuda durduğu için Drive hatası geri almayı BLOKLAMAMALI,
-    yalnız `drive_ok` False döner ve panel Drive kopyasının hâlâ çöpte olduğunu
-    (30 gün sonra kalıcı silineceğini) gösterebilir."""
+    """Take the Drive copy out of trash (opposite of `_drive_cope`).
+    BEST-EFFORT: since the canonical file remains on the server, a Drive
+    error must NOT BLOCK the restore — it just returns `drive_ok` False, and
+    the panel can show that the Drive copy is still in trash (and will be
+    permanently deleted after 30 days)."""
     if not version.drive_file_id:
         return True
     try:
@@ -625,23 +652,24 @@ def _drive_geri_al(version):
 
 @bp.delete('/<int:file_id>')
 def file_delete(file_id):
-    """Dosyayı ve tüm sürümlerini soft-delete et; Drive kopyaları çöp kutusuna.
+    """Soft-delete the file and all its versions; move Drive copies to trash.
 
-    Disk dosyası KALIR: aynı sha256'ya başka bir satır işaret ediyor olabilir ve
-    soft-delete geri alınabilir olmalı (fonts deseni)."""
+    Disk file STAYS: another row could point at the same sha256, and
+    soft-delete must be reversible (fonts pattern)."""
     u, err = _require()
     if err:
         return err
     f, ferr = _dosya_veya_404(file_id)
     if ferr:
         return ferr
-    # Müşteri arşivlenmişse dosya zaten görünmüyor demektir ama uç doğrudan
-    # çağrılabilir — aynı kural burada da (`file_versions` ile tutarlı).
+    # If the client is archived, the file already doesn't show, but the
+    # endpoint can be called directly — same rule here too (consistent with
+    # `file_versions`).
     _, cerr = _musteri_veya_404(f.client_id)
     if cerr:
         return cerr
     if not _silebilir(u, f):
-        return jsonify(error='yalnız yükleyen veya yönetim silebilir'), 403
+        return jsonify(error='only the uploader or management can delete'), 403
     simdi = utcnow()
     drive_ok = True
     for v in DesignFileVersion.query.filter_by(file_id=f.id, deleted_at=None).all():
@@ -656,27 +684,28 @@ def file_delete(file_id):
 
 @bp.delete('/versions/<int:version_id>')
 def version_delete(version_id):
-    """Tek sürümü kaldır. Son kalan sürüm silinemez — dosyanın hiç içeriği olmayan
-    bir kabuğa dönüşmesi kullanıcı için anlamsız; dosyayı silmek isteyen dosyayı
-    silsin (`DELETE /<file_id>`)."""
+    """Remove a single version. The last remaining version cannot be deleted —
+    the file becoming an empty shell with no content at all is meaningless to
+    the user; whoever wants to delete the file should delete the file
+    (`DELETE /<file_id>`)."""
     u, err = _require()
     if err:
         return err
     v = db.session.get(DesignFileVersion, version_id)
     if v is None or v.deleted_at is not None:
-        return jsonify(error='sürüm bulunamadı'), 404
+        return jsonify(error='version not found'), 404
     f, ferr = _dosya_veya_404(v.file_id)
     if ferr:
         return ferr
-    # Aynı tutarlılık kuralı: arşivlenmiş müşterinin sürümü silinmemeli.
+    # Same consistency rule: an archived client's version shouldn't be deletable.
     _, cerr = _musteri_veya_404(f.client_id)
     if cerr:
         return cerr
     if not _silebilir(u, v):
-        return jsonify(error='yalnız yükleyen veya yönetim silebilir'), 403
+        return jsonify(error='only the uploader or management can delete'), 403
     kalan = DesignFileVersion.query.filter_by(file_id=f.id, deleted_at=None).count()
     if kalan <= 1:
-        return jsonify(error='Son sürüm silinemez — dosyanın tamamını sil.'), 400
+        return jsonify(error='The last version cannot be deleted — delete the entire file instead.'), 400
     drive_ok = _drive_cope(v)
     v.deleted_at = utcnow()
     v.deleted_by = u['sub']
@@ -684,22 +713,24 @@ def version_delete(version_id):
     return jsonify(ok=True, drive_ok=drive_ok, quota=_kota(f.client_id))
 
 
-# --- çöp kutusu: geri alma ---------------------------------------------------
+# --- trash: restore ---------------------------------------------------
 #
-# Soft-delete tek başına tek yönlü bir kapıydı (`deleted_at` yazılır, geri
-# döndürecek uç yoktu) — çöp kutusu bunu bir onay kuyruğuna çeviriyor: silinen
-# her şey burada durur, yönetim ya geri alır ya kalıcı siler (proje sahibi kararı,
-# 2026-08-08, bkz. `.superpowers/sdd/2026-08-07-tasarim-calisma-dosyalari/
-# followup-silme-brief.md`). Ayrı bir istek/onay durum makinesi KURULMADI:
-# tetik zaten `_silebilir`/`management` ile var olan yetki matrisinde.
+# Soft-delete used to be a one-way gate by itself (`deleted_at` gets written,
+# no endpoint to reverse it) — the trash turns it into an approval queue:
+# everything deleted sits here, and management either restores it or purges
+# it permanently (project owner's decision, 2026-08-08, see
+# `.superpowers/sdd/2026-08-07-tasarim-calisma-dosyalari/
+# followup-silme-brief.md`). A SEPARATE request/approval state machine was
+# NOT built: the trigger already lives in the existing authorization matrix
+# via `_silebilir`/`management`.
 
 
 @bp.get('/client/<int:client_id>/trash')
 def client_trash(client_id):
-    """Çöp kutusu: silinmiş DOSYALAR + hâlâ yaşayan dosyaların tekil silinmiş
-    SÜRÜMLERİ (iki ayrı dizi — biri dosya bazlı geri alma/kalıcı silme, diğeri
-    sürüm bazlı). Kalıcı silme burada YAPILMAZ, yalnız görüntüleme + işaretler
-    (bkz. `file_purge_request`)."""
+    """Trash: deleted FILES + individually deleted VERSIONS of files that are
+    still alive (two separate arrays — one for file-level restore/purge, the
+    other version-level). Permanent deletion is NOT DONE here, only viewing +
+    flags (see `file_purge_request`)."""
     u, err = _require()
     if err:
         return err
@@ -713,9 +744,9 @@ def client_trash(client_id):
                 .filter(DesignFile.client_id == client_id,
                         DesignFile.deleted_at.isnot(None))
                 .order_by(DesignFile.deleted_at.desc()).all())
-    # Silinmiş dosyaların sürümleri de silinmiş — `silinmisler_dahil=True`
-    # olmadan `_guncel_surumler` bu satırlarda hep boş dönerdi (canlı listenin
-    # `deleted_at IS NULL` filtresi burada hiçbir şeyle eşleşmez).
+    # Deleted files' versions are deleted too — without `silinmisler_dahil=True`
+    # `_guncel_surumler` would always return empty for these rows (the live
+    # list's `deleted_at IS NULL` filter matches nothing here).
     guncel = _guncel_surumler([f.id for f in dosyalar], silinmisler_dahil=True)
     files = []
     for f in dosyalar:
@@ -749,27 +780,27 @@ def client_trash(client_id):
 
 @bp.post('/<int:file_id>/restore')
 def file_restore(file_id):
-    """Dosyayı çöp kutusundan geri al.
+    """Restore the file from trash.
 
-    **Kapsam — `deleted_at` damgasıyla eşleşme:** dosyayla BİRLİKTE yalnız
-    `deleted_at == f.deleted_at` olan sürümler döner; daha önce TEK TEK
-    silinmiş sürümler (farklı, daha eski bir damga taşıyorlar) silinmiş kalır.
-    `file_delete` tüm aktif sürümlere AYNI `utcnow()` damgasını bastığı için bu
-    eşleşme güvenilir — aksi halde 'v2'yi sildim, sonra dosyayı silip geri
-    aldım, v2 de geri geldi' sürprizi olurdu."""
+    **Scope — match by `deleted_at` timestamp:** ALONG WITH the file, only
+    versions with `deleted_at == f.deleted_at` get restored; versions deleted
+    INDIVIDUALLY earlier (carrying a different, older timestamp) stay
+    deleted. This matching is reliable because `file_delete` stamps the SAME
+    `utcnow()` on all active versions — otherwise there'd be a surprise like
+    "I deleted v2, then deleted and restored the file, and v2 came back too."""
     u, err = _require()
     if err:
         return err
     f = db.session.get(DesignFile, file_id)
     if f is None:
-        return jsonify(error='dosya bulunamadı'), 404
+        return jsonify(error='file not found'), 404
     _, cerr = _musteri_veya_404(f.client_id)
     if cerr:
         return cerr
     if f.deleted_at is None:
-        return jsonify(error='dosya zaten çöp kutusunda değil'), 400
+        return jsonify(error='file is not in the trash'), 400
     if not _silebilir(u, f):
-        return jsonify(error='yalnız yükleyen veya yönetim geri alabilir'), 403
+        return jsonify(error='only the uploader or management can restore'), 403
     damga = f.deleted_at
     f.deleted_at = None
     f.deleted_by = None
@@ -789,28 +820,29 @@ def file_restore(file_id):
 
 @bp.post('/versions/<int:version_id>/restore')
 def version_restore(version_id):
-    """Tek sürümü çöp kutusundan geri al. Dosyanın KENDİSİ çöp kutusundaysa
-    reddedilir (400) — o durumda geri alma dosya seviyesinden yapılır
-    (`file_restore`), aksi halde canlı listede görünmeyen bir dosyaya bağlı
-    'canlı' bir sürüm gibi tutarsız bir ara durum doğardı."""
+    """Restore a single version from trash. Rejected (400) if the file
+    ITSELF is in trash — in that case the restore must happen at the file
+    level (`file_restore`), otherwise it would produce an inconsistent
+    intermediate state, like a 'live' version attached to a file that doesn't
+    show in the live list."""
     u, err = _require()
     if err:
         return err
     v = db.session.get(DesignFileVersion, version_id)
     if v is None:
-        return jsonify(error='sürüm bulunamadı'), 404
+        return jsonify(error='version not found'), 404
     f = db.session.get(DesignFile, v.file_id)
     if f is None:
-        return jsonify(error='dosya bulunamadı'), 404
+        return jsonify(error='file not found'), 404
     _, cerr = _musteri_veya_404(f.client_id)
     if cerr:
         return cerr
     if f.deleted_at is not None:
-        return jsonify(error='dosyanın kendisi çöp kutusunda — önce dosyayı geri al'), 400
+        return jsonify(error='the file itself is in the trash — restore the file first'), 400
     if v.deleted_at is None:
-        return jsonify(error='sürüm zaten çöp kutusunda değil'), 400
+        return jsonify(error='version is not in the trash'), 400
     if not _silebilir(u, v):
-        return jsonify(error='yalnız yükleyen veya yönetim geri alabilir'), 403
+        return jsonify(error='only the uploader or management can restore'), 403
     drive_ok = _drive_geri_al(v)
     v.deleted_at = None
     v.deleted_by = None
@@ -820,21 +852,21 @@ def version_restore(version_id):
 
 @bp.post('/<int:file_id>/purge-request')
 def file_purge_request(file_id):
-    """Tasarımcının 'kalıcı silinsin' işareti — koy/kaldır. HİÇBİR ŞEYİ SİLMEZ,
-    yalnız yönetime çöp kutusunda görünen bir uyarı rozeti bırakır. Yetki
-    `_require()` ile tüm tasarım ekibi (yalnız sahip değil) — talep etmek
-    silmekten daha hafif bir eylem."""
+    """A designer's 'purge this permanently' flag — set/clear. DELETES
+    NOTHING, just leaves a warning badge visible to management in the trash.
+    Authorization is via `_require()` for the whole design team (not just the
+    owner) — requesting is a lighter action than deleting."""
     u, err = _require()
     if err:
         return err
     f = db.session.get(DesignFile, file_id)
     if f is None:
-        return jsonify(error='dosya bulunamadı'), 404
+        return jsonify(error='file not found'), 404
     _, cerr = _musteri_veya_404(f.client_id)
     if cerr:
         return cerr
     if f.deleted_at is None:
-        return jsonify(error='yalnız çöp kutusundaki dosya için talep edilebilir'), 400
+        return jsonify(error='can only be requested for a file that is in the trash'), 400
     veri = request.get_json(silent=True) or {}
     istendi = bool(veri.get('requested'))
     if istendi:
@@ -848,28 +880,31 @@ def file_purge_request(file_id):
 
 
 def _purge_disk_dedup(sha):
-    """`sha256`'ya ait TÜM disk yolları DURSUN mu SİLİNSİN mi — aynı içeriğe
-    (dedup) işaret eden BAŞKA hiçbir `DesignFileVersion` satırı (silinmiş
-    dahil, onlar da geri alınabilir) kalmadıysa siler. Kontrolsüz `os.unlink`
-    başka bir müşterinin hâlâ canlı dosyasını öldürürdü. EN-İYİ-ÇABA: patlarsa
-    DB purge'ü GERİ ALINMAZ, çağıran `disk_ok:false` döner.
+    """Should ALL disk paths for a given `sha256` STAY or be DELETED — deletes
+    only if NO OTHER `DesignFileVersion` row (including deleted ones, since
+    those are still restorable) points at the same content (dedup). An
+    unguarded `os.unlink` would kill another client's still-live file.
+    BEST-EFFORT: if it fails, the DB purge is NOT ROLLED BACK, the caller
+    just gets `disk_ok:false`.
 
-    **Uzantı sızıntısı:** aynı bayt'lar farklı ad/uzantıyla yüklenmiş olabilir
-    (`logo.psd` ve `logo.ai` aynı içerik) — `_yol` uzantı içerdiği için diskte
-    İKİ ayrı dosya oluşur (`<sha>.psd`, `<sha>.ai`). Tek bir `file_name`'in
-    yoluna değil, o sha'ya ait TÜM yollara (`<sha[:2]>/<sha>.*` deseni, `glob`)
-    bakılır. Bu güvenli: sayım zaten sha-kapsamlı (uzantıdan bağımsız), 0 ise
-    hiçbir satır kalmamıştır — desen ne kadar dosyaya uyarsa hepsi öksüzdür.
+    **Extension leakage:** the same bytes might have been uploaded under
+    different names/extensions (`logo.psd` and `logo.ai` with identical
+    content) — since `_yol` includes the extension, TWO separate files exist
+    on disk (`<sha>.psd`, `<sha>.ai`). Rather than a single `file_name`'s
+    path, we look at ALL paths for that sha (`<sha[:2]>/<sha>.*` pattern,
+    `glob`). This is safe: the count is already sha-scoped (extension-
+    independent), and if it's 0 no row remains — however many files match the
+    pattern, all of them are orphaned.
 
-    **Kilit:** sayımdan ÖNCE `_sha_kilidi` alınır — TOCTOU yarışını kapatan
-    kilit (`_diske_yaz` ile birlikte okunmalı, bkz. yukarıdaki blok yorumu).
-    Sayımdan sonra (ne bulunursa bulunsun) `db.session.commit()` ile kilit
-    hemen bırakılır; bu fonksiyon salt-okunur bir SELECT dışında veri
-    değiştirmediği için commit güvenli — yalnızca advisory lock'u serbest
-    bırakma amaçlı (jobqueue.py `enqueue` ile aynı desen)."""
+    **Lock:** `_sha_kilidi` is taken BEFORE counting — the lock that closes
+    the TOCTOU race (read together with `_diske_yaz`, see the block comment
+    above). After the count (whatever it finds), `db.session.commit()`
+    releases the lock right away; since this function doesn't change any
+    data outside a read-only SELECT, the commit is safe — it's only there to
+    release the advisory lock (same pattern as jobqueue.py's `enqueue`)."""
     _sha_kilidi(sha)
     if DesignFileVersion.query.filter_by(sha256=sha).count():
-        db.session.commit()   # kilidi bırak (bu transaction'da değişiklik yok)
+        db.session.commit()   # release the lock (no changes in this transaction)
         return True
     desen = os.path.join(STORE_DIR, sha[:2], f'{sha}.*')
     ok = True
@@ -879,44 +914,46 @@ def _purge_disk_dedup(sha):
         except OSError as e:
             log.warning('çalışma dosyası diskten kalıcı silinemedi (%s): %s', yol, e)
             ok = False
-    db.session.commit()       # kilidi bırak
+    db.session.commit()       # release the lock
     return ok
 
 
 @bp.delete('/<int:file_id>/purge')
 def file_purge(file_id):
-    """Dosyayı ve TÜM sürümlerini KALICI sil. Yalnız yönetim, yalnız çöp
-    kutusundaki dosya, yalnız gövdede `{"confirm": true}` ile — geri alınamaz.
+    """PERMANENTLY delete the file and ALL its versions. Management only,
+    only a file already in trash, only with `{"confirm": true}` in the body —
+    unrecoverable.
 
-    **FK sırası:** önce `DesignFileVersion` satırları, sonra `DesignFile`
-    (`card_uploads` silme dersi — ters sırada FK hatası alınır).
+    **FK order:** `DesignFileVersion` rows first, then `DesignFile` (lesson
+    from `card_uploads` deletion — reverse order raises an FK error).
 
-    **Drive'da kalıcı silme YAPILMAZ:** kopya soft-delete anında zaten Drive
-    çöp kutusuna atıldı (`_drive_cope`, 30 gün geri alınabilir) ve
-    `drive_gateway`'de kalıcı silme fonksiyonu yok — repo bunu bilinçli tercih
-    etmedi (`sharing.py` aynı gerekçe). Drive kendi 30 günde temizler."""
+    **No permanent deletion in Drive:** the copy was already moved to Drive
+    trash at soft-delete time (`_drive_cope`, recoverable for 30 days), and
+    `drive_gateway` has no permanent-delete function — a deliberate choice by
+    the repo (same rationale as `sharing.py`). Drive cleans it up on its own
+    30-day schedule."""
     u, err = _require()
     if err:
         return err
     if u.get('role') != 'management':
-        return jsonify(error='kalıcı silme yalnız yönetimde yapılabilir'), 403
+        return jsonify(error='permanent deletion can only be done by management'), 403
     f = db.session.get(DesignFile, file_id)
     if f is None:
-        return jsonify(error='dosya bulunamadı'), 404
+        return jsonify(error='file not found'), 404
     _, cerr = _musteri_veya_404(f.client_id)
     if cerr:
         return cerr
     if f.deleted_at is None:
-        return jsonify(error='yalnız çöp kutusundaki dosya kalıcı silinebilir'), 400
+        return jsonify(error='only a file already in the trash can be permanently deleted'), 400
     veri = request.get_json(silent=True) or {}
     if veri.get('confirm') is not True:
-        return jsonify(error='kalıcı silme onayı gerekli ({"confirm": true})'), 400
+        return jsonify(error='permanent deletion requires confirmation ({"confirm": true})'), 400
 
     versiyonlar = DesignFileVersion.query.filter_by(file_id=f.id).all()
-    # sha256'lar commit'ten ÖNCE toplanır — satırlar silindikten sonra ORM
-    # nesnelerine erişmek DetachedInstanceError riski taşır. `set`: aynı dosyanın
-    # iki sürümü aynı içerikle yeniden yüklenmiş olabilir (aynı sha), tekrar eden
-    # kilit/sorguyu Python tarafında baştan eler.
+    # sha256s are collected BEFORE the commit — accessing ORM objects after
+    # their rows are deleted risks a DetachedInstanceError. `set`: two versions
+    # of the same file could've been re-uploaded with identical content (same
+    # sha), this weeds out the repeated lock/query on the Python side upfront.
     diskteki = {v.sha256 for v in versiyonlar}
     client_id = f.client_id
     DesignFileVersion.query.filter_by(file_id=f.id).delete(synchronize_session=False)
@@ -931,38 +968,39 @@ def file_purge(file_id):
 
 @bp.delete('/versions/<int:version_id>/purge')
 def version_purge(version_id):
-    """Tek sürümü KALICI sil. Yalnız yönetim, yalnız çöp kutusundaki sürüm,
-    yalnız `{"confirm": true}` ile. Drive kalıcı silme YAPILMAZ (`file_purge`
-    ile aynı gerekçe).
+    """PERMANENTLY delete a single version. Management only, only a version
+    already in trash, only with `{"confirm": true}`. No permanent deletion in
+    Drive (same rationale as `file_purge`).
 
-    **Kapı: dosyanın kendisi çöpte olamaz.** `version_restore`'un aksine bu uç
-    eskiden yalnız `v.deleted_at`'a bakıyordu — dosyanın kendisi (`f.deleted_at`)
-    çöpteyken sürümleri tek tek purge etmek `design_files` satırını SIFIR
-    sürümle bırakabiliyordu (`version_delete`'in "son sürüm silinemez" kararına
-    aykırı bir kabuk dosya; sonradan restore edilirse canlı listede
-    `current: null` görünür). `version_restore` ile AYNI kapı burada da var."""
+    **Gate: the file itself must not be in trash.** Unlike `version_restore`,
+    this endpoint used to check only `v.deleted_at` — purging versions one by
+    one while the file itself (`f.deleted_at`) is in trash could leave the
+    `design_files` row with ZERO versions (a shell file that violates
+    `version_delete`'s "last version can't be deleted" rule; if later
+    restored, the live list would show `current: null`). The SAME gate as
+    `version_restore` is applied here too."""
     u, err = _require()
     if err:
         return err
     if u.get('role') != 'management':
-        return jsonify(error='kalıcı silme yalnız yönetimde yapılabilir'), 403
+        return jsonify(error='permanent deletion can only be done by management'), 403
     v = db.session.get(DesignFileVersion, version_id)
     if v is None:
-        return jsonify(error='sürüm bulunamadı'), 404
+        return jsonify(error='version not found'), 404
     f = db.session.get(DesignFile, v.file_id)
     if f is None:
-        return jsonify(error='dosya bulunamadı'), 404
+        return jsonify(error='file not found'), 404
     _, cerr = _musteri_veya_404(f.client_id)
     if cerr:
         return cerr
     if f.deleted_at is not None:
-        return jsonify(error='dosyanın kendisi çöp kutusunda — sürümü tek tek '
-                             'değil, dosyanın tamamını kalıcı sil'), 400
+        return jsonify(error='the file itself is in the trash — permanently delete '
+                             'the entire file, not individual versions'), 400
     if v.deleted_at is None:
-        return jsonify(error='yalnız çöp kutusundaki sürüm kalıcı silinebilir'), 400
+        return jsonify(error='only a version already in the trash can be permanently deleted'), 400
     veri = request.get_json(silent=True) or {}
     if veri.get('confirm') is not True:
-        return jsonify(error='kalıcı silme onayı gerekli ({"confirm": true})'), 400
+        return jsonify(error='permanent deletion requires confirmation ({"confirm": true})'), 400
 
     sha = v.sha256
     db.session.delete(v)

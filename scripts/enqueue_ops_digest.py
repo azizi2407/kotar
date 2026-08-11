@@ -1,14 +1,16 @@
-"""Ops Digest takip botu enqueue script'i (Faz 4, step 15) — bir systemd --user
-timer'ı bunu günde 4× (09/12/15/18) çağırır; kuyruktan `ai_worker.ops_digest_handler` çeker. Düşük priority (0 = batch): interaktif
-caption'ı (priority=10) bloklamaz.
+"""Enqueue script for the Ops Digest tracking bot (Phase 4, step 15) — a
+systemd --user timer calls this 4x a day (09/12/15/18); `ai_worker.ops_digest_handler`
+picks it up from the queue. Low priority (0 = batch): doesn't block interactive
+caption generation (priority=10).
 
-Dedup: aynı gün+slot için aktif (queued|running) bir job zaten varsa YENİ INSERT yapılmaz
-(`dedup_key=ops_digest:{date}:{slot}`, step 04) — makine kapalıyken biriken (Persistent=true
-telafi) ya da timer üst üste tetiklerse tek job → tek rapor (spam-önleme).
+Dedup: if an active (queued|running) job already exists for the same
+day+slot, NO NEW INSERT happens (`dedup_key=ops_digest:{date}:{slot}`, step
+04) — whether it's catch-up runs piling up while the machine was off
+(Persistent=true) or the timer firing repeatedly, one job → one report (spam prevention).
 
-`run()` DB'ye yazan test edilebilir çekirdek; testler doğrudan çağırır.
+`run()` is the testable core that writes to the DB; tests call it directly.
 
-Kullanım:
+Usage:
     venv/bin/python scripts/enqueue_ops_digest.py --created-by systemd-timer
     venv/bin/python scripts/enqueue_ops_digest.py --slot 12 --ai-summary
 """
@@ -19,25 +21,26 @@ from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import app  # noqa: E402  (env yüklü olmalı)
+from app import app  # noqa: E402  (env must be loaded)
 import jobqueue  # noqa: E402
 
 
 def _current_slot(now=None):
-    """Şu anki saatin 2 haneli slot etiketi ('09'|'12'|'15'|'18' veya güncel saat).
-    Timer tam saatte koştuğundan saat = slot; dedup anahtarının slot bileşenidir."""
+    """The current hour's 2-digit slot label ('09'|'12'|'15'|'18', or the
+    current hour). Since the timer runs on the hour, hour = slot; this is the dedup key's slot component."""
     return f'{(now or datetime.now()).hour:02d}'
 
 
 def run(slot=None, use_ai_summary=False, created_by=None):
-    """Bugün + slot için bir `ops_digest` Job'u oluşturur/döner (dedup: gün+slot).
+    """Creates/returns an `ops_digest` Job for today + slot (dedup: day+slot).
 
-    Düşük priority (0 = batch): interaktif caption'ı (priority=10) bloklamaz.
-    dedup_key ile aynı gün+slot iki kez atılırsa tek job kalır (aktif job döner) →
-    tek rapor. use_ai_summary=True → handler özet dilini `ai_claude.run` ile derler.
+    Low priority (0 = batch): doesn't block interactive caption generation
+    (priority=10). If the same day+slot is submitted twice, dedup_key keeps it
+    to one job (returns the active job) → one report. use_ai_summary=True → the
+    handler composes the summary text via `ai_claude.run`.
 
-    NOT: app context AÇMAZ — çağıranın sorumluluğu (bkz. `main()`); testler conftest'in
-    autouse context'i içinde doğrudan çağırır (bkz. enqueue_special_days.py)."""
+    NOTE: does NOT open an app context — that's the caller's responsibility
+    (see `main()`); tests call it directly within conftest's autouse context (see enqueue_special_days.py)."""
     slot = slot or _current_slot()
     today = date.today().isoformat()
     payload = {'date': today, 'slot': slot}

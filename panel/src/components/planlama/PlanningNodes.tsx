@@ -1,9 +1,9 @@
-// React Flow özel node'ları: kart · not · bölge · görsel.
+// React Flow custom nodes: card · note · region · image.
 //
-// `nodrag` SINIFI KRİTİK: RF bu sınıfı taşıyan elemanın üzerinde sürükleme
-// başlatmaz. Eski tuvaldeki `data-noload` işaretinin birebir karşılığı — düğme,
-// checkbox, palet ve yerinde düzenleme alanı bu sınıfı taşımak zorunda, yoksa
-// tıklamak kartı sürüklemeye başlar.
+// The `nodrag` CLASS IS CRITICAL: RF won't start a drag on an element carrying
+// this class. It's the exact equivalent of the old canvas's `data-noload` marker —
+// buttons, checkboxes, the palette, and inline-edit fields must all carry this
+// class, otherwise clicking them starts dragging the card instead.
 import { memo } from "react"
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react"
 import {
@@ -12,28 +12,29 @@ import {
 } from "lucide-react"
 
 import { InlineText } from "@/components/planlama/InlineText"
+import { useI18n } from "@/lib/i18n"
 import { COLORS, dueTone, fmtDay, imageOf, planningImageUrl, type PlanningItem } from "@/lib/planlama"
 import { cn } from "@/lib/utils"
 
-/** Node.data — tuval bileşeninden geçen öğe + davranışlar. */
+/** Node.data — the item + behaviors passed down from the canvas component. */
 export interface NodeData extends Record<string, unknown> {
   item: PlanningItem
-  dim: boolean                                   // filtre eşleşmedi → soluk
-  locked: boolean                                // extra.locked → salt görüntü
+  dim: boolean                                   // filter didn't match → dimmed
+  locked: boolean                                // extra.locked → read-only
   readOnly: boolean
   onPatch: (key: string, patch: Partial<PlanningItem>) => void
   onRemove: (key: string) => void
   onOpenDetail: (item: PlanningItem) => void
   paletteFor: string | null
   setPaletteFor: (key: string | null) => void
-  boardKey: string                               // görsel URL'i pano başına
-  autoEdit?: boolean                             // yeni eklendi → başlığı hemen aç
+  boardKey: string                               // image URL is per board
+  autoEdit?: boolean                             // newly added → open the title immediately
   onAutoEditDone?: () => void
 }
 
-/** Konum/ölçü karşılaştırmadan DIŞLANIR: taşımayı/boyutlandırmayı React Flow
- *  kendi transform'uyla uyguluyor, node'un İÇERİĞİ bundan etkilenmiyor. Dışlamazsak
- *  sürüklemenin her karesinde tüm kart yeniden çizilir. */
+/** Position/size are EXCLUDED from comparison: React Flow applies moving/resizing
+ *  through its own transform, and the node's CONTENT is unaffected by it. If we
+ *  didn't exclude these, the whole card would re-render on every frame of a drag. */
 const GEOMETRI = new Set(["x", "y", "width", "height"])
 
 function ayniOge(a: PlanningItem, b: PlanningItem): boolean {
@@ -48,12 +49,12 @@ function ayniOge(a: PlanningItem, b: PlanningItem): boolean {
   return true
 }
 
-/** `memo` karşılaştırıcısı — node'ların ortak kuralı.
+/** `memo` comparator — the shared rule for all nodes.
  *
- *  Callback'ler (onPatch/onRemove/…) BİLEREK karşılaştırılmıyor: davranışları
- *  sabittir, kimlikleri ise `nodes` her kurulduğunda değişir. Karşılaştırsaydık
- *  memo hiçbir zaman tutmazdı. Yeni bir davranış alanı eklenirse ve o alan
- *  render'ı etkiliyorsa BURAYA da eklenmeli. */
+ *  Callbacks (onPatch/onRemove/…) are DELIBERATELY NOT compared: their behavior
+ *  is stable, but their identity changes every time `nodes` is rebuilt. If we
+ *  compared them, memo would never hold. If a new behavior field is added and
+ *  it affects rendering, it must be added HERE too. */
 function nodeDataEsit(prev: NodeProps, next: NodeProps): boolean {
   if (prev.selected !== next.selected) return false
   const a = prev.data as NodeData
@@ -61,8 +62,8 @@ function nodeDataEsit(prev: NodeProps, next: NodeProps): boolean {
   if (a.dim !== b.dim || a.locked !== b.locked || a.readOnly !== b.readOnly) return false
   if (a.boardKey !== b.boardKey) return false
   if (!!a.autoEdit !== !!b.autoEdit) return false
-  // Palet yalnız BU node için açıksa fark yaratır; başka node'un paleti bizi
-  // yeniden çizmemeli.
+  // The palette only matters if it's open for THIS node; another node's palette
+  // shouldn't cause us to re-render.
   if ((a.paletteFor === a.item.item_key) !== (b.paletteFor === b.item.item_key)) return false
   return ayniOge(a.item, b.item)
 }
@@ -93,20 +94,21 @@ function IconBtn({ title, onClick, children, danger }: {
   )
 }
 
-/** Bağlantı tutamakları — dört kenarda.
+/** Connection handles — on all four edges.
  *
- *  2026-07-27 DÜZELTMESİ, okların çalışmamasının dört nedeni:
- *   1. Hepsi artık `type="source"` ve tuval `ConnectionMode.Loose` — eskiden
- *      sol/üst hedef, sağ/alt kaynaktı ve varsayılan Strict modda yalnız
- *      kaynak→hedef kabul ediliyordu; başka her kombinasyon SESSİZCE başarısızdı.
- *   2. `opacity-0` + 8 px = görünmez ve isabet edilemez hedef. Artık kalıcı
- *      soluk halka, node'a gelince belirginleşiyor.
- *   3. Tıklama alanı görünen daireden BÜYÜK (`::after` ile 20 px) — RF tutamağın
- *      kendi kutusunu dinler, görsel küçük kalsa da kavraması kolay olur.
- *   4. `RegionNode`'da tutamak HİÇ yoktu → bölgeler bağlanamıyordu.
+ *  2026-07-27 FIX, the four reasons arrows weren't working:
+ *   1. All handles are now `type="source"` with the canvas in `ConnectionMode.Loose`
+ *      — previously left/top were targets and right/bottom were sources, and the
+ *      default Strict mode only accepted source→target; every other combination
+ *      failed SILENTLY.
+ *   2. `opacity-0` + 8px = an invisible, unhittable target. Now it's a persistent
+ *      faint ring that becomes prominent on node hover.
+ *   3. The click area is LARGER than the visible circle (20px via `::after`) — RF
+ *      listens on the handle's own box, so grabbing it stays easy even if the visual stays small.
+ *   4. `RegionNode` had NO handle at all → regions couldn't be connected.
  */
 function Handles({ locked }: { locked?: boolean }) {
-  if (locked) return null            // kilitli öğe bağlanamaz
+  if (locked) return null            // locked item can't be connected
   const base = "!h-3 !w-3 !border-2 !border-slate-400 !bg-background !opacity-40 "
              + "transition-all group-hover:!opacity-100 group-hover:!border-primary "
              + "hover:!scale-150 hover:!bg-primary"
@@ -120,17 +122,18 @@ function Handles({ locked }: { locked?: boolean }) {
   )
 }
 
-/** Kilit rozeti — kilitli öğede sol üstte. */
+/** Lock badge — top-left on a locked item. */
 function LockBadge() {
+  const { t } = useI18n()
   return (
-    <span title="Kilitli — taşınamaz, boyutlandırılamaz, silinemez"
+    <span title={t("components.planlama.planningNodes.lockedHint")}
       className="absolute top-1 left-1 z-10 rounded bg-slate-700/80 p-0.5 text-white">
       <Lock className="h-2.5 w-2.5" />
     </span>
   )
 }
 
-/** Domain bağı rozeti — kart yüzünde, ilgili panel sayfasına götürür. */
+/** Domain link badge — on the card face, links to the related panel page. */
 function LinkBadge({ icon, text, href }: { icon: React.ReactNode; text: string; href?: string }) {
   const inner = (
     <span className="inline-flex max-w-full items-center gap-0.5 truncate rounded-full bg-black/10 px-1.5 py-0.5 text-[10px] text-slate-700">
@@ -145,6 +148,7 @@ function LinkBadge({ icon, text, href }: { icon: React.ReactNode; text: string; 
 }
 
 export const CardNode = memo(function CardNode({ data, selected }: NodeProps) {
+  const { t } = useI18n()
   const d = data as NodeData
   const it = d.item
   const done = it.status === "done"
@@ -159,13 +163,13 @@ export const CardNode = memo(function CardNode({ data, selected }: NodeProps) {
 
       <div className="flex items-start gap-1 px-2 pt-1.5">
         <button type="button" role="checkbox" aria-checked={done}
-          title={done ? "Açık yap" : "Bitti işaretle"}
+          title={done ? t("components.planlama.planningNodes.markOpen") : t("components.planlama.planningNodes.markDone")}
           onClick={(e) => { e.stopPropagation(); d.onPatch(it.item_key, { status: done ? "open" : "done" }) }}
           className={cn("nodrag mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border",
                         done ? "border-emerald-600 bg-emerald-600 text-white" : "border-slate-400 bg-white/70")}>
           {done && <Check className="h-3 w-3" />}
         </button>
-        <InlineText value={it.title} placeholder="Başlıksız" disabled={d.readOnly}
+        <InlineText value={it.title} placeholder={t("components.planlama.planningNodes.untitled")} disabled={d.readOnly}
           className={cn("nodrag flex-1 text-[13px] leading-snug font-medium text-slate-800", done && "line-through")}
           onCommit={(v) => d.onPatch(it.item_key, { title: v })} autoEdit={d.autoEdit} onAutoEditDone={d.onAutoEditDone} />
       </div>
@@ -209,13 +213,13 @@ export const CardNode = memo(function CardNode({ data, selected }: NodeProps) {
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           )}
-          <IconBtn title="Ayrıntılar" onClick={() => d.onOpenDetail(it)}>
+          <IconBtn title={t("components.planlama.planningNodes.details")} onClick={() => d.onOpenDetail(it)}>
             <SlidersHorizontal className="h-3.5 w-3.5" />
           </IconBtn>
-          <IconBtn title="Renk" onClick={() => d.setPaletteFor(d.paletteFor === it.item_key ? null : it.item_key)}>
+          <IconBtn title={t("components.planlama.planningNodes.color")} onClick={() => d.setPaletteFor(d.paletteFor === it.item_key ? null : it.item_key)}>
             <Palette className="h-3.5 w-3.5" />
           </IconBtn>
-          <IconBtn title="Sil" danger onClick={() => d.onRemove(it.item_key)}>
+          <IconBtn title={t("components.planlama.planningNodes.delete")} danger onClick={() => d.onRemove(it.item_key)}>
             <Trash2 className="h-3.5 w-3.5" />
           </IconBtn>
         </div>
@@ -226,6 +230,7 @@ export const CardNode = memo(function CardNode({ data, selected }: NodeProps) {
 }, nodeDataEsit)
 
 export const NoteNode = memo(function NoteNode({ data, selected }: NodeProps) {
+  const { t } = useI18n()
   const d = data as NodeData
   const it = d.item
   return (
@@ -236,15 +241,15 @@ export const NoteNode = memo(function NoteNode({ data, selected }: NodeProps) {
         lineClassName="!border-primary/40" handleClassName="!h-2 !w-2 !border-primary !bg-white" />
       <Handles locked={d.locked} />
       {d.locked && <LockBadge />}
-      <InlineText value={it.text} placeholder="Not…" multiline disabled={d.readOnly}
+      <InlineText value={it.text} placeholder={t("components.planlama.planningNodes.notePlaceholder")} multiline disabled={d.readOnly}
         className="nodrag h-[calc(100%-1.5rem)] overflow-hidden text-[13px] text-slate-700"
         onCommit={(v) => d.onPatch(it.item_key, { text: v })} autoEdit={d.autoEdit} onAutoEditDone={d.onAutoEditDone} />
       {!d.readOnly && (
         <div className="absolute right-1 bottom-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-          <IconBtn title="Renk" onClick={() => d.setPaletteFor(d.paletteFor === it.item_key ? null : it.item_key)}>
+          <IconBtn title={t("components.planlama.planningNodes.color")} onClick={() => d.setPaletteFor(d.paletteFor === it.item_key ? null : it.item_key)}>
             <Palette className="h-3.5 w-3.5" />
           </IconBtn>
-          <IconBtn title="Sil" danger onClick={() => d.onRemove(it.item_key)}>
+          <IconBtn title={t("components.planlama.planningNodes.delete")} danger onClick={() => d.onRemove(it.item_key)}>
             <Trash2 className="h-3.5 w-3.5" />
           </IconBtn>
         </div>
@@ -255,6 +260,7 @@ export const NoteNode = memo(function NoteNode({ data, selected }: NodeProps) {
 }, nodeDataEsit)
 
 export const RegionNode = memo(function RegionNode({ data, selected }: NodeProps) {
+  const { t } = useI18n()
   const d = data as NodeData
   const it = d.item
   return (
@@ -266,18 +272,18 @@ export const RegionNode = memo(function RegionNode({ data, selected }: NodeProps
       <Handles locked={d.locked} />
       {d.locked && <LockBadge />}
       <div className="flex items-center gap-1 px-2 py-1">
-        <InlineText value={it.title} placeholder="Bölge" disabled={d.readOnly}
+        <InlineText value={it.title} placeholder={t("components.planlama.planningNodes.regionPlaceholder")} disabled={d.readOnly}
           className="nodrag flex-1 text-xs font-semibold text-slate-600"
           onCommit={(v) => d.onPatch(it.item_key, { title: v })} autoEdit={d.autoEdit} onAutoEditDone={d.onAutoEditDone} />
         {!d.readOnly && (
           <>
-            {/* Renk düğmesi kart ve notta vardı, bölgede YOKTU — bölgenin rengini
-                değiştirmenin tek yolu çoklu seçim çubuğuydu. */}
-            <IconBtn title="Renk"
+            {/* The color button existed on cards and notes but NOT on regions — the
+                only way to change a region's color used to be the multi-select bar. */}
+            <IconBtn title={t("components.planlama.planningNodes.color")}
               onClick={() => d.setPaletteFor(d.paletteFor === it.item_key ? null : it.item_key)}>
               <Palette className="h-3.5 w-3.5" />
             </IconBtn>
-            <IconBtn title="Bölgeyi sil" danger onClick={() => d.onRemove(it.item_key)}>
+            <IconBtn title={t("components.planlama.planningNodes.deleteRegion")} danger onClick={() => d.onRemove(it.item_key)}>
               <Trash2 className="h-3.5 w-3.5" />
             </IconBtn>
           </>
@@ -288,13 +294,15 @@ export const RegionNode = memo(function RegionNode({ data, selected }: NodeProps
   )
 }, nodeDataEsit)
 
-/** Panoya yapıştırılan/sürüklenen görsel.
+/** Image pasted/dragged onto the board.
  *
- *  Dosya sunucuda (`planning_images`), öğe ona `extra.image` ile işaret eder.
- *  `extra.image` henüz yoksa yükleme sürüyordur — öğe hemen çizilir ki kullanıcı
- *  nereye düştüğünü görsün, görsel gelince yerini alır (iyimser yerleştirme).
- *  Boyutlandırma `keepAspectRatio`: fotoğrafın oranını bozmak istenmiyor. */
+ *  The file lives on the server (`planning_images`); the item points to it via
+ *  `extra.image`. If `extra.image` doesn't exist yet, the upload is still in
+ *  progress — the item is rendered immediately so the user can see where it landed,
+ *  and the image takes its place once it arrives (optimistic placement).
+ *  Resizing uses `keepAspectRatio`: we don't want to distort the photo's proportions. */
 export const ImageNode = memo(function ImageNode({ data, selected }: NodeProps) {
+  const { t } = useI18n()
   const d = data as NodeData
   const it = d.item
   const img = imageOf(it)
@@ -309,21 +317,21 @@ export const ImageNode = memo(function ImageNode({ data, selected }: NodeProps) 
       {d.locked && <LockBadge />}
 
       {img ? (
-        <img src={planningImageUrl(d.boardKey, img.name)} alt={it.title || "Pano görseli"}
+        <img src={planningImageUrl(d.boardKey, img.name)} alt={it.title || t("components.planlama.planningNodes.boardImageAlt")}
           draggable={false}
           className="h-full w-full object-contain select-none" />
       ) : (
         <div className="flex h-full w-full flex-col items-center justify-center gap-1.5 bg-muted/40 text-muted-foreground">
           {failed ? <ImageOff className="h-5 w-5" /> : <Loader2 className="h-5 w-5 animate-spin" />}
-          <span className="text-[11px]">{failed ? "Yüklenemedi" : "Yükleniyor…"}</span>
+          <span className="text-[11px]">{failed ? t("components.planlama.planningNodes.uploadFailed") : t("components.planlama.planningNodes.uploading")}</span>
         </div>
       )}
 
-      {/* Başlık yalnız doluysa veya hover'da yer kaplar — görselin önünü kesmesin. */}
+      {/* The title only takes up space when filled or on hover — it shouldn't obscure the image. */}
       {(it.title || !d.readOnly) && (
         <div className={cn("absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent px-1.5 pt-4 pb-1",
                            !it.title && "opacity-0 transition-opacity group-hover:opacity-100")}>
-          <InlineText value={it.title} placeholder="Başlık…" disabled={d.readOnly}
+          <InlineText value={it.title} placeholder={t("components.planlama.planningNodes.titlePlaceholder")} disabled={d.readOnly}
             className="nodrag text-[11px] font-medium text-white drop-shadow"
             onCommit={(v) => d.onPatch(it.item_key, { title: v })} />
         </div>
@@ -332,12 +340,12 @@ export const ImageNode = memo(function ImageNode({ data, selected }: NodeProps) 
       {!d.readOnly && (
         <div className="absolute top-1 right-1 flex items-center gap-1 rounded bg-background/80 px-1 opacity-0 transition-opacity group-hover:opacity-100">
           {img && (
-            <IconBtn title="Yeni sekmede aç"
+            <IconBtn title={t("components.planlama.planningNodes.openInNewTab")}
               onClick={() => window.open(planningImageUrl(d.boardKey, img.name), "_blank", "noopener")}>
               <ExternalLink className="h-3.5 w-3.5" />
             </IconBtn>
           )}
-          <IconBtn title="Sil" danger onClick={() => d.onRemove(it.item_key)}>
+          <IconBtn title={t("components.planlama.planningNodes.delete")} danger onClick={() => d.onRemove(it.item_key)}>
             <Trash2 className="h-3.5 w-3.5" />
           </IconBtn>
         </div>

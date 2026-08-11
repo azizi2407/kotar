@@ -1,4 +1,4 @@
-"""/api/clients CRUD + rol/yetki testleri."""
+"""/api/clients CRUD + role/permission tests."""
 import pytest
 from conftest import CONTENT_CREATOR, DESIGNER, MANAGER, VIDEOGRAPHER, login_as
 from test_session_csrf import csrf_headers
@@ -34,7 +34,7 @@ def olustur(client, payload=None):
     return r.get_json()["client"]
 
 
-# --- Yetki ---
+# --- Permissions ---
 
 def test_liste_oturumsuz_401(client):
     assert client.get("/api/clients").status_code == 401
@@ -136,7 +136,7 @@ def test_guncelle_ic_koleksiyonlar_replace(client):
     d = r.get_json()["client"]
     assert [k["name"] for k in d["contacts"]] == ["Yeni Kişi"]
     assert d["team_assignments"] == {"designer": "5"}
-    # PATCH'te gönderilmeyenler korunur
+    # Fields not sent in the PATCH are preserved
     assert d["locations"][0]["name"] == "Merkez"
     assert d["contract"]["weekly_content_count"] == 4
 
@@ -165,11 +165,12 @@ def test_olmayan_id_404(client):
     assert client.get("/api/clients/9999").status_code == 404
 
 
-# --- Rol-farkındalıklı alan daraltması (2026-07-27) -------------------------
-# Üretim rolleri müşteri kaydını Marka Rehberi bağlamında okuyabiliyor; ticari ve
-# iletişim alanları onlara AİT DEĞİL. `_client_json()` bunları yanıta hiç koymaz.
+# --- Role-aware field narrowing (2026-07-27) -------------------------
+# Production roles can read the client record in the Brand Directory context;
+# commercial and contact fields are NOT theirs to see. `_client_json()` never puts
+# these in the response.
 
-# Yanıtta ASLA görünmemesi gereken anahtarlar (management dışı roller için).
+# Keys that must NEVER appear in the response (for non-management roles).
 GIZLI_DETAY = ("contract", "contacts", "locations", "notes",
                "special_days_token", "client_email")
 
@@ -184,7 +185,7 @@ def test_detay_uretim_rolu_ticari_ve_iletisim_alanlarini_GORMEZ(client, rol):
     d = r.get_json()["client"]
     for k in GIZLI_DETAY:
         assert k not in d, f"{rol['role']} rolüne {k} sızdı"
-    # Rehber için gereken alanlar YERİNDE kalmalı — daraltma fazla kesmemeli.
+    # Fields needed for the directory must stay IN PLACE — narrowing shouldn't cut too much.
     assert d["name"] == TAM_PAYLOAD["name"]
     assert d["sector"] == TAM_PAYLOAD["sector"]
     assert "google_drive_url" in d and "team_assignments" in d
@@ -207,7 +208,7 @@ def test_liste_uretim_rolu_client_email_GORMEZ(client):
     login_as(client, DESIGNER)
     rows = client.get("/api/clients").get_json()["clients"]
     assert rows and all("client_email" not in c for c in rows)
-    # Liste zaten sınırlı şema; `contract` orada hiç yoktu, öyle kalmalı.
+    # The list already has a limited schema; `contract` was never there, and that should stay so.
     assert all("contract" not in c for c in rows)
 
 

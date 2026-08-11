@@ -1,7 +1,7 @@
-"""Haftalık parti görsel üretimi (2026-08-10) — şema, süzgeç, plan, prompt, API.
+"""Weekly batch image generation (2026-08-10) — schema, filter, plan, prompt, API.
 
-Gerçek Codex CLI hiçbir testte çağrılmaz; parti yalnız ImageJob + Job satırı üretir,
-üretimin kendisi mevcut `codex_image_handler`'ın işidir (tests/test_codex_image.py).
+The real Codex CLI is never called in any test; the batch only produces ImageJob + Job
+rows, the actual generation is the existing `codex_image_handler`'s job (tests/test_codex_image.py).
 """
 from conftest import MANAGER, login_as
 from extensions import db
@@ -10,7 +10,7 @@ from test_session_csrf import csrf_headers
 
 
 def _musteri(onayli=True, otomatik=True):
-    """KVKK onaylı + otomatik görsel açık test müşterisi."""
+    """Test client with data-consent approved + auto-image enabled."""
     c = Client(name="Parti Kafe", sector="Yeme-İçme", status="active",
                brand_profile={"ai_image_consent": onayli,
                               "auto_image_enabled": otomatik,
@@ -39,7 +39,7 @@ def test_imagejob_parti_kolonlari(client):
 
 
 def test_tekil_uretimde_parti_kolonlari_bos_kalir(client):
-    """Mevcut tekil yol bu kolonları doldurmaz — nullable olmaları şart."""
+    """The existing single-generation path doesn't fill these columns — they must be nullable."""
     from models_imagegen import ImageJob
     c = _musteri()
     j = ImageJob(client_id=c.id, requested_by="u1", provider="codex_exec",
@@ -49,7 +49,7 @@ def test_tekil_uretimde_parti_kolonlari_bos_kalir(client):
     assert j.week_iso is None and j.brief_idea_index is None and j.variant is None
 
 
-# --- Fikir süzgeci ve parti planı (imagegen_batch) ---
+# --- Idea filter and batch plan (imagegen_batch) ---
 
 def _brief(client_id, week_iso="2026-W35", ideas=None, status="approved"):
     from models_sharing import WeeklyBrief
@@ -61,7 +61,7 @@ def _brief(client_id, week_iso="2026-W35", ideas=None, status="approved"):
 
 
 def _ornek_ideas():
-    """Canlı brief yapısının (AF HUKUK 2026-W32) sadeleştirilmiş kopyası."""
+    """A simplified copy of the live brief structure (AF HUKUK 2026-W32)."""
     return [
         {"başlık": "Erken Ödeme İndirimi Hakkınız Var", "içerik": "TKHK madde 22 gereği…",
          "format": "editorial", "çekim_tipi": "Tipografi ağırlıklı tek kare tasarım",
@@ -85,7 +85,7 @@ def test_reel_fikri_gorsele_uygun_degil():
     assert imagegen_batch.gorsele_uygun({"format": "editorial"}) is True
     assert imagegen_batch.gorsele_uygun({"format": "reel"}) is False
     assert imagegen_batch.gorsele_uygun({"format": "carousel"}) is True
-    # çekim_tipi'nde geçse de yakalanır (format alanı boş gelebiliyor)
+    # also caught when it appears in çekim_tipi (the format field can come in empty)
     assert imagegen_batch.gorsele_uygun(
         {"format": "", "çekim_tipi": "30 sn REEL çekimi"}) is False
     assert imagegen_batch.gorsele_uygun(
@@ -113,8 +113,8 @@ def test_parti_plani_bos_ideas_ile_patlamaz(client):
 
 
 def test_parti_plani_bozuk_ideas_ile_patlamaz(client):
-    """`ideas` dizi değil ya da elemanları dict değilse parti sessizce boş döner —
-    500 vermez (brief AI üretimi, şekli bozulabilir)."""
+    """If `ideas` isn't an array, or its elements aren't dicts, the batch silently
+    returns empty — it doesn't 500 (the brief is AI-generated, its shape can be malformed)."""
     import imagegen_batch
     c = _musteri()
     b = _brief(c.id, ideas={"bozuk": "yapı"})
@@ -145,10 +145,10 @@ def test_mevcut_isler_idea_ve_varyanta_gore_esler(client):
     assert (0, "clean") not in esleme
 
 
-# --- Tekil prompt kurucusu (parti yolu artık JSON kullanıyor) ---
+# --- Single-generation prompt builder (batch path now uses JSON) ---
 
 def test_tekil_prompt_kurucusu_bozulmadi(client):
-    """Ortak `_marka_baglami` çıkarımı mevcut `codex_image_instruction`'ı bozmamalı."""
+    """The shared `_marka_baglami` extraction must not break the existing `codex_image_instruction`."""
     import ai_context
     c = _musteri()
     p = ai_context.codex_image_instruction(c, None, "serbest istem", "square_1_1")
@@ -156,7 +156,7 @@ def test_tekil_prompt_kurucusu_bozulmadi(client):
     assert "Parti Kafe" in p and "1024x1024" in p and "serbest istem" in p
 
 
-# --- Parti uygulama (satır + job açma) ---
+# --- Batch application (creating rows + jobs) ---
 
 def test_uygulanacaklar_tamami_yeni_partide(client):
     import imagegen_batch
@@ -164,14 +164,14 @@ def test_uygulanacaklar_tamami_yeni_partide(client):
     b = _brief(c.id)
     plan = imagegen_batch.parti_plani(b)
     isler = imagegen_batch.uygulanacaklar(plan, {})
-    # 2 uygun fikir × 2 varyant
+    # 2 eligible ideas × 2 variants
     assert len(isler) == 4
     assert {(i["index"], i["variant"]) for i in isler} == {
         (0, "with_text"), (0, "clean"), (2, "with_text"), (2, "clean")}
 
 
 def test_uygulanacaklar_completed_olani_atlar_failed_olani_alir(client):
-    """Idempotency: ikinci tetikte tamamlananlar atlanır, başarısızlar yeniden üretilir."""
+    """Idempotency: on the second trigger, completed jobs are skipped, failed ones are regenerated."""
     import imagegen_batch
     from models_imagegen import ImageJob
     c = _musteri()
@@ -186,8 +186,8 @@ def test_uygulanacaklar_completed_olani_atlar_failed_olani_alir(client):
     mevcut = imagegen_batch.mevcut_isler(c.id, "2026-W35")
     isler = imagegen_batch.uygulanacaklar(plan, mevcut)
     anahtarlar = {(i["index"], i["variant"]) for i in isler}
-    assert (0, "with_text") not in anahtarlar      # completed → atlandı
-    assert (0, "clean") in anahtarlar              # failed → yeniden
+    assert (0, "with_text") not in anahtarlar      # completed → skipped
+    assert (0, "clean") in anahtarlar              # failed → regenerated
     assert len(isler) == 3
 
 
@@ -207,12 +207,12 @@ def test_parti_uygula_satir_ve_job_acar(client):
     assert ij.week_iso == "2026-W35"
     assert ij.brief_id == b.id
     assert ij.aspect_ratio == "social_post_4_5"
-    assert ij.resolved_prompt is None              # prompt'u handler kurar
+    assert ij.resolved_prompt is None              # handler builds the prompt
     assert "Erken Ödeme" in ij.original_user_prompt
 
 
 def test_parti_uygula_failed_satiri_yeniden_kullanir(client):
-    """Aynı (fikir, varyant) için ikinci ImageJob açılmaz — var olan satır sıfırlanır."""
+    """A second ImageJob is not opened for the same (idea, variant) — the existing row is reset."""
     import imagegen_batch
     from models_imagegen import ImageJob
     c = _musteri()
@@ -234,9 +234,9 @@ def test_parti_uygula_failed_satiri_yeniden_kullanir(client):
 
 
 def test_handler_parti_isinde_json_promptu_kurar(client, tmp_path, monkeypatch):
-    """Parti işinde prompt JSON tarifinden kurulur, serbest istemden DEĞİL.
+    """In a batch job, the prompt is built from the JSON spec, NOT from a free-form prompt.
 
-    `ai_claude.run` MOCK'LANIR — testler gerçek claude CLI'ını çağırmaz."""
+    `ai_claude.run` is MOCKED — tests do not call the real claude CLI."""
     import ai_claude
     import ai_worker
     import jobqueue
@@ -263,10 +263,10 @@ def test_handler_parti_isinde_json_promptu_kurar(client, tmp_path, monkeypatch):
 
 
 def test_handler_brief_kuculuse_anlasilir_hata(client, tmp_path, monkeypatch):
-    """Brief yeniden üretilip fikir sayısı azalırsa iş anlaşılır hatayla kapanır.
+    """If the brief is regenerated and the idea count shrinks, the job closes with a clear error.
 
-    Index kontrolü çeviriden ÖNCE olduğu için claude'a hiç ulaşılmaz; mock yine de
-    konur ki kontrol sırası bozulursa test gerçek CLI'ı çağırmasın."""
+    Since the index check happens BEFORE translation, claude is never reached; the mock
+    is still set up so that if the check order ever breaks, the test won't call the real CLI."""
     import ai_claude
     import ai_worker
     import jobqueue
@@ -274,7 +274,7 @@ def test_handler_brief_kuculuse_anlasilir_hata(client, tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_IMAGE_DIR", str(tmp_path / "depo"))
     monkeypatch.setenv("CODEX_JOB_DIR", str(tmp_path / "isler"))
     c = _musteri()
-    b = _brief(c.id, ideas=[_ornek_ideas()[0]])          # tek fikir
+    b = _brief(c.id, ideas=[_ornek_ideas()[0]])          # single idea
     monkeypatch.setattr(ai_claude, "run", lambda *a, **k: '{"subject": "x"}')
     ij = ImageJob(client_id=c.id, brief_id=b.id, requested_by="u1", provider="fake",
                   original_user_prompt="x", aspect_ratio="social_post_4_5",
@@ -289,7 +289,7 @@ def test_handler_brief_kuculuse_anlasilir_hata(client, tmp_path, monkeypatch):
     assert ij.error_code == "internal"
 
 
-# --- API uçları (/api/imagegen/batch, /weeks, /client-settings) ---
+# --- API endpoints (/api/imagegen/batch, /weeks, /client-settings) ---
 
 def test_batch_ucu_parti_acar(client):
     from models import Job
@@ -303,7 +303,7 @@ def test_batch_ucu_parti_acar(client):
     assert r.status_code == 202
     d = r.get_json()
     assert len(d["created"]) == 4
-    assert len(d["skipped"]) == 1                  # reel fikri
+    assert len(d["skipped"]) == 1                  # the reel idea
     assert ImageJob.query.count() == 4
     assert Job.query.filter_by(type="codex_image").count() == 4
 
@@ -323,7 +323,7 @@ def test_batch_ikinci_tetikte_tamamlananlari_atlar(client):
     d = r.get_json()
     assert d["created"] == []
     assert len(d["already"]) == 4
-    assert ImageJob.query.count() == 4              # ikizlenmedi
+    assert ImageJob.query.count() == 4              # not duplicated
 
 
 def test_batch_onaysiz_brief_ile_404(client):
@@ -354,27 +354,27 @@ def test_batch_kvkk_onayi_yoksa_409(client):
 
 
 def test_batch_limit_asiminda_hic_baslamaz(client, monkeypatch):
-    """Yarım parti üretmek en kötü sonuç — ya hepsi ya hiçbiri."""
+    """Generating half a batch is the worst outcome — it's all or nothing."""
     import imagegen_api
     from models_imagegen import ImageJob
     login_as(client, MANAGER)
     c = _musteri()
     _brief(c.id)
-    monkeypatch.setattr(imagegen_api, "DAILY_CLIENT_LIMIT", 3)   # parti 4 iş isteyecek
+    monkeypatch.setattr(imagegen_api, "DAILY_CLIENT_LIMIT", 3)   # batch will request 4 jobs
     r = client.post("/api/imagegen/batch", json={"client_id": c.id, "week_iso": "2026-W35"},
                     headers=csrf_headers(client))
     assert r.status_code == 429
-    assert ImageJob.query.count() == 0              # HİÇBİR satır açılmadı
+    assert ImageJob.query.count() == 0              # NO row was created
 
 
 def test_batch_gorsellestirilecek_fikir_yoksa_409(client):
     login_as(client, MANAGER)
     c = _musteri()
-    _brief(c.id, ideas=[_ornek_ideas()[1]])         # yalnız reel
+    _brief(c.id, ideas=[_ornek_ideas()[1]])         # reel only
     r = client.post("/api/imagegen/batch", json={"client_id": c.id, "week_iso": "2026-W35"},
                     headers=csrf_headers(client))
     assert r.status_code == 409
-    assert "fikir" in r.get_json()["error"].lower()
+    assert "idea" in r.get_json()["error"].lower()
 
 
 def test_batch_listesi_fikre_gore_gruplar(client):
@@ -386,7 +386,7 @@ def test_batch_listesi_fikre_gore_gruplar(client):
     r = client.get(f"/api/imagegen/batch?client_id={c.id}&week_iso=2026-W35")
     assert r.status_code == 200
     d = r.get_json()
-    assert len(d["groups"]) == 2                    # 2 uygun fikir
+    assert len(d["groups"]) == 2                    # 2 eligible ideas
     g = d["groups"][0]
     assert g["index"] == 0 and "Erken Ödeme" in g["baslik"]
     assert set(g["jobs"]) == {"with_text", "clean"}
@@ -401,12 +401,12 @@ def test_weeks_ucu_onayli_briefleri_doner(client):
     _brief(c.id, week_iso="2026-W37", status="draft")
     r = client.get(f"/api/imagegen/weeks?client_id={c.id}")
     weeks = [w["week_iso"] for w in r.get_json()["weeks"]]
-    assert weeks == ["2026-W36", "2026-W35"]        # en yeni önce, taslak yok
+    assert weeks == ["2026-W36", "2026-W35"]        # newest first, no drafts
 
 
 def test_client_settings_okuma_ucu_durumu_doner(client):
-    """Sayfa yenilenince anahtarın gerçek durumu okunabilmeli — yoksa panel kapalı
-    gösterir ama DB'de açıktır ve kullanıcı düğmeyi neden kullanamadığını anlamaz."""
+    """When the page is refreshed, the toggle's real state must be readable — otherwise
+    the panel shows it off while it's actually on in the DB, and the user can't tell why the button doesn't work."""
     login_as(client, MANAGER)
     c = _musteri(otomatik=True)
     r = client.get(f"/api/imagegen/client-settings?client_id={c.id}")
@@ -425,7 +425,7 @@ def test_client_settings_anahtari_yazar(client):
     assert r.status_code == 200
     db.session.refresh(c)
     assert c.brand_profile["auto_image_enabled"] is True
-    # diğer marka alanları korundu (merge, üzerine yazma DEĞİL)
+    # other brand fields were preserved (merge, NOT overwrite)
     assert c.brand_profile["brand_voice"] == "sıcak, samimi"
 
 

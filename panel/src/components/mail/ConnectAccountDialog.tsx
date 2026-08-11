@@ -1,12 +1,13 @@
-// Posta kutusu bağlama — self-servis. Kullanıcı yalnız e-posta + şifre girer;
-// host/port varsayılan mail sunucusuyla ön-dolu ("Gelişmiş" altında düzenlenebilir).
+// Mailbox connection — self-service. The user only enters email + password;
+// host/port are pre-filled with the default mail server (editable under "Advanced").
 //
-// İKİ MOD (2026-07-31): `account` verilirse **şifre güncelleme**, verilmezse yeni
-// hesap bağlama. Öncesinde tek mod vardı ve sağlık şeridindeki "Şifreyi güncelle"
-// düğmesi de bu diyaloğu açıyordu → var olan hesap için `createAccount` (POST)
-// çağrılıyor, `uq_mail_owner_email` ihlaliyle **500** dönüyordu. Yani düğme
-// yapısal olarak çalışamıyordu; doğru yol (`PATCH /accounts/:id` + `password`)
-// backend'de ve `lib/mail.ts`'te vardı ama hiçbir yerden çağrılmıyordu.
+// TWO MODES (2026-07-31): if `account` is given, **update password**; otherwise
+// connect a new account. Previously there was a single mode and the "Update
+// password" button in the health strip also opened this dialog → `createAccount`
+// (POST) got called for an existing account, returning a **500** from the
+// `uq_mail_owner_email` violation. So the button was structurally broken; the
+// correct path (`PATCH /accounts/:id` + `password`) existed in the backend and
+// `lib/mail.ts` but was never called from anywhere.
 import { useState } from "react"
 import { toast } from "sonner"
 
@@ -15,6 +16,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
+import { useI18n } from "@/lib/i18n"
 import { createAccount, updateAccount, type MailAccount } from "@/lib/mail"
 
 const DEFAULTS = {
@@ -35,9 +37,10 @@ export function ConnectAccountDialog({
   onClose: () => void
   onConnected: () => void
   isSuperadmin: boolean
-  /** Verilirse diyalog "şifre güncelle" modunda açılır (yeni hesap OLUŞTURMAZ). */
+  /** If given, the dialog opens in "update password" mode (does NOT create a new account). */
   account?: MailAccount | null
 }) {
+  const { t } = useI18n()
   const editing = !!account
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
@@ -50,20 +53,20 @@ export function ConnectAccountDialog({
   async function submit() {
     if (editing) {
       if (!password) {
-        toast.error("Yeni şifreyi girin")
+        toast.error(t("components.mail.connectAccountDialog.enterNewPassword"))
         return
       }
       setBusy(true)
       try {
-        // Backend şifreyi kaydetmeden ÖNCE IMAP ile doğruluyor → buraya düşen
-        // hata gerçekten yanlış şifre/erişim demek, sessiz bozuk kayıt oluşmaz.
+        // The backend verifies via IMAP BEFORE saving the password → an error
+        // landing here really means a wrong password/access, no silent broken record.
         await updateAccount(account!.id, { password })
-        toast.success("Şifre güncellendi — bağlantı doğrulandı")
+        toast.success(t("components.mail.connectAccountDialog.passwordUpdated"))
         setPassword("")
         onConnected()
         onClose()
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Şifre güncellenemedi")
+        toast.error(e instanceof Error ? e.message : t("components.mail.connectAccountDialog.passwordUpdateFailed"))
       } finally {
         setBusy(false)
       }
@@ -71,7 +74,7 @@ export function ConnectAccountDialog({
     }
 
     if (!email || !password) {
-      toast.error("E-posta ve şifre zorunlu")
+      toast.error(t("components.mail.connectAccountDialog.emailPasswordRequired"))
       return
     }
     setBusy(true)
@@ -87,14 +90,14 @@ export function ConnectAccountDialog({
         is_shared: isSuperadmin ? isShared : false,
         poll_enabled: isSuperadmin ? pollEnabled : false,
       })
-      toast.success("Posta kutusu bağlandı")
+      toast.success(t("components.mail.connectAccountDialog.connected"))
       onConnected()
       onClose()
     } catch (e) {
-      // Backend "zaten bağlı" gibi anlaşılır hatalar döndürüyor; kendi tahminimizi
-      // onun üstüne yazmıyoruz (eski metin parola doğruyken bile şüpheyi
-      // parolaya yönlendiriyordu).
-      toast.error(e instanceof Error ? e.message : "Bağlanamadı (e-posta/şifre?)")
+      // The backend returns understandable errors like "already connected"; we
+      // don't overwrite it with our own guess (the old text pointed suspicion at
+      // the password even when it was correct).
+      toast.error(e instanceof Error ? e.message : t("components.mail.connectAccountDialog.connectFailed"))
     } finally {
       setBusy(false)
     }
@@ -104,23 +107,25 @@ export function ConnectAccountDialog({
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{editing ? "Şifreyi güncelle" : "Posta kutunu bağla"}</DialogTitle>
+          <DialogTitle>
+            {editing ? t("components.mail.connectAccountDialog.updatePasswordTitle") : t("components.mail.connectAccountDialog.connectTitle")}
+          </DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1">
-            <Label>E-posta</Label>
-            {/* Güncelleme modunda hesap sabit — e-postayı değiştirmek "başka bir
-                hesap" demek olurdu, o da bağlama akışının işi. */}
+            <Label>{t("components.mail.connectAccountDialog.email")}</Label>
+            {/* The account is fixed in update mode — changing the email would mean
+                "a different account", which is the job of the connect flow. */}
             <Input
               type="email"
-              placeholder="ad@sirket.com"
+              placeholder="name@company.com"
               value={editing ? account!.email : email}
               disabled={editing}
               onChange={(e) => setEmail(e.target.value)}
             />
           </div>
           <div className="space-y-1">
-            <Label>{editing ? "Yeni şifre" : "Şifre"}</Label>
+            <Label>{editing ? t("components.mail.connectAccountDialog.newPassword") : t("components.mail.connectAccountDialog.password")}</Label>
             <Input
               type="password"
               value={password}
@@ -130,19 +135,18 @@ export function ConnectAccountDialog({
 
           {editing && (
             <p className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
-              Posta sunucusunda şifreni değiştirdiysen buraya yenisini gir.
-              Kaydetmeden önce sunucuya bağlanıp doğrulanır.
+              {t("components.mail.connectAccountDialog.updatePasswordHint")}
             </p>
           )}
 
           {!editing && isSuperadmin && (
             <div className="space-y-2 rounded-md border p-3">
               <div className="flex items-center justify-between">
-                <Label className="text-sm">Ortak kutu (info@ gibi)</Label>
+                <Label className="text-sm">{t("components.mail.connectAccountDialog.sharedMailbox")}</Label>
                 <Switch checked={isShared} onCheckedChange={setIsShared} />
               </div>
               <div className="flex items-center justify-between">
-                <Label className="text-sm">Arka plan senkron (poller)</Label>
+                <Label className="text-sm">{t("components.mail.connectAccountDialog.backgroundSync")}</Label>
                 <Switch checked={pollEnabled} onCheckedChange={setPollEnabled} />
               </div>
             </div>
@@ -154,20 +158,20 @@ export function ConnectAccountDialog({
               className="text-xs text-muted-foreground underline"
               onClick={() => setAdvanced((v) => !v)}
             >
-              {advanced ? "Gelişmiş ayarları gizle" : "Gelişmiş (sunucu/port)"}
+              {advanced ? t("components.mail.connectAccountDialog.hideAdvanced") : t("components.mail.connectAccountDialog.showAdvanced")}
             </button>
           )}
           {!editing && advanced && (
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1">
-                <Label className="text-xs">IMAP sunucu</Label>
+                <Label className="text-xs">{t("components.mail.connectAccountDialog.imapServer")}</Label>
                 <Input
                   value={cfg.imap_host}
                   onChange={(e) => setCfg({ ...cfg, imap_host: e.target.value })}
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">IMAP port</Label>
+                <Label className="text-xs">{t("components.mail.connectAccountDialog.imapPort")}</Label>
                 <Input
                   type="number"
                   value={cfg.imap_port}
@@ -175,14 +179,14 @@ export function ConnectAccountDialog({
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">SMTP sunucu</Label>
+                <Label className="text-xs">{t("components.mail.connectAccountDialog.smtpServer")}</Label>
                 <Input
                   value={cfg.smtp_host}
                   onChange={(e) => setCfg({ ...cfg, smtp_host: e.target.value })}
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">SMTP port</Label>
+                <Label className="text-xs">{t("components.mail.connectAccountDialog.smtpPort")}</Label>
                 <Input
                   type="number"
                   value={cfg.smtp_port}
@@ -194,11 +198,11 @@ export function ConnectAccountDialog({
 
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="ghost" onClick={onClose} disabled={busy}>
-              İptal
+              {t("components.mail.connectAccountDialog.cancel")}
             </Button>
             <Button onClick={submit} disabled={busy}>
-              {busy ? (editing ? "Doğrulanıyor…" : "Bağlanıyor…")
-                    : (editing ? "Kaydet ve doğrula" : "Bağlan")}
+              {busy ? (editing ? t("components.mail.connectAccountDialog.verifying") : t("components.mail.connectAccountDialog.connecting"))
+                    : (editing ? t("components.mail.connectAccountDialog.saveAndVerify") : t("components.mail.connectAccountDialog.connect"))}
             </Button>
           </div>
         </div>

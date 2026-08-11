@@ -1,4 +1,4 @@
-"""/api/ads — Reklam Takibi: yetki, CRUD, doğrulama, özet, soft-delete, filtreler."""
+"""/api/ads — Ad Tracking: permissions, CRUD, validation, summary, soft-delete, filters."""
 from conftest import DESIGNER, MANAGER, login_as
 from test_session_csrf import csrf_headers
 
@@ -17,7 +17,7 @@ def _create(client, cid, **kw):
     return client.post('/api/ads', json=body, headers=csrf_headers(client))
 
 
-# --- yetki ---------------------------------------------------------------
+# --- permissions ---------------------------------------------------------
 def test_designer_cannot_see(client):
     _client_id(client)
     login_as(client, DESIGNER)
@@ -70,7 +70,7 @@ def test_soft_delete_hides_but_keeps_row(client):
     assert client.get('/api/ads').get_json()['campaigns'] == []
     from extensions import db
     from models import AdCampaign
-    assert db.session.get(AdCampaign, camp_id).deleted_at is not None  # satır duruyor
+    assert db.session.get(AdCampaign, camp_id).deleted_at is not None  # row still exists
 
 
 def test_delete_missing_404(client):
@@ -79,11 +79,11 @@ def test_delete_missing_404(client):
                          headers=csrf_headers(client)).status_code == 404
 
 
-# --- doğrulama -----------------------------------------------------------
+# --- validation -----------------------------------------------------------
 def test_end_before_start_rejected(client):
     cid = _client_id(client)
     r = _create(client, cid, start_date='2026-07-10', end_date='2026-07-01')
-    assert r.status_code == 400 and 'bitiş' in r.get_json()['error']
+    assert r.status_code == 400 and 'end date' in r.get_json()['error']
 
 
 def test_negative_amount_rejected(client):
@@ -118,7 +118,7 @@ def test_end_date_optional(client):
     assert r.status_code == 201 and r.get_json()['campaign']['end_date'] is None
 
 
-# --- özet + filtreler ----------------------------------------------------
+# --- summary + filters ----------------------------------------------------
 def test_summary_by_client(client):
     a = _client_id(client, 'A Müşteri')
     b = _client_id(client, 'B Müşteri')
@@ -128,7 +128,7 @@ def test_summary_by_client(client):
 
     s = client.get('/api/ads').get_json()['summary']
     assert s['total_amount'] == 750.0 and s['count'] == 3
-    # en çok harcayan başta
+    # biggest spender first
     assert [e['client_name'] for e in s['by_client']] == ['B Müşteri', 'A Müşteri']
     a_row = next(e for e in s['by_client'] if e['client_name'] == 'A Müşteri')
     assert a_row['total'] == 350.0 and a_row['count'] == 2
@@ -152,9 +152,9 @@ def test_status_filter(client):
 
 def test_date_range_overlap_filter(client):
     cid = _client_id(client)
-    _create(client, cid, start_date='2026-06-01', end_date='2026-06-10')  # aralık dışı
-    _create(client, cid, start_date='2026-07-05', end_date='2026-07-20')  # örtüşür
-    _create(client, cid, start_date='2026-07-01', end_date=None)          # devam ediyor → örtüşür
+    _create(client, cid, start_date='2026-06-01', end_date='2026-06-10')  # outside the range
+    _create(client, cid, start_date='2026-07-05', end_date='2026-07-20')  # overlaps
+    _create(client, cid, start_date='2026-07-01', end_date=None)          # ongoing → overlaps
     got = client.get('/api/ads?from=2026-07-10&to=2026-07-31').get_json()['campaigns']
     assert len(got) == 2
 

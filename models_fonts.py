@@ -1,28 +1,29 @@
-"""Font havuzu (2026-08-05) — merkezî font deposu + müşteri ataması.
+"""Font pool (2026-08-05) — central font store + client assignment.
 
-**Neden `client_assets`'e `kind='font'` eklenmedi:** o tablo `client_id` NOT NULL
-ve tek müşteriye bağlı; burada model N:N (Montserrat beş müşteride kullanılıyor,
-dosya bir kez duruyor) ve müşterisiz font da geçerli (havuzda deneme fontu).
-Ayrıca marka görselleri Drive'da yaşıyor, fontlar **sunucuda** (`data/fonts/`):
-önizleme her fontu tarayıcıya indiriyor, Drive proxy'si sayfayı yavaşlatırdı.
+**Why `kind='font'` wasn't added to `client_assets`:** that table has
+`client_id` NOT NULL and is tied to a single client; here the model is N:N
+(Montserrat is used by five clients, the file sits once) and a font with no
+client is also valid (a trial font sitting in the pool). Also, brand images
+live on Drive, but fonts live **on the server** (`data/fonts/`): the preview
+downloads every font to the browser, and a Drive proxy would slow the page down.
 """
 from extensions import db
 from models import iso, utcnow
 
-# Tarayıcının @font-face ile oynatabildiği formatlar. Uzantı DEĞİL, dosya imzası
-# belirler (bkz. fonts.py `_format_of`) — bu dosyalar tarayıcıya inline servis
-# ediliyor, "uzantısı .ttf olan her şey" kabul edilemez.
+# Formats the browser can play via @font-face. Determined by the file
+# signature, NOT the extension (see fonts.py `_format_of`) — these files are
+# served inline to the browser, so "anything with a .ttf extension" can't be accepted.
 FONT_FORMATS = ('ttf', 'otf', 'woff', 'woff2')
 FONT_MIMES = {'ttf': 'font/ttf', 'otf': 'font/otf',
               'woff': 'font/woff', 'woff2': 'font/woff2'}
 
 
 class Font(db.Model):
-    """Havuzdaki tek font DOSYASI (aile değil): 'Montserrat Bold' bir satır,
-    'Montserrat Regular' ayrı satır. Panel aileye göre gruplar.
+    """A single font FILE in the pool (not a family): 'Montserrat Bold' is one
+    row, 'Montserrat Regular' is a separate row. The panel groups by family.
 
-    `sha256` içerik hash'i ve dosya adı: `data/fonts/<sha256>.<ext>`. Aynı dosya
-    ikinci kez yüklenirse diske ikinci kopya çıkmaz."""
+    `sha256` is the content hash and file name: `data/fonts/<sha256>.<ext>`. If
+    the same file is uploaded a second time, no second copy is written to disk."""
     __tablename__ = 'fonts'
     __table_args__ = (db.Index('ix_fonts_sha', 'sha256'),
                       db.Index('ix_fonts_family', 'family'))
@@ -39,9 +40,10 @@ class Font(db.Model):
     deleted_at = db.Column(db.DateTime(timezone=True))
 
     def to_dict(self, clients=None, uploader_name=None, can_delete=None):
-        # `can_delete` BACKEND'te hesaplanır (2026-08-06) — panel kuralı yeniden
-        # kurmaz. Kural değişince arayüz sessizce ayrışır ve düğme yalan söylerdi;
-        # video yüklemelerinde (`_build_rows`) aynı desen kullanılıyor.
+        # `can_delete` is computed in the BACKEND (2026-08-06) — the panel
+        # doesn't rebuild the rule. If the rule changes, the UI would silently
+        # drift and the button would lie; the same pattern is used for video
+        # uploads (`_build_rows`).
         return {'id': self.id, 'family': self.family, 'style': self.style,
                 'file_name': self.file_name, 'format': self.format,
                 'file_size': self.file_size, 'sha256': self.sha256,
@@ -52,8 +54,9 @@ class Font(db.Model):
 
 
 class FontClient(db.Model):
-    """Font ↔ müşteri ataması. Satırın VARLIĞI = atanmış; kaldırma satırı siler
-    (soft-delete yok — UNIQUE slotu işgal ederdi, `user_hidden_clients` deseni)."""
+    """Font ↔ client assignment. The row's EXISTENCE = assigned; removal
+    deletes the row (no soft-delete — it would occupy the UNIQUE slot, same
+    pattern as `user_hidden_clients`)."""
     __tablename__ = 'font_clients'
     __table_args__ = (db.UniqueConstraint('font_id', 'client_id', name='uq_font_client'),
                       db.Index('ix_font_clients_client', 'client_id'))

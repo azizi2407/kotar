@@ -1,4 +1,4 @@
-"""models_mail — to_dict güvenli projeksiyonu (secret sızmaz) + create_all."""
+"""models_mail — to_dict safe projection (secret does not leak) + create_all."""
 from models_mail import MailAccount, MailMessage
 
 
@@ -21,7 +21,7 @@ def test_message_to_dict_full_vs_list():
 
 
 def test_tables_created(client):
-    # autouse fixture create_all çalıştırır; tabloların insert edilebildiğini doğrula
+    # the autouse fixture runs create_all; verify the tables can accept inserts
     from extensions import db
     a = MailAccount(owner_sub='s', email='info@example.com', imap_host='h', imap_port=993,
                     imap_ssl=True, smtp_host='h', smtp_port=465, smtp_security='ssl',

@@ -1,12 +1,13 @@
-// Tasarımcı Atamaları — yönetim müşterileri tasarımcılara toplu atar. Her satırda
-// tasarımcı seçici (tek tek değiştir) + çoklu seçim → "seçilenleri şu tasarımcıya ata".
-// Yalnız 'designer' slot'una dokunur (diğer ekip atamaları korunur).
+// Designer Assignments — management bulk-assigns clients to designers. Each row has
+// a designer picker (change one at a time) + multi-select → "assign selected to this
+// designer". Only touches the 'designer' slot (other team assignments are preserved).
 import { useMemo, useState } from "react"
 import { Search, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { useAssignDesigner, useClients, useUsers } from "@/lib/clients"
 import { useAuth } from "@/lib/auth"
+import { useI18n } from "@/lib/i18n"
 import { trFold } from "@/lib/week"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -22,6 +23,7 @@ import { cn } from "@/lib/utils"
 const NONE = "none"
 
 export function DesignerAssignmentsPage() {
+  const { t } = useI18n()
   const { data: clients, isLoading } = useClients({ status: "active", q: "" })
   const { data: users } = useUsers()
   const assign = useAssignDesigner()
@@ -30,7 +32,7 @@ export function DesignerAssignmentsPage() {
   const [q, setQ] = useState("")
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [bulkDesigner, setBulkDesigner] = useState<string>(NONE)
-  // Tasarımcı filtresi: sub | NONE (atanmamışlar) | null (filtre yok). Rozete tıkla.
+  // Designer filter: sub | NONE (unassigned) | null (no filter). Click the badge.
   const [filterDesigner, setFilterDesigner] = useState<string | null>(null)
 
   const designers = useMemo(() => (users ?? []).filter((u) => u.role === "designer"), [users])
@@ -39,15 +41,15 @@ export function DesignerAssignmentsPage() {
     ;(users ?? []).forEach((u) => m.set(u.sub, u.name || u.email))
     return m
   }, [users])
-  // base-ui Select.Value ham değeri (sub=id) gösteriyordu; `items` map'i verilince
-  // kapalı durumda da etiketi (isim) gösterir.
+  // base-ui Select.Value was showing the raw value (sub=id); passing an `items` map
+  // makes it show the label (name) even when closed.
   const itemsMap = useMemo<Record<string, string>>(() => {
-    const m: Record<string, string> = { [NONE]: "Atanmamış" }
+    const m: Record<string, string> = { [NONE]: t("pages.designerAssignments.unassigned") }
     ;(users ?? []).forEach((u) => { m[u.sub] = u.name || u.email })
     return m
-  }, [users])
+  }, [users, t])
   const bulkItems = useMemo<Record<string, string>>(
-    () => ({ ...itemsMap, [NONE]: "Atanmamış (kaldır)" }), [itemsMap])
+    () => ({ ...itemsMap, [NONE]: t("pages.designerAssignments.unassignedRemove") }), [itemsMap, t])
 
   const rows = useMemo(() => {
     const needle = trFold(q.trim())
@@ -59,7 +61,7 @@ export function DesignerAssignmentsPage() {
     })
   }, [clients, q, filterDesigner])
 
-  // Tasarımcı başına müşteri sayısı (tüm aktifler; aramadan bağımsız).
+  // Client count per designer (all active clients; independent of search).
   const counts = useMemo(() => {
     const m = new Map<string, number>()
     ;(clients ?? []).forEach((c) => {
@@ -72,7 +74,7 @@ export function DesignerAssignmentsPage() {
 
   function apply(assignments: { client_id: number; user_id: string | null }[]) {
     assign.mutate(assignments, {
-      onSuccess: (r) => toast.success(`${r.updated} müşteri güncellendi`),
+      onSuccess: (r) => toast.success(t("pages.designerAssignments.updated", { count: r.updated })),
       onError: (e) => toast.error(e.message),
     })
   }
@@ -101,15 +103,15 @@ export function DesignerAssignmentsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Tasarımcı Atamaları</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{t("pages.designerAssignments.title")}</h1>
         <p className="text-muted-foreground">
           {isManagement
-            ? "Müşterileri tasarımcılara ata; tek tek ya da toplu değiştir."
-            : "Müşteri-tasarımcı atamaları (salt-okunur)."}
+            ? t("pages.designerAssignments.subtitleManagement")
+            : t("pages.designerAssignments.subtitleReadonly")}
         </p>
       </div>
 
-      {/* Tasarımcı başına özet — tıkla, o tasarımcının müşterilerini süz (tekrar tıkla = kaldır) */}
+      {/* Per-designer summary — click to filter that designer's clients (click again to clear) */}
       <div className="flex flex-wrap gap-2">
         {designers.map((d) => {
           const active = filterDesigner === d.sub
@@ -134,34 +136,34 @@ export function DesignerAssignmentsPage() {
             filterDesigner === NONE
               ? "border-primary bg-primary text-primary-foreground"
               : "text-muted-foreground hover:border-primary/50 hover:bg-muted")}>
-          Atanmamış · <span className="font-semibold">{unassignedCount}</span>
+          {t("pages.designerAssignments.unassignedFilter", { count: unassignedCount })}
         </button>
         {filterDesigner != null && (
           <button type="button" onClick={() => setFilterDesigner(null)}
             className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-sm text-muted-foreground hover:text-foreground">
-            <X className="h-3.5 w-3.5" /> Filtreyi temizle
+            <X className="h-3.5 w-3.5" /> {t("pages.designerAssignments.clearFilter")}
           </button>
         )}
       </div>
 
       <div className="relative w-full sm:max-w-xs">
         <Search className="absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input className="pl-8" placeholder="Müşteri ara…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <Input className="pl-8" placeholder={t("pages.designerAssignments.searchPlaceholder")} value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
 
-      {/* Toplu atama şeridi — yalnız yönetim */}
+      {/* Bulk assignment bar — management only */}
       {isManagement && selected.size > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 p-2">
-          <span className="text-sm font-medium">{selected.size} seçili</span>
+          <span className="text-sm font-medium">{t("pages.designerAssignments.selectedCount", { count: selected.size })}</span>
           <span className="text-muted-foreground">→</span>
           <Select value={bulkDesigner} items={bulkItems} onValueChange={(v) => v && setBulkDesigner(v)}>
             <SelectTrigger size="sm" className="w-52"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value={NONE}>Atanmamış (kaldır)</SelectItem>
+              <SelectItem value={NONE}>{t("pages.designerAssignments.unassignedRemove")}</SelectItem>
               {designers.map((d) => <SelectItem key={d.sub} value={d.sub}>{d.name || d.email}</SelectItem>)}
             </SelectContent>
           </Select>
-          <Button size="sm" onClick={assignBulk} disabled={assign.isPending}>Ata</Button>
+          <Button size="sm" onClick={assignBulk} disabled={assign.isPending}>{t("pages.designerAssignments.assignBtn")}</Button>
           <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
             <X className="h-4 w-4" />
           </Button>
@@ -172,7 +174,9 @@ export function DesignerAssignmentsPage() {
         <div className="space-y-2">{[...Array(8)].map((_, i) => <Skeleton key={i} className="h-11 w-full" />)}</div>
       ) : rows.length === 0 ? (
         <p className="py-8 text-center text-muted-foreground">
-          {q || filterDesigner != null ? "Eşleşen müşteri yok." : "Müşteri yok."}
+          {q || filterDesigner != null
+            ? t("pages.designerAssignments.noMatch")
+            : t("pages.designerAssignments.noClients")}
         </p>
       ) : (
         <div className="overflow-x-auto rounded-lg border">
@@ -182,12 +186,12 @@ export function DesignerAssignmentsPage() {
                 {isManagement && (
                   <TableHead className="w-10">
                     <input type="checkbox" checked={allSelected} onChange={toggleAll}
-                      className="h-4 w-4 cursor-pointer accent-primary" aria-label="Tümünü seç" />
+                      className="h-4 w-4 cursor-pointer accent-primary" aria-label={t("pages.designerAssignments.selectAllAria")} />
                   </TableHead>
                 )}
-                <TableHead>Müşteri</TableHead>
-                <TableHead className="hidden sm:table-cell">Sektör</TableHead>
-                <TableHead className="w-56">Tasarımcı</TableHead>
+                <TableHead>{t("pages.designerAssignments.clientHeader")}</TableHead>
+                <TableHead className="hidden sm:table-cell">{t("pages.designerAssignments.sectorHeader")}</TableHead>
+                <TableHead className="w-56">{t("pages.designerAssignments.designerHeader")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -199,7 +203,8 @@ export function DesignerAssignmentsPage() {
                     {isManagement && (
                       <TableCell>
                         <input type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)}
-                          className="h-4 w-4 cursor-pointer accent-primary" aria-label={`${c.name} seç`} />
+                          className="h-4 w-4 cursor-pointer accent-primary"
+                          aria-label={t("pages.designerAssignments.selectClientAria", { name: c.name })} />
                       </TableCell>
                     )}
                     <TableCell className="font-medium">{c.name}</TableCell>
@@ -210,16 +215,18 @@ export function DesignerAssignmentsPage() {
                           onValueChange={(v) => v && apply([{ client_id: c.id, user_id: v === NONE ? null : v }])}>
                           <SelectTrigger size="sm" className="w-52"><SelectValue /></SelectTrigger>
                           <SelectContent>
-                            <SelectItem value={NONE}>Atanmamış</SelectItem>
+                            <SelectItem value={NONE}>{t("pages.designerAssignments.unassigned")}</SelectItem>
                             {orphan && (
-                              <SelectItem value={cur}>{userName.get(cur) || cur} (tasarımcı değil)</SelectItem>
+                              <SelectItem value={cur}>
+                                {t("pages.designerAssignments.notDesignerSuffix", { name: userName.get(cur) || cur })}
+                              </SelectItem>
                             )}
                             {designers.map((d) => <SelectItem key={d.sub} value={d.sub}>{d.name || d.email}</SelectItem>)}
                           </SelectContent>
                         </Select>
                       ) : (
                         <span className={cn("text-sm", cur === NONE && "text-muted-foreground")}>
-                          {cur === NONE ? "Atanmamış" : (userName.get(cur) || cur)}
+                          {cur === NONE ? t("pages.designerAssignments.unassigned") : (userName.get(cur) || cur)}
                         </span>
                       )}
                     </TableCell>

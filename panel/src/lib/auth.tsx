@@ -1,11 +1,11 @@
-// Kimlik OIDC sağlayıcısına delege edilir (AUTH_MODE=oidc) veya yerel e-posta/
-// parola girişiyle yapılır (AUTH_MODE=local). Oturum yoksa tarayıcı /auth/login'e
-// yönlenir. Oturum + CSRF token'ı /api/session'dan tek çağrıda alınır (setCsrf ile
-// api'ye verilir). Rol yardımcıları (isManagement) yetki-bazlı UI için.
+// Identity is delegated to the OIDC provider (AUTH_MODE=oidc) or done via local
+// email/password login (AUTH_MODE=local). Without a session, the browser is redirected
+// to /auth/login. The session + CSRF token are fetched from /api/session in a single
+// call (handed to the api via setCsrf). Role helpers (isManagement) are for permission-based UI.
 //
-// Impersonation ("kullanıcı gözünden bak"): yalnız superadmin. session['user']
-// hedef kullanıcıya çevrilir (etkin kimlik), gerçek kimlik backend'de saklanır.
-// impersonate/stop sonrası tam sayfa yenileme → tüm veri yeni kimlikle tazelenir.
+// Impersonation ("view as this user"): superadmin only. session['user'] is switched to
+// the target user (effective identity), the real identity is kept on the backend.
+// A full page reload after impersonate/stop → all data refreshes under the new identity.
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react"
 
 import { apiGet, apiJson, setCsrf } from "./api"
@@ -52,7 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setLoading(false))
   }, [])
 
-  // Tam sayfa yönlendirme (SPA route değil) — SSO akışı sunucu taraflı.
+  // Full page redirect (not an SPA route) — the SSO flow is server-side.
   function login() {
     window.location.href = "/auth/login"
   }
@@ -60,10 +60,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.location.href = "/auth/logout"
   }
 
-  // Kimlik değişince tüm cache'leri sıfırlamak için tam sayfa yenile. Impersonation'a
-  // GİRERKEN ana sayfaya (/) git: mevcut sayfa hedef rolün erişemediği bir yönetim
-  // sayfası olabilir (ör. Sharing Board yalnız management) → orada kalırsak 403 alırdık.
-  // "/" her role açık; kullanıcı oradan hedef rolün nav'ıyla gezmeye başlar.
+  // Full page reload to reset all caches when identity changes. WHEN ENTERING
+  // impersonation, go to the home page (/): the current page might be a management
+  // page the target role can't access (e.g. Sharing Board is management-only) → staying
+  // there would get us a 403. "/" is open to every role; the user starts browsing
+  // from there with the target role's nav.
   async function impersonate(sub: string) {
     await apiJson("/impersonate", { sub })
     window.location.href = import.meta.env.BASE_URL || "/panel/"

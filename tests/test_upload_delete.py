@@ -1,4 +1,4 @@
-"""/api/sharing/uploads/<id> DELETE — yalnız superadmin soft-delete edebilir."""
+"""/api/sharing/uploads/<id> DELETE — only superadmin can soft-delete."""
 from conftest import MANAGER, login_as
 from test_session_csrf import csrf_headers
 
@@ -6,7 +6,7 @@ SUPERADMIN = {'sub': '9', 'email': 'superadmin@example.com', 'name': 'Superadmin
 
 
 def _mk_upload(client):
-    """Bir müşteri + CardUpload satırı oluştur, upload id döner."""
+    """Create a client + CardUpload row, return the upload id."""
     login_as(client, MANAGER)
     cid = client.post('/api/clients', json={'name': 'Silme Müşteri'},
                       headers=csrf_headers(client)).get_json()['client']['id']
@@ -31,12 +31,12 @@ def test_superadmin_can_soft_delete(client):
 
 def test_non_superadmin_forbidden(client):
     up_id = _mk_upload(client)
-    login_as(client, MANAGER)  # management ama superadmin değil
+    login_as(client, MANAGER)  # management but not superadmin
     r = client.delete(f'/api/sharing/uploads/{up_id}', headers=csrf_headers(client))
     assert r.status_code == 403
     from extensions import db
     from models_sharing import CardUpload
-    assert db.session.get(CardUpload, up_id).deleted_at is None  # silinmedi
+    assert db.session.get(CardUpload, up_id).deleted_at is None  # not deleted
 
 
 def test_missing_upload_404(client):
@@ -50,6 +50,6 @@ def test_no_session_401(client):
     up_id = _mk_upload(client)
     with client.session_transaction() as sess:
         sess.clear()
-        sess['csrf'] = 'tok'  # csrf geçsin ama kullanıcı yok → handler 401
+        sess['csrf'] = 'tok'  # csrf should pass but no user → handler 401
     r = client.delete(f'/api/sharing/uploads/{up_id}', headers={'X-CSRFToken': 'tok'})
     assert r.status_code == 401

@@ -1,7 +1,8 @@
-// Yerinde metin düzenleme — eski canvas'ta her başlık/not `window.prompt` açıyordu.
-// Çift tıkla (veya Enter) aç · Esc iptal · blur ya da Ctrl+Enter kaydet.
+// In-place text editing — on the old canvas every title/note opened a `window.prompt`.
+// Double-click (or Enter) to open · Esc to cancel · blur or Ctrl+Enter to save.
 import { useEffect, useRef, useState } from "react"
 
+import { useI18n } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
 interface Props {
@@ -9,19 +10,20 @@ interface Props {
   placeholder?: string
   className?: string
   multiline?: boolean
-  /** Yalnız değer GERÇEKTEN değiştiyse çağrılır (boşuna PATCH atmayalım). */
+  /** Only called if the value ACTUALLY changed (let's not fire a needless PATCH). */
   onCommit: (value: string | null) => void
   disabled?: boolean
-  /** Yeni yaratılan öğede düzenlemeyi KENDİLİĞİNDEN aç — kullanıcı "Kart" deyip
-   *  hemen yazmaya başlayabilsin, ayrıca çift tıklaması gerekmesin. */
+  /** AUTOMATICALLY open editing on a newly created item — so the user can say "Card" and
+   *  start typing right away, without needing to double-click first. */
   autoEdit?: boolean
-  /** Bayrak tek kullanımlık: açılır açılmaz tüketildiğini bildiririz, yoksa
-   *  düzenlemeyi kapatınca tekrar tekrar açılırdı. */
+  /** The flag is single-use: we report it consumed as soon as it opens, otherwise
+   *  editing would reopen over and over every time it's closed. */
   onAutoEditDone?: () => void
 }
 
 export function InlineText({ value, placeholder = "…", className, multiline,
                             onCommit, disabled, autoEdit, onAutoEditDone }: Props) {
+  const { t } = useI18n()
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(value ?? "")
   const ref = useRef<HTMLTextAreaElement | null>(null)
@@ -35,8 +37,8 @@ export function InlineText({ value, placeholder = "…", className, multiline,
       setEditing(true)
       onAutoEditDone?.()
     }
-    // `editing` bilerek deps'te değil: kullanıcı kapattıktan sonra bayrak hâlâ
-    // true'ysa yeniden açılmasını istemiyoruz (bayrağı zaten tükettik).
+    // `editing` is deliberately not in the deps: if the flag is still true after the
+    // user closes it, we don't want it reopening (we already consumed the flag).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoEdit, disabled])
 
@@ -79,7 +81,7 @@ export function InlineText({ value, placeholder = "…", className, multiline,
     <div
       role="button"
       tabIndex={disabled ? -1 : 0}
-      title={disabled ? undefined : "Düzenlemek için çift tıkla"}
+      title={disabled ? undefined : t("components.planlama.inlineText.editHint")}
       onDoubleClick={(e) => { if (!disabled) { e.stopPropagation(); setEditing(true) } }}
       onKeyDown={(e) => {
         if (disabled) return

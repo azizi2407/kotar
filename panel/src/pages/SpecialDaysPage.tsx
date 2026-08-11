@@ -1,11 +1,12 @@
-// Özel Günler yönetimi — aylık etkinlik listesi (ekle/sil) + müşteri seçim linki +
-// Takvim görünümü (2026-07-21): tek bakışta hangi gün hangi markanın özel günü.
+// Special Days management — monthly event list (add/delete) + client selection link +
+// Calendar view (2026-07-21): shows at a glance which day belongs to which brand's special day.
 import { useMemo, useState } from "react"
 import { CalendarDays, ChevronLeft, ChevronRight, Copy, Link2, List, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { useAuth } from "@/lib/auth"
 import { useClients } from "@/lib/clients"
+import { useI18n } from "@/lib/i18n"
 import { trFold } from "@/lib/week"
 import {
   useApproveSpecialDay, useSpecialDayEvents, useSpecialDayMutations, useSpecialDayOverview,
@@ -20,23 +21,29 @@ import {
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 
-// Müşteriye gönderilen özel gün seçim mesajı (metin proje sahibi tarafından belirlendi).
-const SELECTION_MESSAGE =
-  "Merhabalar, Özel gün listemiz hazır, yaptığınız seçimlere göre özel gün ve hafta " +
-  "çalışmaları planlamaya eklenecektir. İyi günler."
+// Special day selection message sent to the client — kept as a translation key
+// in the dictionary ("pages.specialDays.selectionMessage"), read via t() in the page component.
 
-const MONTHS = ["", "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
-  "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
-const WEEKDAYS = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"]
+// Month/day names — translation keys, produced via t() at render time.
+const MONTH_KEYS = ["", "pages.specialDays.month.1", "pages.specialDays.month.2",
+  "pages.specialDays.month.3", "pages.specialDays.month.4", "pages.specialDays.month.5",
+  "pages.specialDays.month.6", "pages.specialDays.month.7", "pages.specialDays.month.8",
+  "pages.specialDays.month.9", "pages.specialDays.month.10", "pages.specialDays.month.11",
+  "pages.specialDays.month.12"]
+const WEEKDAY_KEYS = ["pages.specialDays.weekday.mon", "pages.specialDays.weekday.tue",
+  "pages.specialDays.weekday.wed", "pages.specialDays.weekday.thu",
+  "pages.specialDays.weekday.fri", "pages.specialDays.weekday.sat",
+  "pages.specialDays.weekday.sun"]
 
-// Gün detay modalı — hücreye tıklayınca o günün etkinlikleri geniş/detaylı gösterilir.
+// Day detail modal — clicking a cell shows that day's events in an expanded, detailed view.
 function DayDetailDialog({ day, month, year, events, onClose }: {
   day: number | null; month: number; year: number
   events: SpecialDayOverviewItem[]; onClose: () => void
 }) {
+  const { t, lang } = useI18n()
   if (day == null) return null
   const date = new Date(year, month - 1, day)
-  const title = date.toLocaleDateString("tr-TR", {
+  const title = date.toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", {
     day: "numeric", month: "long", year: "numeric", weekday: "long",
   })
   return (
@@ -46,14 +53,14 @@ function DayDetailDialog({ day, month, year, events, onClose }: {
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
             {events.length
-              ? `Bu güne düşen ${events.length} özel gün`
-              : "Bu güne düşen özel gün yok."}
+              ? t("pages.specialDays.eventsOnThisDay", { count: events.length })
+              : t("pages.specialDays.noEventsOnThisDay")}
           </DialogDescription>
         </DialogHeader>
         <div className="max-h-[60vh] space-y-3 overflow-y-auto">
-          {/* Her öğe seçilmiştir (backend süzüyor) → tek stil, koşul yok.
-              "Henüz hiçbir marka seçmedi" dalı KALDIRILDI: artık kendi kendini
-              yalanlıyordu, seçimi olmayan gün bu listeye hiç girmiyor. */}
+          {/* Every item here is selected (filtered by backend) → single style, no condition.
+              The "no brand has selected yet" branch was REMOVED: it contradicted itself,
+              since a day with no selection never enters this list at all. */}
           {events.map((it) => (
             <div key={it.id}
               className="space-y-2 rounded-lg border border-amber-400/60 bg-amber-50/50 p-3 dark:border-amber-500/40 dark:bg-amber-950/20">
@@ -61,12 +68,12 @@ function DayDetailDialog({ day, month, year, events, onClose }: {
                 <span className="font-medium">{it.day_name}</span>
                 {it.date_start != null && it.date_end != null && (
                   <Badge variant="outline" className="text-[10px]">
-                    Özel Hafta · {it.date_start}–{it.date_end} {MONTHS[month]}
+                    {t("pages.specialDays.specialWeek")} · {it.date_start}–{it.date_end} {t(MONTH_KEYS[month])}
                   </Badge>
                 )}
                 {it.status === "draft" && (
                   <Badge variant="secondary" className="text-[10px]">
-                    Taslak{it.generated_by === "ai" ? " · AI" : ""}
+                    {t("pages.specialDays.draft")}{it.generated_by === "ai" ? " · AI" : ""}
                   </Badge>
                 )}
               </div>
@@ -76,18 +83,18 @@ function DayDetailDialog({ day, month, year, events, onClose }: {
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-medium text-muted-foreground">
-                    Seçen markalar ({it.client_names.length})
+                    {t("pages.specialDays.brandsWhoChose", { count: it.client_names.length })}
                   </span>
                   <Button
                     type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs"
                     onClick={async () => {
                       await navigator.clipboard.writeText(it.client_names.join("\n"))
-                      toast.success("Marka listesi kopyalandı")
+                      toast.success(t("pages.specialDays.brandListCopied"))
                     }}>
-                    <Copy className="mr-1 h-3 w-3" /> Kopyala
+                    <Copy className="mr-1 h-3 w-3" /> {t("pages.specialDays.copy")}
                   </Button>
                 </div>
-                {/* seçilebilir düz metin liste — satır satır kopyalanabilir */}
+                {/* selectable plain-text list — copyable line by line */}
                 <div className="rounded-md border bg-background px-2.5 py-1.5 text-sm leading-6 select-text">
                   {it.client_names.map((cn_) => <div key={cn_}>{cn_}</div>)}
                 </div>
@@ -100,16 +107,18 @@ function DayDetailDialog({ day, month, year, events, onClose }: {
   )
 }
 
-// Takvim ızgarası: her gün hücresinde o güne düşen **müşteri tarafından SEÇİLMİŞ**
-// özel günler, marka çipiyle. Seçilmeyen gün hiç gelmez (backend `sd_overview`
-// süzüyor) — takvim "önerilen günler" panosu değil, "müşterilerin bu ay içerik
-// istediği günler" panosu. Hücreye tıklanınca DayDetailDialog açılır.
+// Calendar grid: each day cell shows the special days **SELECTED BY THE CLIENT**
+// that fall on that day, with a brand chip. A day with no selection never appears
+// (filtered by the backend's `sd_overview`) — the calendar is not a "suggested days"
+// board but a "days clients want content on this month" board. Clicking a cell opens DayDetailDialog.
 function CalendarView({ month, year, items }: {
   month: number; year: number; items: SpecialDayOverviewItem[]
 }) {
+  const { t } = useI18n()
+  const WEEKDAYS = WEEKDAY_KEYS.map((k) => t(k))
   const [selectedDay, setSelectedDay] = useState<number | null>(null)
   const daysInMonth = new Date(year, month, 0).getDate()
-  const firstOffset = (new Date(year, month - 1, 1).getDay() + 6) % 7  // Pzt=0
+  const firstOffset = (new Date(year, month - 1, 1).getDay() + 6) % 7  // Mon=0
   const byDay = useMemo(() => {
     const map = new Map<number, SpecialDayOverviewItem[]>()
     for (const it of items) {
@@ -128,13 +137,12 @@ function CalendarView({ month, year, items }: {
 
   return (
     <div className="space-y-3">
-      {/* Takvim seçim-güdümlü olduğu için boş bir ay normaldir; sebebini yazmadan
-          boş ızgara "veri gelmiyor" gibi okunur. */}
+      {/* Since the calendar is selection-driven, an empty month is normal; without
+          stating the reason, an empty grid reads as "data isn't loading". */}
       {items.length === 0 && (
         <p className="rounded-lg border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-          Bu ay için müşteri tarafından seçilmiş özel gün yok. Takvimde yalnız
-          müşterilerin seçim linkinden <strong>işaretlediği</strong> günler görünür —
-          ayın tüm özel gün kataloğu için <strong>Liste</strong> görünümüne geçin.
+          {t("pages.specialDays.calendarEmptyPre")} <strong>{t("pages.specialDays.marked")}</strong>{" "}
+          {t("pages.specialDays.calendarEmptyMid")} <strong>{t("pages.specialDays.listView")}</strong>{t("pages.specialDays.calendarEmptyPost")}
         </p>
       )}
       <div className="overflow-x-auto">
@@ -155,8 +163,8 @@ function CalendarView({ month, year, items }: {
                       : "cursor-default",
                     isThisMonth && today.getDate() === d && "border-primary bg-primary/5")}>
                   <div className="mb-1 text-right text-xs font-medium text-muted-foreground">{d}</div>
-                  {/* Yalnız seçen markaların çipi. "Marka seçimi yok" gri çipi
-                      KALDIRILDI (2026-07-31): seçilmeyen gün buraya hiç gelmiyor. */}
+                  {/* Chip only for brands that made a selection. The gray "no brand
+                      selection" chip was REMOVED (2026-07-31): an unselected day never reaches here. */}
                   <div className="space-y-0.5">
                     {evs.flatMap((it) =>
                       it.client_names.map((cn_) => (
@@ -179,7 +187,7 @@ function CalendarView({ month, year, items }: {
         onClose={() => setSelectedDay(null)} />
       {dateless.length > 0 && (
         <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-          <span className="font-medium">Tarihsiz:</span>
+          <span className="font-medium">{t("pages.specialDays.dateless")}</span>
           {dateless.map((it) => (
             <Badge key={it.id} variant="outline" className="text-[10px]">
               {it.client_names.join(", ")} · {it.day_name}
@@ -188,9 +196,8 @@ function CalendarView({ month, year, items }: {
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        Takvimde <strong>yalnızca müşterilerin seçim linkinden işaretlediği</strong> özel
-        günler görünür; her çip bir markanın o günü seçtiğini gösterir. Ayın tüm özel gün
-        kataloğu (seçilmemişler ve taslaklar dahil) <strong>Liste</strong> görünümünde.
+        {t("pages.specialDays.calendarFooterPre")} <strong>{t("pages.specialDays.calendarFooterStrong")}</strong>{" "}
+        {t("pages.specialDays.calendarFooterMid")} <strong>{t("pages.specialDays.listView")}</strong> {t("pages.specialDays.calendarFooterPost")}
       </p>
     </div>
   )
@@ -202,6 +209,8 @@ function dateLabel(e: SpecialDayEvent) {
 }
 
 export function SpecialDaysPage() {
+  const { t } = useI18n()
+  const MONTHS = MONTH_KEYS.map((k) => (k ? t(k) : ""))
   const now = new Date()
   const [ym, setYm] = useState({ month: now.getMonth() + 1, year: now.getFullYear() })
   const { data: events, isLoading } = useSpecialDayEvents(ym.month, ym.year)
@@ -213,8 +222,8 @@ export function SpecialDaysPage() {
   const [name, setName] = useState("")
   const [day, setDay] = useState("")
   const [desc, setDesc] = useState("")
-  const [clientQ, setClientQ] = useState("")          // müşteri listesi araması
-  const [copying, setCopying] = useState<number | null>(null)  // kopyalanan müşteri id
+  const [clientQ, setClientQ] = useState("")          // client list search
+  const [copying, setCopying] = useState<number | null>(null)  // client id being copied
   const [view, setView] = useState<"liste" | "takvim">("liste")
   const { data: overview, isLoading: overviewLoading } =
     useSpecialDayOverview(ym.month, ym.year)
@@ -232,19 +241,19 @@ export function SpecialDaysPage() {
     if (!name.trim()) return
     await m.create.mutateAsync({ day_name: name.trim(), date_num: Number(day) || null, description: desc.trim() || null })
     setName(""); setDay(""); setDesc("")
-    toast.success("Özel gün eklendi")
+    toast.success(t("pages.specialDays.eventAdded"))
   }
 
-  // Müşteriye gönderilecek hazır mesaj + o ayın seçim linki (proje sahibi 2026-07-25).
+  // Ready-made message for the client + that month's selection link (feature owner 2026-07-25).
   async function copyForClient(clientId: number, clientName: string) {
     setCopying(clientId)
     try {
       const token = await m.link.mutateAsync({ client_id: clientId, month: ym.month, year: ym.year })
       const url = `${window.location.origin}/special-days/${token}`
-      await navigator.clipboard.writeText(`${SELECTION_MESSAGE}\n\n${url}`)
-      toast.success(`${clientName} — mesaj ve link kopyalandı`)
+      await navigator.clipboard.writeText(`${t("pages.specialDays.selectionMessage")}\n\n${url}`)
+      toast.success(t("pages.specialDays.messageAndLinkCopied", { client: clientName }))
     } catch {
-      toast.error("Link üretilemedi")
+      toast.error(t("pages.specialDays.linkGenerationFailed"))
     } finally {
       setCopying(null)
     }
@@ -262,11 +271,11 @@ export function SpecialDaysPage() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Özel Günler</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{t("pages.specialDays.title")}</h1>
           <p className="text-muted-foreground">
             {isManagement
-              ? "Aylık özel gün takvimi ve müşteri seçim linkleri."
-              : "Aylık özel gün takvimi (salt-okunur)."}
+              ? t("pages.specialDays.subtitleManagement")
+              : t("pages.specialDays.subtitleReadOnly")}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -274,11 +283,11 @@ export function SpecialDaysPage() {
             <div className="flex items-center gap-1 rounded-lg border p-1">
               <Button variant={view === "liste" ? "secondary" : "ghost"} size="sm"
                 onClick={() => setView("liste")}>
-                <List className="mr-1 h-4 w-4" /> Liste
+                <List className="mr-1 h-4 w-4" /> {t("pages.specialDays.listView")}
               </Button>
               <Button variant={view === "takvim" ? "secondary" : "ghost"} size="sm"
                 onClick={() => setView("takvim")}>
-                <CalendarDays className="mr-1 h-4 w-4" /> Takvim
+                <CalendarDays className="mr-1 h-4 w-4" /> {t("pages.specialDays.calendarViewLabel")}
               </Button>
             </div>
           )}
@@ -290,42 +299,42 @@ export function SpecialDaysPage() {
         </div>
       </div>
 
-      {/* Ekle — yalnız yönetim */}
+      {/* Add — management only */}
       {isManagement && (
         <div className="flex flex-wrap items-end gap-2 rounded-lg border p-3">
           <div className="flex-1 min-w-40">
-            <Input placeholder="Özel gün adı" value={name} onChange={(e) => setName(e.target.value)} />
+            <Input placeholder={t("pages.specialDays.eventNamePlaceholder")} value={name} onChange={(e) => setName(e.target.value)} />
           </div>
-          <Input className="w-20" type="number" placeholder="Gün" value={day} onChange={(e) => setDay(e.target.value)} />
+          <Input className="w-20" type="number" placeholder={t("pages.specialDays.dayPlaceholder")} value={day} onChange={(e) => setDay(e.target.value)} />
           <div className="flex-1 min-w-40">
-            <Input placeholder="Açıklama (opsiyonel)" value={desc} onChange={(e) => setDesc(e.target.value)} />
+            <Input placeholder={t("pages.specialDays.descriptionPlaceholder")} value={desc} onChange={(e) => setDesc(e.target.value)} />
           </div>
           <Button onClick={addEvent} disabled={m.create.isPending}>
-            <Plus className="mr-1 h-4 w-4" /> Ekle
+            <Plus className="mr-1 h-4 w-4" /> {t("pages.specialDays.add")}
           </Button>
         </div>
       )}
 
-      {/* Müşteri seçim linkleri — her müşteri için tek tıkla mesaj+link (yalnız yönetim,
-          liste görünümü). Eski "müşteri seç → link üret" bloğunun yerini aldı. */}
+      {/* Client selection links — one-click message+link per client (management only,
+          list view). Replaces the old "select client → generate link" block. */}
       {isManagement && view === "liste" && (
         <div className="rounded-lg border">
           <div className="flex flex-wrap items-center gap-2 border-b bg-muted/20 px-3 py-2">
             <Link2 className="h-4 w-4 text-muted-foreground" />
-            <span className="text-sm font-medium">Müşteri seçim linkleri</span>
+            <span className="text-sm font-medium">{t("pages.specialDays.clientLinksTitle")}</span>
             <span className="text-xs text-muted-foreground">
-              {MONTHS[ym.month]} {ym.year} · kopyala düğmesi mesajı ve linki birlikte alır
+              {MONTHS[ym.month]} {ym.year} · {t("pages.specialDays.clientLinksHint")}
             </span>
             <Input
               className="ml-auto h-8 w-48"
-              placeholder="Müşteri ara…"
+              placeholder={t("pages.specialDays.searchClientPlaceholder")}
               value={clientQ}
               onChange={(e) => setClientQ(e.target.value)}
             />
           </div>
           <div className="max-h-64 overflow-y-auto">
             {filteredClients.length === 0 ? (
-              <p className="px-3 py-4 text-sm text-muted-foreground">Müşteri bulunamadı.</p>
+              <p className="px-3 py-4 text-sm text-muted-foreground">{t("pages.specialDays.clientNotFound")}</p>
             ) : (
               <ul className="divide-y">
                 {filteredClients.map((c) => (
@@ -335,10 +344,10 @@ export function SpecialDaysPage() {
                       variant="ghost" size="sm"
                       onClick={() => copyForClient(c.id, c.name)}
                       disabled={copying === c.id}
-                      title="Mesajı ve seçim linkini kopyala"
+                      title={t("pages.specialDays.copyMessageAndLinkTitle")}
                     >
                       <Copy className="mr-1 h-3.5 w-3.5" />
-                      {copying === c.id ? "Kopyalanıyor…" : "Kopyala"}
+                      {copying === c.id ? t("pages.specialDays.copying") : t("pages.specialDays.copy")}
                     </Button>
                   </li>
                 ))}
@@ -348,17 +357,17 @@ export function SpecialDaysPage() {
         </div>
       )}
 
-      {/* Takvim görünümü — tek bakışta gün × marka (designer için tek görünüm) */}
+      {/* Calendar view — day × brand at a glance (the only view for designers) */}
       {view === "takvim" || !isManagement ? (
         overviewLoading ? (
           <Skeleton className="h-72 w-full" />
         ) : (
           <CalendarView month={ym.month} year={ym.year} items={overview ?? []} />
         )
-      ) : /* Liste */ isLoading ? (
+      ) : /* List */ isLoading ? (
         <Skeleton className="h-40 w-full" />
       ) : globalEvents.length === 0 ? (
-        <p className="py-8 text-center text-muted-foreground">Bu ay için özel gün yok.</p>
+        <p className="py-8 text-center text-muted-foreground">{t("pages.specialDays.noEventsThisMonth")}</p>
       ) : (
         <div className="space-y-2">
           {globalEvents.map((e) => (
@@ -368,7 +377,7 @@ export function SpecialDaysPage() {
                 <div className="flex items-center gap-2">
                   <span className="font-medium">{e.day_name}</span>
                   {e.status === "draft" && (
-                    <Badge variant="secondary">Taslak{e.generated_by === "ai" ? " · AI" : ""}</Badge>
+                    <Badge variant="secondary">{t("pages.specialDays.draft")}{e.generated_by === "ai" ? " · AI" : ""}</Badge>
                   )}
                 </div>
                 {e.description && <div className="text-sm text-muted-foreground">{e.description}</div>}
@@ -376,11 +385,11 @@ export function SpecialDaysPage() {
               {isManagement && e.status === "draft" && (
                 <Button variant="outline" size="sm" onClick={() => approve.mutate(e.id)}
                   disabled={approve.isPending}>
-                  Onayla
+                  {t("pages.specialDays.approve")}
                 </Button>
               )}
               <Button variant="ghost" size="icon" className="text-destructive"
-                onClick={() => m.remove.mutate(e.id)} title="Sil">
+                onClick={() => m.remove.mutate(e.id)} title={t("pages.specialDays.delete")}>
                 <Trash2 className="h-4 w-4" />
               </Button>
             </div>

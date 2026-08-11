@@ -1,4 +1,4 @@
-"""/api/planning — Planlama Panosu: yetki matrisi, delta PATCH, çakışma, doğrulama."""
+"""/api/planning — Planning Board: permission matrix, delta PATCH, conflicts, validation."""
 import datetime as dt
 
 from sqlalchemy import event
@@ -11,10 +11,10 @@ BASE = '/api/planning'
 MGMT = f'{BASE}/boards/management'
 
 
-# --- yardımcılar ---------------------------------------------------------
+# --- helpers ---------------------------------------------------------
 
 def _seed_users():
-    """Panel rollü kullanıcıları users_ref'e yaz (yetki + isim çözümü buna bakar)."""
+    """Write panel-role users into users_ref (permission + name resolution relies on this)."""
     from models import UserRef
     for u in (MANAGER, DESIGNER, CONTENT_CREATOR, VIDEOGRAPHER):
         db.session.add(UserRef(sub=u['sub'], email=u['email'], name=u['name'], role=u['role']))
@@ -43,7 +43,7 @@ def _by_key(items):
     return {i['item_key']: i for i in items}
 
 
-# --- yetki matrisi -------------------------------------------------------
+# --- permission matrix -------------------------------------------------------
 
 def test_anonim_401(client):
     assert client.get(MGMT).status_code == 401
@@ -72,7 +72,7 @@ def test_designer_yonetim_panosunu_goremez(client):
     login_as(client, DESIGNER)
     r = client.get(MGMT)
     assert r.status_code == 403
-    assert 'yönetim' in r.get_json()['error']
+    assert 'management' in r.get_json()['error']
 
 
 def test_designer_yonetim_panosuna_yazamaz(client):
@@ -91,7 +91,7 @@ def test_designer_baskasinin_panosunu_goremez(client):
     _seed_users()
     r = client.get(f'{BASE}/boards/user:1')
     assert r.status_code == 403
-    assert 'kendi' in r.get_json()['error']
+    assert 'own' in r.get_json()['error']
 
 
 def test_designer_baskasinin_panosuna_yazamaz(client):
@@ -132,18 +132,19 @@ def test_bilinmeyen_sub_404_management(client):
 
 
 def test_impersonation_yonetim_panosunu_acmaz(client):
-    """Yetki current_user() üzerinden — yönetici tasarımcı gözünden bakarken
-    yönetim panosunu GÖREMEZ. (Rol yükseltme impersonation ile yapılamaz.)"""
+    """Authorization goes through current_user() — when the manager looks through the
+    designer's eyes, they CANNOT see the management board. (Role elevation is not
+    possible via impersonation.)"""
     with client.session_transaction() as sess:
-        sess['user'] = dict(DESIGNER)          # etkin kimlik
-        sess['impersonator'] = dict(MANAGER)   # gerçek kimlik
+        sess['user'] = dict(DESIGNER)          # effective identity
+        sess['impersonator'] = dict(MANAGER)   # real identity
     assert client.get(MGMT).status_code == 403
 
 
-# --- pano listesi --------------------------------------------------------
+# --- board list --------------------------------------------------------
 
 def test_boards_calisana_yalniz_kendi_panosunu_dondurur(client):
-    """Dropdown'ın gizlenmesi API'den türer — yalnız frontend kararı değil."""
+    """The dropdown being hidden derives from the API — not just a frontend decision."""
     login_as(client, DESIGNER)
     _seed_users()
     boards = client.get(f'{BASE}/boards').get_json()['boards']
@@ -155,7 +156,7 @@ def test_boards_management_yonetim_plus_tum_panel_rolleri(client):
     _seed_users()
     boards = client.get(f'{BASE}/boards').get_json()['boards']
     assert boards[0]['key'] == 'management'
-    assert boards[0]['title'] == 'Yönetim Panosu'
+    assert boards[0]['title'] == 'Management Board'
     assert set(b['key'] for b in boards) == {'management', 'user:1', 'user:2', 'user:3', 'user:4'}
     assert next(b for b in boards if b['key'] == 'user:2')['title'] == 'Tasarımcı'
 
@@ -175,7 +176,7 @@ def test_boards_item_count_dogru(client):
     assert next(b for b in boards if b['key'] == 'management')['item_count'] == 2
 
 
-# --- pano / sürüm --------------------------------------------------------
+# --- board / version --------------------------------------------------------
 
 def test_pano_lazy_olusur_ve_mukerrerlesmez(client):
     from models_planning import PlanningBoard
@@ -230,12 +231,12 @@ def test_delete_yalniz_verilen_keyleri_siler(client):
 
 
 def test_iki_farkli_karta_yazma_birbirini_ezmez(client):
-    """ASIL REGRESYON TESTİ — eski tam-dizi PATCH'te ikinci yazan birincinin
-    kartını siliyordu. Delta modelde iki oturum farklı kartlara dokunursa ikisi de
-    korunur."""
+    """THE ACTUAL REGRESSION TEST — in the old full-array PATCH, the second writer used
+    to delete the first writer's card. In the delta model, if two sessions touch
+    different cards, both are preserved."""
     login_as(client, MANAGER)
     _patch(client, 'management', [_card('a1', title='A'), _card('a2', title='B')])
-    # iki istemci de base_version=1'i (bayat) biliyor ama farklı kartlara yazıyor
+    # both clients know base_version=1 (stale) but write to different cards
     _patch(client, 'management', [{'item_key': 'a1', 'title': 'A-yeni'}], base_version=1)
     _patch(client, 'management', [{'item_key': 'a2', 'title': 'B-yeni'}], base_version=1)
     items = _by_key(_items(client, 'management'))
@@ -299,7 +300,7 @@ def test_panolar_birbirinden_yalitik(client):
     assert len(_items(client, 'user:2')) == 1
 
 
-# --- doğrulama (hepsi 400) ----------------------------------------------
+# --- validation (all 400) ----------------------------------------------
 
 def test_item_key_yoksa_400(client):
     login_as(client, MANAGER)
@@ -317,7 +318,7 @@ def test_gecersiz_type_400(client):
 
 
 def test_javascript_link_reddedilir(client):
-    """Eski canvas link alanını hiç süzmüyordu."""
+    """The old canvas link field wasn't filtered at all."""
     login_as(client, MANAGER)
     r = _patch(client, 'management', [_card('a1', link='javascript:alert(1)')])
     assert r.status_code == 400 and 'http' in r.get_json()['error']
@@ -396,14 +397,14 @@ def test_upsert_liste_degilse_400(client):
 
 
 def test_dogrulama_hatasi_hicbir_seyi_yazmaz(client):
-    """Batch'in ortasında hata varsa tamamı geri alınır (rollback)."""
+    """If there's an error in the middle of the batch, the whole thing is rolled back."""
     from models_planning import PlanningItem
     login_as(client, MANAGER)
     _patch(client, 'management', [_card('a1'), _card('a2', type='uydurma')])
     assert PlanningItem.query.count() == 0
 
 
-# --- CSRF / şema ---------------------------------------------------------
+# --- CSRF / schema ---------------------------------------------------------
 
 def test_patch_csrf_yoksa_403(client):
     login_as(client, MANAGER)
@@ -412,14 +413,14 @@ def test_patch_csrf_yoksa_403(client):
 
 
 def test_tablolar_create_all_ile_gelir(client):
-    """app.py'de `import models_planning` unutulursa tablolar prod'da doğmaz → 500.
-    Bu test o import satırını kilitler."""
+    """If `import models_planning` is forgotten in app.py, the tables never get created
+    in prod → 500. This test locks in that import line."""
     names = set(db.metadata.tables)
     assert {'planning_boards', 'planning_items'} <= names
 
 
 def test_board_get_sorgu_sayisi_oge_sayisindan_bagimsiz(client):
-    """N+1 muhafızı — assignee_name/updated_by_name lazy erişimle çözülürse kırılır."""
+    """N+1 guard — breaks if assignee_name/updated_by_name get resolved via lazy access."""
     def count_queries(n_items):
         db.drop_all()
         db.create_all()
@@ -443,11 +444,11 @@ def test_board_get_sorgu_sayisi_oge_sayisindan_bagimsiz(client):
 
 
 # =========================================================================
-# Domain bağları + linkables + assigned (2026-07-26 React Flow geçişi)
+# Domain links + linkables + assigned (2026-07-26 React Flow migration)
 # =========================================================================
 
 def _seed_domain():
-    """Bağlanabilir domain kayıtları: müşteri, çekim görevi, reklam kampanyası."""
+    """Linkable domain records: client, shoot task, ad campaign."""
     from models import AdCampaign, Client
     from models_sharing import ShootTask
     c = Client(name='ALBA İNŞAAT', status='active')
@@ -462,7 +463,7 @@ def _seed_domain():
     return c.id, t.id, a.id
 
 
-# --- FK alanları -----------------------------------------------------------
+# --- FK fields -----------------------------------------------------------
 
 def test_domain_baglari_yazilir_ve_adlari_cozulur(client):
     login_as(client, MANAGER); _seed_users()
@@ -472,7 +473,7 @@ def test_domain_baglari_yazilir_ve_adlari_cozulur(client):
     assert r.status_code == 200, r.get_json()
     it = _by_key(_items(client, 'management'))['a1']
     assert (it['client_id'], it['shoot_task_id'], it['ad_campaign_id']) == (cid, tid, aid)
-    # Adlar SUNUCUDA çözülür — panel ikinci istek atmaz.
+    # Names are resolved on the SERVER — the panel doesn't make a second request.
     assert it['client_name'] == 'ALBA İNŞAAT'
     assert it['shoot_title'] == 'Şantiye çekimi'
     assert it['campaign_title'] == 'Yaz kampanyası'
@@ -482,14 +483,14 @@ def test_bilinmeyen_cekim_gorevi_400(client):
     login_as(client, MANAGER); _seed_users()
     r = _patch(client, 'management', [_card('a1', shoot_task_id=9999)])
     assert r.status_code == 400
-    assert 'çekim' in r.get_json()['error']
+    assert 'shoot task' in r.get_json()['error']
 
 
 def test_bilinmeyen_kampanya_400(client):
     login_as(client, MANAGER); _seed_users()
     r = _patch(client, 'management', [_card('a1', ad_campaign_id=9999)])
     assert r.status_code == 400
-    assert 'kampanya' in r.get_json()['error']
+    assert 'ad campaign' in r.get_json()['error']
 
 
 def test_domain_bagi_sayi_olmali_400(client):
@@ -505,19 +506,20 @@ def test_domain_bagi_bosa_cekilebilir(client):
     _patch(client, 'management', [{'item_key': 'a1', 'shoot_task_id': None}])
     it = _by_key(_items(client, 'management'))['a1']
     assert it['shoot_task_id'] is None
-    assert it['client_id'] == cid          # dokunulmayan bağ korunur
+    assert it['client_id'] == cid          # untouched link is preserved
     assert it['shoot_title'] is None
 
 
 def test_domain_fk_leri_set_null_ile_tanimli():
-    """Kartı YOK ETMEYEN bağ — şema niyetini kilitler.
+    """A link that does NOT destroy the card — locks in the schema intent.
 
-    Davranışın kendisi (silince kolonun NULL'a düşmesi) sqlite'ta DOĞRULANAMAZ:
-    `PRAGMA foreign_keys` kapalı olduğu için FK eylemleri hiç tetiklenmez ve
-    pragma'yı açmak 864 testin tamamının FK davranışını değiştirirdi. Canlı
-    Postgres'te doğrulandı (2026-07-26: `pg_constraint.confdeltype = 'n'`).
-    Burada tanımın kendisi kilitleniyor — biri `ondelete`'i düşürürse test kırılır.
-    Aynı gerekçe `with_for_update` için de geçerli (bkz. board_items_patch)."""
+    The behavior itself (the column dropping to NULL on delete) CANNOT be verified in
+    sqlite: since `PRAGMA foreign_keys` is off, FK actions never fire, and turning the
+    pragma on would change FK behavior for all 864 tests. Verified against live
+    Postgres (2026-07-26: `pg_constraint.confdeltype = 'n'`).
+    Here it's the definition itself that's locked in — if someone drops `ondelete`,
+    this test breaks. The same reasoning applies to `with_for_update` (see
+    board_items_patch)."""
     from models_planning import PlanningItem
     fks = {fk.parent.name: fk for fk in PlanningItem.__table__.foreign_keys}
     for col in ('shoot_task_id', 'ad_campaign_id'):
@@ -525,8 +527,8 @@ def test_domain_fk_leri_set_null_ile_tanimli():
 
 
 def test_cekim_silinince_kart_yasar(client):
-    """Çekim kaydı gidince planlama kartı DURUR — kart planlama verisidir,
-    çekimin kaydı değil."""
+    """When the shoot record goes away, the planning card STAYS — the card is planning
+    data, not the shoot's record."""
     from models_sharing import ShootTask
     login_as(client, MANAGER); _seed_users()
     _, tid, _ = _seed_domain()
@@ -537,9 +539,9 @@ def test_cekim_silinince_kart_yasar(client):
 
 
 def test_bilinmeyen_alan_sessizce_yutulur(client):
-    """MUHAFIZ — belge niteliğinde: `_apply_item` bilmediği anahtarı yok sayar,
-    400 vermez. Yani bir yazım hatası 200 döner ama HİÇBİR ŞEY yazmaz. Yeni alan
-    eklerken bu davranış bilinsin diye kilitli."""
+    """GUARD — documentation in nature: `_apply_item` ignores unknown keys, doesn't
+    give 400. So a typo returns 200 but writes NOTHING. Locked in so this behavior is
+    known when adding new fields."""
     login_as(client, MANAGER); _seed_users()
     r = _patch(client, 'management', [_card('a1', shoot_taskid=5, bilinmeyen='x')])
     assert r.status_code == 200
@@ -565,11 +567,12 @@ def test_extra_anahtari_null_ile_silinir(client):
     assert _by_key(_items(client, 'management'))['a1']['extra'] == {'b': 2}
 
 
-# --- N+1 muhafızı (genişletildi) ------------------------------------------
+# --- N+1 guard (extended) ------------------------------------------
 
 def test_domain_adlari_sorgu_sayisini_buyutmez(client):
-    """Üç türetilmiş ad (client/shoot/campaign) BAĞ TÜRÜ başına tek toplu sorgu.
-    `r.client.name` yazılırsa öğe başına lazy sorgu doğar ve bu test kırılır."""
+    """Three derived names (client/shoot/campaign) — one batch query per LINK TYPE.
+    If `r.client.name` is written, a per-item lazy query appears and this test
+    breaks."""
     def count(n_items):
         db.drop_all(); db.create_all()
         login_as(client, MANAGER); _seed_users()
@@ -593,7 +596,7 @@ def test_domain_adlari_sorgu_sayisini_buyutmez(client):
     assert count(3) == count(20)
 
 
-# --- /linkables rol matrisi ------------------------------------------------
+# --- /linkables permission matrix ------------------------------------------------
 
 LINKABLES = f'{BASE}/linkables'
 
@@ -617,12 +620,12 @@ def test_linkables_management_dort_bolum(client):
 
 
 def test_linkables_videographer_kampanyayi_gormez(client):
-    """Mali bilgi — ads.py da yalnız management'a açık. 403 DEĞİL boş dizi:
-    panel bölümü hiç render etmez."""
+    """Financial info — like ads.py, open only to management. NOT 403, empty array:
+    the panel just doesn't render the section."""
     login_as(client, VIDEOGRAPHER); _seed_users(); _seed_domain()
     d = client.get(LINKABLES).get_json()
     assert d['ad_campaigns'] == []
-    assert len(d['shoot_tasks']) == 1     # çekim onun işi, görür
+    assert len(d['shoot_tasks']) == 1     # the shoot is their job, they see it
     assert len(d['clients']) == 1
 
 
@@ -635,8 +638,8 @@ def test_linkables_designer_cekim_ve_kampanya_gormez(client):
 
 
 def test_linkables_users_pending_icermez(client):
-    """`/api/users` panoya HİÇ erişemeyen pending'i de döndürüyor; burada süzülür
-    ki erişimsiz kişiye kart atanamasın."""
+    """`/api/users` also returns pending users who have NO board access at all; it's
+    filtered here so cards can't be assigned to people without access."""
     from models import UserRef
     login_as(client, MANAGER); _seed_users()
     db.session.add(UserRef(sub=PENDING['sub'], email=PENDING['email'],
@@ -653,7 +656,7 @@ def test_linkables_arama_suzuyor(client):
     assert client.get(f'{LINKABLES}?q=YOKBOYLE').get_json()['clients'] == []
 
 
-# --- /assigned -------------------------------------------------------------
+# --- /assigned ---------------------------------------------------------------
 
 ASSIGNED = f'{BASE}/assigned'
 
@@ -666,7 +669,7 @@ def test_assigned_calisan_baskasini_soramaz(client):
     login_as(client, DESIGNER); _seed_users()
     r = client.get(f"{ASSIGNED}?assignee_sub={MANAGER['sub']}")
     assert r.status_code == 403
-    assert 'kendi' in r.get_json()['error']
+    assert 'own' in r.get_json()['error']
 
 
 def test_assigned_management_herkesi_sorar(client):
@@ -675,25 +678,26 @@ def test_assigned_management_herkesi_sorar(client):
 
 
 def test_assigned_yonetim_panosu_karti_calisana_DONER(client):
-    """BİLİNÇLİ YETKİ GEDİĞİ (2026-07-26, proje sahibi onayladı).
+    """INTENTIONAL PERMISSION GAP (2026-07-26, approved by the project owner).
 
-    Tasarımcı yönetim panosunu AÇAMAZ (403) ama kendisine atanmış kart bu uçtan
-    döner — aksi halde yöneticinin atama yapması çalışan açısından görünmez
-    kalırdı. Bu test o kararı kilitler: kırılırsa ürün kararı değişmiş demektir,
-    kazara değil bilerek güncellensin."""
+    The designer CANNOT open the management board (403), but a card assigned to them
+    is still returned by this endpoint — otherwise a manager's assignment would stay
+    invisible to the employee. This test locks in that decision: if it breaks, the
+    product decision has changed, so update it deliberately, not by accident."""
     login_as(client, MANAGER); _seed_users()
     _patch(client, 'management', [_card('a1', assignee_sub=DESIGNER['sub'],
                                         due_date='2026-08-01')])
     login_as(client, DESIGNER)
-    assert client.get(MGMT).status_code == 403          # pano hâlâ kapalı
-    items = client.get(ASSIGNED).get_json()['items']    # ama kart görünür
+    assert client.get(MGMT).status_code == 403          # board is still closed
+    items = client.get(ASSIGNED).get_json()['items']    # but the card is visible
     assert [i['item_key'] for i in items] == ['a1']
     assert items[0]['board_key'] == 'management'
-    assert items[0]['board_title'] == 'Yönetim Panosu'
+    assert items[0]['board_title'] == 'Management Board'
 
 
 def test_assigned_sizan_alan_kumesi_dar(client):
-    """Gövde metni, renk, konum ve extra DÖNMEZ — sızıntı bilerek dar tutuldu."""
+    """Body text, color, position, and extra are NOT returned — the leak surface is
+    intentionally kept narrow."""
     login_as(client, MANAGER); _seed_users()
     _patch(client, 'management', [_card('a1', assignee_sub=DESIGNER['sub'],
                                         text='gizli notlar', color='#ff0000',

@@ -1,5 +1,5 @@
-"""Caption üretimi — prompt/parse birimleri + API. Worker testleri (dispatch
-dahil) test_ai_worker.py'a taşındı (bkz. caption_worker.py → ai_worker.py)."""
+"""Caption generation — prompt/parse units + API. Worker tests (including dispatch)
+moved to test_ai_worker.py (see caption_worker.py → ai_worker.py)."""
 import ai_claude
 import caption
 from conftest import DESIGNER, MANAGER, login_as
@@ -14,11 +14,11 @@ def test_build_prompt_baglam_ve_3_alternatif():
                              transcript="merhaba bu bir video")
     assert "Kafe X" in p and "Yeme-İçme" in p
     assert "bahar kampanyası" in p and "rengi mavi" in p
-    assert "merhaba bu bir video" in p  # transkript bağlamı
+    assert "merhaba bu bir video" in p  # transcript context
     assert "[[CAPTION]]" in p and "[[HASHTAGS]]" in p
-    # Varsayılan: YALNIZCA Türkçe (İngilizce/'---' dayatması YOK), 3 paragraf, 14 hashtag
+    # Default: Turkish ONLY (no English/'---' forcing), 3 paragraphs, 14 hashtags
     assert "YALNIZCA Türkçe" in p
-    assert "İngilizce çeviri" not in p or "EKLEME" in p  # İngilizce zorlaması yok
+    assert "İngilizce çeviri" not in p or "EKLEME" in p  # no English variant forced
     assert "tam 14 adet" in p
     assert "açılış cümlesi" in p and "gövde" in p and "Kapanış" in p
 
@@ -41,7 +41,7 @@ def test_parse_cok_satirli_iki_dilli():
 
 def test_build_prompt_gorsel_notu():
     p = caption.build_prompt("X", None, "video", images=True)
-    assert "görsel" in p.lower() and "öncelik" in p.lower()  # görsel-öncelikli bağlam notu
+    assert "görsel" in p.lower() and "öncelik" in p.lower()  # image-priority context note
 
 
 def test_build_prompt_marka_rehberi():
@@ -74,15 +74,15 @@ def test_build_prompt_global_kurallar_bicimden_once():
 
 
 def test_build_prompt_varsayilan_turkce_only_uc_paragraf():
-    """Varsayılan (settings yok): YALNIZCA Türkçe, 3 paragraf düzen, 14 hashtag;
-    İngilizce/'---' dayatması YOK (2026-07-18 proje sahibi kararı)."""
+    """Default (no settings): Turkish ONLY, 3-paragraph layout, 14 hashtags;
+    no English/'---' forcing (2026-07-18 project owner decision)."""
     p = caption.build_prompt("Kafe X", "Yeme-İçme", "post",
                              brief_intro="bahar kampanyası", note="rengi mavi",
                              transcript="merhaba bu bir video")
     assert "YALNIZCA Türkçe yaz" in p
-    assert "İngilizcesi" not in p           # İngilizce alternatif dayatılmıyor
-    assert "tam 14 adet" in p               # varsayılan hashtag
-    # 3 paragraf düzeninin izleri
+    assert "İngilizcesi" not in p           # no English alternative forced
+    assert "tam 14 adet" in p               # default hashtag count
+    # traces of the 3-paragraph layout
     assert "açılış cümlesi" in p and "2-3 cümlelik gövde" in p
     assert "Kapanış: varsa CTA / adres / web sitesi" in p and "UYDURMA" in p
     assert p.count("[[CAPTION]]") == 3 and "[[HASHTAGS]]" in p
@@ -114,7 +114,7 @@ def test_run_claude_gorselleri_arg_gecer(monkeypatch):
             stdout = "CAPTION1: a\nHASHTAGS: #x"
             stderr = ""
         return R()
-    # run_claude artık sertleştirilmiş ai_claude.run'a yönlenir; subprocess orada.
+    # run_claude now routes to the hardened ai_claude.run; subprocess lives there.
     monkeypatch.setattr(ai_claude.subprocess, "run", fake_run)
     caption.run_claude("prompt", image_paths=["/tmp/f0.jpg", "/tmp/f1.jpg"])
     assert "/tmp/f0.jpg" in captured["cmd"] and "/tmp/f1.jpg" in captured["cmd"]
@@ -124,12 +124,12 @@ def test_build_prompt_transcript_delimiter_icinde():
     p = caption.build_prompt("Kafe X", "Yeme-İçme", "post",
                              transcript="merhaba bu bir video",
                              brand_profile={"brand_voice": "samimi ve enerjik"})
-    # transkript untrusted delimiter bloğu İÇİNDE
+    # transcript is INSIDE the untrusted delimiter block
     baş = p.index("<<<TRANSKRİPT")
     son = p.index("<<<SON TRANSKRİPT>>>")
     içerik = p.index("merhaba bu bir video")
     assert baş < içerik < son
-    # marka rehberi GÜVENİLİR → delimiter DIŞINDA
+    # brand guide is TRUSTED → OUTSIDE the delimiter
     assert "samimi ve enerjik" in p
     assert not (baş < p.index("samimi ve enerjik") < son)
 
@@ -139,7 +139,7 @@ def test_build_prompt_injection_delimiter_icinde():
     p = caption.build_prompt("Kafe X", "Yeme-İçme", "post", transcript=kotu)
     baş = p.index("<<<TRANSKRİPT")
     son = p.index("<<<SON TRANSKRİPT>>>")
-    # injection metni talimat konumunda değil, veri bloğu içinde
+    # the injection text is not in an instruction position, it's inside the data block
     assert baş < p.index(kotu) < son
 
 
@@ -154,12 +154,12 @@ def test_generate_per_job_model(monkeypatch):
             stderr = ""
         return R()
     monkeypatch.setattr(ai_claude.subprocess, "run", fake_run)
-    # per-job model cmd'ye akmalı
+    # per-job model should flow into the cmd
     caption.generate("Kafe X", "Yeme-İçme", "post", model="claude-opus-4-8")
     cmd = captured["cmd"]
     i = cmd.index("--model")
     assert cmd[i + 1] == "claude-opus-4-8"
-    # model verilmezse env/default'a düşer
+    # falls back to env/default when no model is given
     captured.clear()
     caption.generate("Kafe X", "Yeme-İçme", "post")
     cmd = captured["cmd"]
@@ -176,26 +176,26 @@ def test_parse_bicim_tutmazsa_tumu_caption():
     assert caps == ["sadece düz metin"] and tags == ""
 
 
-# --- Faz 1b: caption ayarları (çözümleme + prompt + model akışı) ---
+# --- Phase 1b: caption settings (resolution + prompt + model flow) ---
 
 def test_resolve_caption_settings_uc_katman():
-    """Öncelik: payload > client varsayılanı > sistem varsayılanı; verilmeyen alan
-    alt katmandan gelir (üç katmanlı örnek)."""
+    """Priority: payload > client default > system default; a field that isn't
+    given comes from the layer below (three-layer example)."""
     import ai_context
 
     class Cli:
         caption_settings = {'lang': 'EN', 'emoji_limit': 1, 'hashtag_count': 9}
 
     r = ai_context.resolve_caption_settings(Cli(), {'emoji_limit': 5})
-    assert r['emoji_limit'] == 5      # payload, client'ı override eder
-    assert r['lang'] == 'EN'          # client, sistemi override eder
-    assert r['hashtag_count'] == 9    # client (payload'da yok)
-    assert r['use_brief'] is False    # sistem varsayılanı (hiçbir katmanda yok; 2026-07-18: default kapalı)
-    assert r['char_limit'] is None    # sistem varsayılanı
+    assert r['emoji_limit'] == 5      # payload overrides client
+    assert r['lang'] == 'EN'          # client overrides system
+    assert r['hashtag_count'] == 9    # client (not in payload)
+    assert r['use_brief'] is False    # system default (not set in any layer; 2026-07-18: default off)
+    assert r['char_limit'] is None    # system default
 
 
 def test_resolve_caption_settings_bos_sistem_varsayilani():
-    """client.caption_settings None + payload None → tümü sistem varsayılanı."""
+    """client.caption_settings None + payload None → everything falls to the system default."""
     import ai_context
 
     class Cli:
@@ -207,11 +207,11 @@ def test_resolve_caption_settings_bos_sistem_varsayilani():
     assert r['emoji_limit'] is not None
     assert r['hashtag_count'] is not None
     assert r['char_limit'] is None
-    assert r['model'] is None         # None → ai_claude env/DEFAULT_MODEL'e düşer
+    assert r['model'] is None         # None → falls back to ai_claude's env/DEFAULT_MODEL
 
 
 def test_resolve_caption_settings_bilinmeyen_anahtar_duser():
-    """Şema dışı anahtar sonuca sızmaz (sadece bilinen alanlar)."""
+    """A key outside the schema doesn't leak into the result (only known fields)."""
     import ai_context
 
     class Cli:
@@ -223,30 +223,30 @@ def test_resolve_caption_settings_bilinmeyen_anahtar_duser():
 
 
 def test_build_prompt_use_brief_false_brief_yok():
-    """NEGATİF: use_brief=False iken brief mevcut olsa bile prompt'ta brief intro YOK."""
+    """NEGATIVE: when use_brief=False, the brief intro is NOT in the prompt even if a brief exists."""
     p = caption.build_prompt("Kafe X", "Yeme-İçme", "post", brief_intro="bahar kampanyası",
                              settings={'use_brief': False})
     assert "bahar kampanyası" not in p
-    # karşıtı: use_brief=True → brief var
+    # opposite: use_brief=True → brief is there
     p2 = caption.build_prompt("Kafe X", "Yeme-İçme", "post", brief_intro="bahar kampanyası",
                               settings={'use_brief': True})
     assert "bahar kampanyası" in p2
 
 
 def test_build_prompt_ayar_talimatlari():
-    """dil (EN) / emoji limiti / hashtag sayısı / karakter limiti prompt'a yansır."""
+    """language (EN) / emoji limit / hashtag count / character limit are reflected in the prompt."""
     p = caption.build_prompt("Kafe X", "Yeme-İçme", "post",
                              settings={'lang': 'EN', 'emoji_limit': 2, 'hashtag_count': 5,
                                        'char_limit': 120})
     assert "YALNIZCA İngilizce" in p
     assert "2 emoji" in p
-    assert "tam 5 adet" in p          # hashtag sayısı düzen bloğunda
+    assert "tam 5 adet" in p          # hashtag count in the layout block
     assert "120 karakter" in p
 
 
 def test_build_prompt_ton_brand_voice_override():
-    """Ton üret-anı override: settings.tone verilince brand_voice yerine ton kullanılır
-    (çift kaynak çakışması yok)."""
+    """Tone override at generation time: when settings.tone is given, tone is used instead
+    of brand_voice (no dual-source conflict)."""
     profile = {'brand_voice': 'resmi ve mesafeli'}
     p = caption.build_prompt("Kafe X", "Yeme-İçme", "post", brand_profile=profile,
                              settings={'tone': 'esprili ve samimi'})
@@ -255,7 +255,7 @@ def test_build_prompt_ton_brand_voice_override():
 
 
 def test_build_prompt_ozel_gun_varsa_blok():
-    """Opsiyonel `special_days` verilirse gün adı prompt'a girer (12: 5→1 oku)."""
+    """If the optional `special_days` is given, the day name enters the prompt (12: read 5→1)."""
     p = caption.build_prompt("Kafe X", "Yeme-İçme", "post",
                              special_days=[{"day_name": "Anneler Günü",
                                             "description": "sevgi günü"}])
@@ -264,7 +264,7 @@ def test_build_prompt_ozel_gun_varsa_blok():
 
 
 def test_build_prompt_ozel_gun_yoksa_blok_yok_geriye_uyum():
-    """special_days boş/None → blok yok, çıktı parametresizle BİREBİR aynı (geriye uyum)."""
+    """special_days empty/None → no block, output is IDENTICAL to the parameterless call (backward compat)."""
     p_none = caption.build_prompt("Kafe X", "Yeme-İçme", "post")
     p_bos = caption.build_prompt("Kafe X", "Yeme-İçme", "post", special_days=[])
     assert p_none == p_bos
@@ -272,7 +272,7 @@ def test_build_prompt_ozel_gun_yoksa_blok_yok_geriye_uyum():
 
 
 def test_generate_settings_model_cmde(monkeypatch):
-    """settings.model → subprocess cmd'sinde --model <model> (03 per-job model yolu)."""
+    """settings.model → --model <model> in the subprocess cmd (03 per-job model path)."""
     captured = {}
 
     def fake_run(cmd, **kw):
@@ -286,7 +286,7 @@ def test_generate_settings_model_cmde(monkeypatch):
     caption.generate("Kafe X", "Yeme-İçme", "post", settings={'model': 'claude-opus-4-8'})
     cmd = captured["cmd"]
     assert cmd[cmd.index("--model") + 1] == "claude-opus-4-8"
-    # settings.model yoksa env/default'a düşer
+    # falls back to env/default when settings.model is absent
     captured.clear()
     caption.generate("Kafe X", "Yeme-İçme", "post", settings={'lang': 'TR'})
     cmd = captured["cmd"]
@@ -318,7 +318,7 @@ def test_caption_enqueue_ve_poll(client):
 
 
 def test_caption_enqueue_settings_payloada_gecer(client):
-    """İstek gövdesindeki `settings` enqueue payload'ına girer (üret-anı override)."""
+    """`settings` in the request body enters the enqueue payload (generation-time override)."""
     from extensions import db
     from models import Job
     login_as(client, MANAGER)
@@ -336,7 +336,7 @@ def test_caption_enqueue_settings_payloada_gecer(client):
 
 
 def test_caption_enqueue_settingssiz_geriye_uyum(client):
-    """Gövde settings içermezse payload yalnız share_id taşır (eski davranış)."""
+    """If the body doesn't contain settings, the payload carries only share_id (old behavior)."""
     from extensions import db
     from models import Job
     login_as(client, MANAGER)
@@ -351,15 +351,15 @@ def test_caption_enqueue_settingssiz_geriye_uyum(client):
 
 
 def test_build_prompt_feedback_ve_onceki_caption():
-    """Yeniden üret: kullanıcı geri bildirimi talimat olarak, beğenilmeyen önceki
-    caption 'tekrarlama' için delimiter'lı (untrusted) girer."""
+    """Regenerate: user feedback goes in as an instruction, the disliked previous
+    caption goes in with a delimiter (untrusted) for 'avoid repeating'."""
     p = caption.build_prompt("X", None, "post",
                              feedback="daha kısa, fiyattan bahsetme",
                              previous_caption="Eski uzun caption metni")
     assert "daha kısa, fiyattan bahsetme" in p
     assert "TEKRARLAMA" in p or "tekrarlama" in p.lower()
     assert "Eski uzun caption metni" in p
-    # önceki caption untrusted çerçevede
+    # previous caption is in the untrusted frame
     assert "BEĞENİLMEYEN" in p or "KULLANICI/MEDYA" in p
 
 

@@ -1,15 +1,16 @@
-// Reklam zaman çizelgesi (Gantt) — her kampanya, tarih aralığı boyunca uzanan bir çubuk.
-// Satırlar müşteriye göre gruplanır; x ekseni görünen kampanyaları kapsayan gün penceresi.
-// Bitişi boş kampanya "devam ediyor" → çubuk pencerenin sonuna kadar uzar (kesikli uç).
+// Ad timeline (Gantt) — each campaign is a bar spanning its date range.
+// Rows are grouped by client; the x-axis is a day window covering the visible campaigns.
+// A campaign with no end date is "ongoing" → its bar extends to the end of the window (dashed tip).
 import { useMemo } from "react"
 
-import { fmtTRY, PLATFORM_LABELS, STATUS_LABELS, type AdCampaign } from "@/lib/ads"
+import { fmtTRY, usePlatformLabels, useStatusLabels, type AdCampaign } from "@/lib/ads"
+import { useI18n } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
 const DAY = 86_400_000
-const LABEL_W = 224 // sol etiket sütunu (px) — yatay kaydırmada sabit kalır
+const LABEL_W = 224 // left label column (px) — stays fixed during horizontal scroll
 
-// 'YYYY-MM-DD' → UTC gün başlangıcı (ms). TZ kaymasını önlemek için UTC matematiği.
+// 'YYYY-MM-DD' → UTC start of day (ms). UTC math to avoid timezone drift.
 function parseDay(s: string) {
   const [y, m, d] = s.split("-").map(Number)
   return Date.UTC(y, (m || 1) - 1, d || 1)
@@ -37,11 +38,14 @@ export function AdsGantt({
   campaigns: AdCampaign[]
   onSelect: (c: AdCampaign) => void
 }) {
+  const { t } = useI18n()
+  const PLATFORM_LABELS = usePlatformLabels()
+  const STATUS_LABELS = useStatusLabels()
   const model = useMemo(() => {
     if (campaigns.length === 0) return null
     const today = todayUTC()
 
-    // Pencere: en erken başlangıç → en geç bitiş (devam edenler için bugün + 14 gün pay)
+    // Window: earliest start → latest end (today + 14-day margin for ongoing ones)
     let min = Infinity
     let max = -Infinity
     for (const c of campaigns) {
@@ -53,11 +57,11 @@ export function AdsGantt({
     min -= 2 * DAY
     max += 2 * DAY
     const dayCount = Math.max(1, Math.round((max - min) / DAY) + 1)
-    // Gün genişliği: dar aralıkta ferah, geniş aralıkta sıkışık ama okunur (yatay kaydırma var)
+    // Day width: roomy for narrow ranges, cramped but readable for wide ones (horizontal scroll available)
     const pxPerDay = dayCount <= 40 ? 26 : dayCount <= 120 ? 12 : dayCount <= 400 ? 5 : 2.2
     const width = Math.round(dayCount * pxPerDay)
 
-    // Ay başlıkları (pencere içindeki her ayın payı)
+    // Month headers (each month's share within the window)
     const months: { label: string; left: number; width: number }[] = []
     const first = new Date(min)
     const cur = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth(), 1))
@@ -76,7 +80,7 @@ export function AdsGantt({
       cur.setUTCMonth(cur.getUTCMonth() + 1)
     }
 
-    // Müşteriye göre grupla (müşteri adı alfabetik, içinde başlangıca göre)
+    // Group by client (client name alphabetically, then by start date within each group)
     const groups = new Map<number, { name: string; rows: AdCampaign[] }>()
     for (const c of campaigns) {
       const g = groups.get(c.client_id) ?? { name: c.client_name || `#${c.client_id}`, rows: [] }
@@ -89,14 +93,14 @@ export function AdsGantt({
 
     const todayLeft = today >= min && today <= max ? ((today - min) / DAY) * pxPerDay : null
 
-    // Gün numarası işaretleri: BUGÜN + kampanyaların BİTİŞ tarihleri. Her günü
-    // numaralamıyoruz (kalabalık olurdu); bunlar "bir bakışta gün ayrımı" için çapa.
-    // Çakışan etiketler elenir — bugün her zaman öncelikli, sonra soldan sağa yerleşir.
+    // Day-number ticks: TODAY + campaign END dates. We don't number every day
+    // (would be cluttered); these are anchors for "at-a-glance day distinction".
+    // Overlapping labels are dropped — today always takes priority, then placement goes left to right.
     const posOf = (ms: number) => ((ms - min) / DAY) * pxPerDay
     const dayNum = (ms: number) => String(new Date(ms).getUTCDate())
     const ticks: { ms: number; left: number; label: string; kind: "today" | "end" }[] = []
     const placed: number[] = []
-    const MIN_GAP = 18 // px — etiketler bundan yakınsa ikincisi elenir
+    const MIN_GAP = 18 // px — if labels are closer than this, the second one is dropped
 
     if (todayLeft != null) {
       ticks.push({ ms: today, left: todayLeft, label: dayNum(today), kind: "today" })
@@ -107,8 +111,8 @@ export function AdsGantt({
       .filter((ms) => ms >= min && ms <= max)
       .sort((a, b) => a - b)
     for (const ms of endDays) {
-      // Bitiş günü DAHİL olduğu için çubuk o günün SONUNDA biter → etiket/çizgi de
-      // oraya hizalanır (gün başına değil), yoksa bir gün solda görünürdü.
+      // Since the end day is INCLUSIVE, the bar ends at the END of that day → the
+      // label/line is aligned there too (not the start of the day), otherwise it'd appear one day to the left.
       const left = posOf(ms) + pxPerDay
       if (placed.some((p) => Math.abs(p - left) < MIN_GAP)) continue
       ticks.push({ ms, left, label: dayNum(ms), kind: "end" })
@@ -116,7 +120,7 @@ export function AdsGantt({
     }
     ticks.sort((a, b) => a.left - b.left)
 
-    // Gün ızgarası: gün başına çizgi (dar aralıkta), çok uzun pencerede haftalık
+    // Day grid: a line per day (for narrow ranges), weekly for very long windows
     const gridStep = pxPerDay >= 6 ? pxPerDay : pxPerDay * 7
     const gridBg = `repeating-linear-gradient(to right, rgba(148,163,184,0.28) 0 1px, transparent 1px ${gridStep}px)`
 
@@ -126,7 +130,7 @@ export function AdsGantt({
   if (!model) {
     return (
       <div className="rounded-lg border p-8 text-center text-sm text-muted-foreground">
-        Gösterilecek reklam yok — filtreyi değiştir ya da "Reklam ekle" ile başla.
+        {t("components.ads.adsGantt.empty")}
       </div>
     )
   }
@@ -145,11 +149,11 @@ export function AdsGantt({
   return (
     <div className="overflow-x-auto rounded-lg border">
       <div style={{ width: LABEL_W + width }}>
-        {/* Ay başlıkları */}
+        {/* Month headers */}
         <div className="flex border-b bg-muted/40">
           <div style={{ width: LABEL_W }}
             className="sticky left-0 z-20 shrink-0 border-r bg-muted/40 px-3 py-1.5 text-xs font-medium">
-            Müşteri / Kampanya
+            {t("components.ads.adsGantt.clientCampaign")}
           </div>
           <div className="relative" style={{ width, height: 28 }}>
             {months.map((m) => (
@@ -164,32 +168,34 @@ export function AdsGantt({
           </div>
         </div>
 
-        {/* Gün numarası şeridi — yalnız BUGÜN + kampanya BİTİŞ günleri (çakışanlar elenir) */}
+        {/* Day-number strip — only TODAY + campaign END days (overlapping ones dropped) */}
         <div className="flex border-b bg-background">
           <div style={{ width: LABEL_W }}
             className="sticky left-0 z-20 shrink-0 border-r bg-background px-3 py-1 text-[10px] text-muted-foreground">
-            gün
+            {t("components.ads.adsGantt.day")}
           </div>
           <div className="relative" style={{ width, height: 20, backgroundImage: gridBg }}>
-            {ticks.map((t) => (
+            {ticks.map((tick) => (
               <div
-                key={`${t.kind}-${t.ms}`}
-                style={{ left: t.left }}
+                key={`${tick.kind}-${tick.ms}`}
+                style={{ left: tick.left }}
                 className={cn(
                   "absolute top-0 -translate-x-1/2 rounded px-1 text-[10px] font-medium leading-5",
-                  t.kind === "today"
+                  tick.kind === "today"
                     ? "bg-red-500 text-white"
                     : "text-muted-foreground",
                 )}
-                title={t.kind === "today" ? `Bugün · ${fmtDay(t.ms)}` : `Bitiş · ${fmtDay(t.ms)}`}
+                title={tick.kind === "today"
+                  ? t("components.ads.adsGantt.todayTitle", { date: fmtDay(tick.ms) })
+                  : t("components.ads.adsGantt.endTitle", { date: fmtDay(tick.ms) })}
               >
-                {t.label}
+                {tick.label}
               </div>
             ))}
           </div>
         </div>
 
-        {/* Gruplar + çubuklar */}
+        {/* Groups + bars */}
         {grouped.map((g) => (
           <div key={g.name}>
             <div className="flex border-b bg-muted/20">
@@ -209,18 +215,18 @@ export function AdsGantt({
                 <div key={c.id} className="flex border-b last:border-0 hover:bg-muted/30">
                   <div style={{ width: LABEL_W }}
                     className="sticky left-0 z-20 shrink-0 truncate border-r bg-background px-3 py-2 text-xs">
-                    <span className="text-muted-foreground">{c.title || "(adsız)"}</span>
+                    <span className="text-muted-foreground">{c.title || t("components.ads.adsGantt.untitled")}</span>
                   </div>
                   <div className="relative" style={{ width, height: 36, backgroundImage: gridBg }}>
-                    {/* ay sınırları (gün ızgarasından daha belirgin) */}
+                    {/* month boundaries (more prominent than the day grid) */}
                     {months.map((m) => (
                       <div key={m.label} className="absolute top-0 h-full border-l border-border"
                         style={{ left: m.left }} />
                     ))}
-                    {/* gün numarası verilen tarihlerde ince dikey çapa (etiketle hizalı) */}
-                    {ticks.filter((t) => t.kind === "end").map((t) => (
-                      <div key={t.ms} className="absolute top-0 h-full w-px bg-muted-foreground/25"
-                        style={{ left: t.left }} />
+                    {/* thin vertical anchor on dates with a day number (aligned with the label) */}
+                    {ticks.filter((tk) => tk.kind === "end").map((tk) => (
+                      <div key={tk.ms} className="absolute top-0 h-full w-px bg-muted-foreground/25"
+                        style={{ left: tk.left }} />
                     ))}
                     {todayLeft != null && (
                       <div className="absolute top-0 z-10 h-full w-px bg-red-500/60" style={{ left: todayLeft }} />
@@ -228,7 +234,7 @@ export function AdsGantt({
                     <button
                       type="button"
                       onClick={() => onSelect(c)}
-                      title={`${c.client_name} · ${c.title || "(adsız)"}\n${PLATFORM_LABELS[c.platform] ?? c.platform} · ${STATUS_LABELS[c.status] ?? c.status}\n${fmtDay(parseDay(c.start_date))} → ${c.end_date ? fmtDay(parseDay(c.end_date)) : "devam ediyor"}\n${fmtTRY(c.amount_spent)}${c.notes ? `\n${c.notes}` : ""}`}
+                      title={`${c.client_name} · ${c.title || t("components.ads.adsGantt.untitled")}\n${PLATFORM_LABELS[c.platform] ?? c.platform} · ${STATUS_LABELS[c.status] ?? c.status}\n${fmtDay(parseDay(c.start_date))} → ${c.end_date ? fmtDay(parseDay(c.end_date)) : t("components.ads.adsGantt.ongoing")}\n${fmtTRY(c.amount_spent)}${c.notes ? `\n${c.notes}` : ""}`}
                       className={cn(
                         "absolute top-1.5 flex h-6 items-center gap-1 overflow-hidden rounded px-1.5 text-[11px] font-medium text-white transition-colors",
                         STATUS_BAR[c.status] ?? "bg-primary/80",
@@ -242,7 +248,7 @@ export function AdsGantt({
                       )}
                     </button>
                     {b.ongoing && (
-                      // "devam ediyor" ucu: çubuk penceresinin sonunda kesikli sınır
+                      // "ongoing" tip: dashed border at the end of the bar's window
                       <div className="pointer-events-none absolute top-1.5 h-6 border-y border-r border-dashed border-muted-foreground/60"
                         style={{ left: b.left + b.width, width: 10 }} />
                     )}
@@ -254,14 +260,14 @@ export function AdsGantt({
         ))}
       </div>
 
-      {/* Açıklama */}
+      {/* Legend */}
       <div className="flex flex-wrap items-center gap-3 border-t bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1"><span className="h-3 w-3 rounded bg-emerald-500/85" /> Aktif</span>
-        <span className="flex items-center gap-1"><span className="h-3 w-3 rounded bg-amber-500/85" /> Planlandı</span>
-        <span className="flex items-center gap-1"><span className="h-3 w-3 rounded bg-slate-400/80" /> Bitti</span>
-        <span className="flex items-center gap-1"><span className="h-3 w-px bg-red-500" /> Bugün</span>
-        <span>· Üst şeritteki sayılar: <b className="rounded bg-red-500 px-1 text-white">gün</b> = bugün, gri sayılar = kampanya bitiş günü</span>
-        <span>· Çubuğa tıkla → düzenle</span>
+        <span className="flex items-center gap-1"><span className="h-3 w-3 rounded bg-emerald-500/85" /> {STATUS_LABELS.active}</span>
+        <span className="flex items-center gap-1"><span className="h-3 w-3 rounded bg-amber-500/85" /> {STATUS_LABELS.planned}</span>
+        <span className="flex items-center gap-1"><span className="h-3 w-3 rounded bg-slate-400/80" /> {STATUS_LABELS.finished}</span>
+        <span className="flex items-center gap-1"><span className="h-3 w-px bg-red-500" /> {t("components.ads.adsGantt.today")}</span>
+        <span>{t("components.ads.adsGantt.legendHintPrefix")} <b className="rounded bg-red-500 px-1 text-white">{t("components.ads.adsGantt.day")}</b> {t("components.ads.adsGantt.legendHintSuffix")}</span>
+        <span>{t("components.ads.adsGantt.legendClickHint")}</span>
       </div>
     </div>
   )
