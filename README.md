@@ -21,16 +21,43 @@ media agency, and grew over time — with substantial help from Claude Code —
 into what's in this repository. Development is ongoing.
 
 To get real use out of the AI-assisted features, you'll need:
-- **An auth provider** for the panel (I use Google via `AUTH_MODE=oidc`; the
-  built-in local login also works)
+- **Auth**: my own deployment runs against a separate SSO service with its
+  own extra dependencies, not included in this repo — I'm planning to add a
+  dedicated auth setup for Kotar itself. Until then, `AUTH_MODE=local` or
+  pointing `AUTH_MODE=oidc` at any standard OpenID Connect provider both
+  work — see [Authentication](#authentication) below.
+- **Secrets**: my own deployment keeps them in [Infisical](https://infisical.com),
+  and I'd recommend it — see `start.sh` / `scripts/*_start.sh` for the
+  pattern (a plain `.env` file works too, see Quick start below).
 - **Magnific MCP**, authenticated with your own Magnific account (for AI
   image generation/upscaling)
 - **Claude Code**, authenticated via subscription session (no API key needed)
 - **ChatGPT**, via the Codex CLI, authenticated via subscription session (no
   API key needed)
 
-Fill in your clients' brief inputs, set up your team's roles, and let Kotar
-kotar your day.
+## Arka Plan (Türkçe)
+
+Bu proje, bir arkadaşımın sosyal medya ajansına yardımcı olmak için Cursor
+ile başladığım bir yan proje olarak doğdu ve zamanla — Claude Code'un büyük
+katkılarıyla — bu repodaki hâline evrildi. Geliştirme süreci devam ediyor.
+
+AI destekli özelliklerden gerçek anlamda faydalanmak için gerekenler:
+- **Auth**: kendi kurulumumda, ek bağımlılıkları olan ayrı bir SSO servisi
+  kullanıyorum (bu repoya dahil değil) — Kotar'a özel bir auth sistemi
+  eklemeyi planlıyorum. O zamana kadar `AUTH_MODE=local` kullanabilir ya da
+  `AUTH_MODE=oidc`'i herhangi bir standart OpenID Connect sağlayıcısına
+  yönlendirebilirsin — aşağıdaki [Authentication](#authentication) bölümüne
+  bakabilirsin.
+- **Sırlar**: kendi kurulumumda sırları [Infisical](https://infisical.com)
+  üzerinde tutuyorum ve bunu tavsiye ederim — kalıp için `start.sh` /
+  `scripts/*_start.sh` dosyalarına bakabilirsin (düz bir `.env` dosyası da
+  işini görür, aşağıdaki Quick start'a bakabilirsin).
+- **Magnific MCP**, kendi Magnific hesabınla authenticate edilmiş olmalı (AI
+  görsel üretimi/upscale için)
+- **Claude Code**, subscription session ile authenticate edilmiş olmalı (API
+  key gerekmez)
+- **ChatGPT**, Codex CLI üzerinden, subscription session ile authenticate
+  edilmiş olmalı (API key gerekmez)
 
 ## Features
 
