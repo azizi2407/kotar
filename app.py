@@ -9,14 +9,20 @@ import os
 from datetime import timedelta
 
 from dotenv import load_dotenv
+
+# Must run before any project module is imported: sso_client reads AUTH_MODE
+# from the environment at import time, so .env has to be loaded first or a
+# fresh `AUTH_MODE=local` setup silently falls back to the oidc default and
+# crashes demanding OIDC_ISSUER. (Production is unaffected — systemd's
+# EnvironmentFile already populates os.environ before Python starts.)
+load_dotenv()
+
 from flask import Flask, jsonify, redirect, send_from_directory
 from sqlalchemy import text
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from extensions import db
 from sso_client import AUTH_MODE, OIDCClient
-
-load_dotenv()
 
 # CSP — REPORT-ONLY (NOT enforced). Observation mode first so the public inline-HTML
 # pages (review.py, special_days.py: inline <style>/<script>, special_days.py also uses

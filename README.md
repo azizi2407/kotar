@@ -69,11 +69,15 @@ cd ..
 venv/bin/gunicorn -c gunicorn.conf.py wsgi:app
 # or, for local dev:
 FLASK_ENV=testing venv/bin/python -c "from app import app; app.run(port=5030, debug=True)"
+
+# 4. Create your first login (AUTH_MODE=local only — every other way to create
+#    a user requires already being logged in as a superadmin, so this is the
+#    one time you need it)
+venv/bin/python scripts/create_local_user.py you@example.com --role management
 ```
 
-Then open `http://localhost:5030/panel/`. With `AUTH_MODE=local` (the
-default) there's no user yet — see [Authentication](#authentication) to
-create one.
+Then open `http://localhost:5030/panel/` and log in with the email + temporary
+password `create_local_user.py` printed.
 
 You'll also need PostgreSQL running and `DATABASE_URL` pointing at it. Most
 individual features (mail, AI captions, Drive sync, push notifications) are
@@ -91,7 +95,10 @@ who's allowed to do what comes from a `role` (`management`, `designer`,
 superadmin (see `SUPERADMIN_EMAILS`) creates accounts from the Users page;
 each gets a one-time temporary password to hand to the new user, who can
 change it after logging in. This is the fastest way to get a working
-deployment with zero external dependencies.
+deployment with zero external dependencies. The very first account has to be
+created with `scripts/create_local_user.py` (see Quick start) — the Users
+page itself requires being logged in as a superadmin already, so there's no
+account to log in with otherwise.
 
 **`AUTH_MODE=oidc`** — identity is delegated to an external OpenID Connect
 provider via the standard Authorization Code flow. Set `OIDC_ISSUER`,
