@@ -73,7 +73,7 @@ interface Props {
 }
 
 export function ClientTrackingRow({ row, items, expanded, onToggle, onEditEntry }: Props) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const ENTRY_STATUS_LABELS = useEntryStatusLabels()
   const ROLE_SLOT_LABELS = useRoleSlotLabels()
   const detail = useClientTrackingDetail(expanded ? row.client_id : null)
@@ -123,7 +123,7 @@ export function ClientTrackingRow({ row, items, expanded, onToggle, onEditEntry 
         <TableCell className="hidden text-muted-foreground sm:table-cell">{row.sector || "—"}</TableCell>
         <TableCell><CoverageStrip items={items} row={row} statusLabels={ENTRY_STATUS_LABELS} /></TableCell>
         <TableCell className={cn("whitespace-nowrap text-sm", stalenessTone(signals.last_ad_date))}>
-          {signals.last_ad_date ? fmtDay(signals.last_ad_date) : t("components.clientTracking.clientTrackingRow.never")}
+          {signals.last_ad_date ? fmtDay(signals.last_ad_date, lang) : t("components.clientTracking.clientTrackingRow.never")}
           {signals.ad_active && (
             <span className="ml-1 rounded bg-emerald-100 px-1 py-0.5 text-[10px] font-medium text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200">
               {t("components.clientTracking.clientTrackingRow.active")}
@@ -131,7 +131,7 @@ export function ClientTrackingRow({ row, items, expanded, onToggle, onEditEntry 
           )}
         </TableCell>
         <TableCell className="hidden whitespace-nowrap text-sm text-muted-foreground md:table-cell">
-          {fmtDay(signals.last_shoot_date)}
+          {fmtDay(signals.last_shoot_date, lang)}
         </TableCell>
         <TableCell className="hidden lg:table-cell">
           <div className="flex gap-1">
@@ -152,7 +152,7 @@ export function ClientTrackingRow({ row, items, expanded, onToggle, onEditEntry 
           {row.last_note ? (
             <div className={cn("truncate text-sm", stalenessTone(row.last_note.happened_on))}
               title={row.last_note.text}>
-              <span className="text-xs text-muted-foreground">{fmtDay(row.last_note.happened_on)} · </span>
+              <span className="text-xs text-muted-foreground">{fmtDay(row.last_note.happened_on, lang)} · </span>
               {row.last_note.text}
             </div>
           ) : (
@@ -188,7 +188,7 @@ export function ClientTrackingRow({ row, items, expanded, onToggle, onEditEntry 
                       {(entry?.status_date || entry?.note || entry?.url) && (
                         <div className="mt-1.5 space-y-0.5 pl-6">
                           {entry.status_date && (
-                            <p className="text-xs text-muted-foreground">{fmtDay(entry.status_date)}</p>
+                            <p className="text-xs text-muted-foreground">{fmtDay(entry.status_date, lang)}</p>
                           )}
                           {entry.note && <p className="text-xs text-muted-foreground">{entry.note}</p>}
                           {entry.url && (
@@ -217,7 +217,7 @@ export function ClientTrackingRow({ row, items, expanded, onToggle, onEditEntry 
                     <div className="flex justify-between gap-2">
                       <dt className="text-muted-foreground">{t("components.clientTracking.clientTrackingRow.lastAd")}</dt>
                       <dd className={stalenessTone(signals.last_ad_date)}>
-                        {signals.last_ad_date ? fmtDay(signals.last_ad_date) : t("components.clientTracking.clientTrackingRow.neverAdvertised")}
+                        {signals.last_ad_date ? fmtDay(signals.last_ad_date, lang) : t("components.clientTracking.clientTrackingRow.neverAdvertised")}
                         {signals.ad_count > 0 && (
                           <span className="ml-1 text-xs text-muted-foreground">{t("components.clientTracking.clientTrackingRow.campaignCount", { count: signals.ad_count })}</span>
                         )}
@@ -225,11 +225,11 @@ export function ClientTrackingRow({ row, items, expanded, onToggle, onEditEntry 
                     </div>
                     <div className="flex justify-between gap-2">
                       <dt className="text-muted-foreground">{t("components.clientTracking.clientTrackingRow.lastShoot")}</dt>
-                      <dd>{fmtDay(signals.last_shoot_date)}</dd>
+                      <dd>{fmtDay(signals.last_shoot_date, lang)}</dd>
                     </div>
                     <div className="flex justify-between gap-2">
                       <dt className="text-muted-foreground">{t("components.clientTracking.clientTrackingRow.nextShoot")}</dt>
-                      <dd>{fmtDay(signals.next_shoot_date)}</dd>
+                      <dd>{fmtDay(signals.next_shoot_date, lang)}</dd>
                     </div>
                     <div className="flex justify-between gap-2">
                       <dt className="text-muted-foreground">{t("components.clientTracking.clientTrackingRow.team")}</dt>
@@ -263,7 +263,7 @@ export function ClientTrackingRow({ row, items, expanded, onToggle, onEditEntry 
                     )}
                     {detail.data?.notes.map((n) => (
                       <div key={n.id} className="flex items-start gap-2 rounded-md px-1 py-1 hover:bg-muted/50">
-                        <span className="w-20 shrink-0 text-xs text-muted-foreground">{fmtDay(n.happened_on)}</span>
+                        <span className="w-20 shrink-0 text-xs text-muted-foreground">{fmtDay(n.happened_on, lang)}</span>
                         <span className="flex-1 text-sm">{n.text}</span>
                         {n.author_name && (
                           <span className="hidden text-xs text-muted-foreground sm:inline">{n.author_name}</span>

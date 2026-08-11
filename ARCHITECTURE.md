@@ -87,9 +87,12 @@ Two authority levels for roles:
 
 ## Conventions
 
-- Code comments and user-facing strings are in Turkish, matching the team
-  that originally built this. Pull requests translating the UI to another
-  language (or adding i18n) are welcome — see `CONTRIBUTING.md`.
+- Code comments are in English throughout. The panel UI defaults to English,
+  with Turkish available as a language toggle (see `panel/src/lib/i18n.tsx`
+  and `panel/src/lib/dictionaries/`) — a holdover from the team that
+  originally built this. Some route segments (e.g. `/musteri-takip`) and a
+  few internal identifiers are still Turkish-named; PRs adding more
+  languages to the dictionary set are welcome — see `CONTRIBUTING.md`.
 - Roles come from the auth session (`sub`, `email`, `name`, `role`); `UserRef`
   is a read-only display projection synced at login, not the source of
   truth.

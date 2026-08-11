@@ -1,9 +1,9 @@
-// Vitest — YALNIZ saf mantık testleri (jsdom YOK).
+// Vitest — pure logic tests ONLY (no jsdom).
 //
-// Panelde bugüne kadar hiç frontend testi yoktu. Bu koşucu, kaydetme kuyruğu gibi
-// "sessizce iş kaybettirebilecek" mantığı kilitlemek için eklendi; bileşen/DOM
-// testleri bilinçli olarak kapsam dışı (jsdom + testing-library ayrı bir yatırım).
-// Bu yüzden `environment` ayarlanmıyor — varsayılan `node` yeterli ve hızlı.
+// The panel had no frontend tests before this. This runner was added to lock
+// down logic that could "silently lose work", like the save queue; component/DOM
+// tests are deliberately out of scope (jsdom + testing-library is a separate investment).
+// That's why `environment` isn't set — the default `node` is enough and fast.
 import path from "path"
 import { defineConfig } from "vitest/config"
 

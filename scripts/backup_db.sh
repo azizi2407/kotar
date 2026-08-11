@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# agency Postgres gecelik yedek — pg_dump custom format (-Fc, sıkıştırılmış,
-# pg_restore ile geri yüklenebilir) + 14 gün retention. systemd agency-backup
-# tarafından çağrılır (root; rootful platform-pg'ye podman exec eder).
-# YALNIZ agency DB'si (sso/diğer DB'ler kapsam dışı).
+# Nightly Postgres backup — pg_dump custom format (-Fc, compressed, restorable
+# with pg_restore) + 14-day retention. Example script: called by a systemd
+# agency-backup timer (root; execs into the podman Postgres container).
+# Backs up ONLY the agency DB (sso/other DBs are out of scope).
 set -euo pipefail
 
 BACKUP_DIR="/srv/apps/agency/data/backups"
@@ -12,14 +12,14 @@ mkdir -p "$BACKUP_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$BACKUP_DIR/agency-$STAMP.dump"
 
-# Yerel soket + superuser (parolasız); custom format stdout'a → dosyaya
+# Local socket + superuser (no password); custom format goes to stdout -> file
 podman exec platform-pg pg_dump -U postgres -Fc -d agency > "$OUT"
 
-# Boş/bozuk dump koruması: pg_restore --list çalışmalı
+# Guard against an empty/corrupt dump: pg_restore --list must work
 if ! pg_restore --list "$OUT" >/dev/null 2>&1; then
-  # host'ta pg_restore yoksa boyut kontrolüne düş
+  # fall back to a size check if pg_restore isn't available on the host
   if [ ! -s "$OUT" ]; then
-    echo "HATA: yedek boş: $OUT" >&2
+    echo "ERROR: backup is empty: $OUT" >&2
     rm -f "$OUT"
     exit 1
   fi
@@ -28,4 +28,4 @@ fi
 # Retention
 find "$BACKUP_DIR" -maxdepth 1 -name 'agency-*.dump' -mtime "+$RETENTION_DAYS" -delete
 
-echo "yedek alındı: $OUT ($(du -h "$OUT" | cut -f1))"
+echo "backup taken: $OUT ($(du -h "$OUT" | cut -f1))"

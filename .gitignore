@@ -1,4 +1,4 @@
-# Veri & çalışma dosyaları (sırlar zaten /etc/kotar/agency'de, repo dışı)
+# Data & working files (secrets already live outside the repo, e.g. /etc/kotar/agency)
 data/
 logs/
 # Python
@@ -19,11 +19,11 @@ tests/test.db
 ._*
 .claude/settings.local.json
 
-# Yedek dosyalar (elle alınan .bak kopyaları commit edilmez)
+# Backup files (manually taken .bak copies aren't committed)
 *.bak
 *.bak.*
 
-# Oturum durum dosyaları (hook taban damgaları) — kişisel, commit edilmez
+# Session state files (hook timestamps) — personal, not committed
 .claude/state/
 data/codex-images/
 data/codex-jobs/

@@ -181,9 +181,9 @@ export function dueTone(due: string | null, status: PlanningStatus): string {
   return "bg-muted text-muted-foreground"
 }
 
-export function fmtDay(iso: string | null): string {
+export function fmtDay(iso: string | null, lang: "tr" | "en"): string {
   if (!iso) return "—"
-  return new Date(iso).toLocaleDateString("tr-TR", { day: "2-digit", month: "short" })
+  return new Date(iso).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { day: "2-digit", month: "short" })
 }
 
 /** A non-colliding item key. Uses crypto.randomUUID when available (the old code

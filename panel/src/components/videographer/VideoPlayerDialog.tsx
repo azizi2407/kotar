@@ -21,9 +21,9 @@ import {
   type VideoUpload,
 } from "@/lib/sharing"
 
-function fmtWhen(iso: string | null) {
+function fmtWhen(iso: string | null, lang: "tr" | "en") {
   if (!iso) return ""
-  return new Date(iso).toLocaleString("tr-TR", {
+  return new Date(iso).toLocaleString(lang === "tr" ? "tr-TR" : "en-US", {
     day: "2-digit", month: "long", hour: "2-digit", minute: "2-digit",
   })
 }
@@ -34,7 +34,7 @@ export function VideoPlayerDialog({ videos, index, onIndex, onClose }: {
   onIndex: (i: number) => void
   onClose: () => void
 }) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const v = videos[index]
   const go = useCallback((delta: number) => {
     const next = index + delta
@@ -90,7 +90,7 @@ export function VideoPlayerDialog({ videos, index, onIndex, onClose }: {
               {v.file_name || t("components.videographer.videoPlayerDialog.videoFallback")}
             </div>
             <div className="text-xs text-white/60">
-              {fmtWhen(v.uploaded_at)}
+              {fmtWhen(v.uploaded_at, lang)}
               {videos.length > 1 && ` · ${index + 1}/${videos.length}`}
               {v.shared && ` · ${t("components.videographer.videoPlayerDialog.sharedSuffix")}`}
               {!v.local && ` · ${t("components.videographer.videoPlayerDialog.viaDriveSuffix")}`}

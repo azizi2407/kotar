@@ -148,7 +148,7 @@ function LinkBadge({ icon, text, href }: { icon: React.ReactNode; text: string; 
 }
 
 export const CardNode = memo(function CardNode({ data, selected }: NodeProps) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const d = data as NodeData
   const it = d.item
   const done = it.status === "done"
@@ -182,7 +182,7 @@ export const CardNode = memo(function CardNode({ data, selected }: NodeProps) {
           )}
           {it.due_date && (
             <span className={cn("rounded-full px-1.5 py-0.5 text-[10px] font-medium", dueTone(it.due_date, it.status))}>
-              {fmtDay(it.due_date)}
+              {fmtDay(it.due_date, lang)}
             </span>
           )}
           {it.assignee_name && (

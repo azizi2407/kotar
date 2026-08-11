@@ -33,9 +33,9 @@ import {
 } from "@/lib/sharing"
 import { cn } from "@/lib/utils"
 
-function fmtWhen(iso: string | null) {
+function fmtWhen(iso: string | null, lang: "tr" | "en") {
   if (!iso) return ""
-  return new Date(iso).toLocaleString("tr-TR", {
+  return new Date(iso).toLocaleString(lang === "tr" ? "tr-TR" : "en-US", {
     day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
   })
 }
@@ -62,7 +62,7 @@ async function copyDirect(fileId: string, t: (key: string) => string) {
 }
 
 export function PendingVideoList({ videos }: { videos: VideoUpload[] }) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   // The player only navigates between videos that have a file (arrow keys).
   const playable = videos.filter((v) => v.file_id)
   const [playing, setPlaying] = useState<number | null>(null)
@@ -104,7 +104,7 @@ export function PendingVideoList({ videos }: { videos: VideoUpload[] }) {
                 {v.file_name || t("components.videographer.pendingVideoList.videoFallback")}
               </div>
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <span>{fmtWhen(v.uploaded_at)}</span>
+                <span>{fmtWhen(v.uploaded_at, lang)}</span>
                 {v.shared ? (
                   <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200">
                     {t("components.videographer.pendingVideoList.sharedBadge")}

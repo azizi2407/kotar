@@ -84,13 +84,13 @@ function resolveLink(link: string | null): string | null {
   return KNOWN.some((k) => k !== "/" && base.startsWith(k)) ? path : null
 }
 
-function fullTime(iso: string) {
+function fullTime(iso: string, lang: "tr" | "en") {
   const d = new Date(iso)
-  return d.toLocaleString("tr-TR", { dateStyle: "medium", timeStyle: "short" })
+  return d.toLocaleString(lang === "tr" ? "tr-TR" : "en-US", { dateStyle: "medium", timeStyle: "short" })
 }
 
 export function NotificationsPage() {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const [items, setItems] = useState<Notification[]>([])
   const [hasMore, setHasMore] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -242,7 +242,7 @@ export function NotificationsPage() {
                     {n.body && (
                       <p className="whitespace-pre-wrap text-sm text-muted-foreground">{n.body}</p>
                     )}
-                    <p className="text-[11px] text-muted-foreground/70">{fullTime(n.created_at)}</p>
+                    <p className="text-[11px] text-muted-foreground/70">{fullTime(n.created_at, lang)}</p>
                   </div>
                   <div className="flex shrink-0 flex-col items-end gap-1.5">
                     {!n.read_at && (

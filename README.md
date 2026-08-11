@@ -1,5 +1,7 @@
 # Kotar
 
+[![CI](https://github.com/azizi2407/kotar/actions/workflows/ci.yml/badge.svg)](https://github.com/azizi2407/kotar/actions/workflows/ci.yml)
+
 A content operations system for social media agencies, inspired by curiosity.
 
 Kotar is a self-hosted web app that helps a small agency run the day-to-day

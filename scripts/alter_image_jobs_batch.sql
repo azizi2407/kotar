@@ -1,34 +1,34 @@
--- Codex görsel hattı: haftalık parti üretimi alanları (2026-08-10)
+-- Codex image pipeline: weekly batch generation fields.
 --
--- NEDEN ELLE: app.py başlangıçta `db.create_all()` çağırır; bu eksik TABLOYU
--- yaratır ama VAR OLAN bir tabloya eklenen kolonu yaratmaz (`notifications.severity`
--- ve `design_files` dersleri).
+-- WHY MANUAL: app.py calls `db.create_all()` at startup; that creates a
+-- missing TABLE but does not add a column to an EXISTING table (same lesson
+-- as `notifications.severity` and `design_files`).
 --
--- SIRA KRİTİK: önce bu script, SONRA `sudo systemctl restart agency.service` ve
--- `systemctl --user restart agency-ai-worker.service`. Tersi durumda yeni kod
--- olmayan kolonu okur ve /api/imagegen/* 500 verir.
+-- ORDER MATTERS: run this script FIRST, THEN restart the app service and the
+-- AI worker service. Otherwise the new code reads a column that doesn't exist
+-- yet and /api/imagegen/* returns 500.
 --
--- Uygulama:
---   sudo podman exec -i platform-pg psql -U postgres -d agency < scripts/alter_image_jobs_batch.sql
--- Doğrulama:
---   sudo podman exec platform-pg psql -U postgres -d agency -c "\d image_jobs"
+-- Apply:
+--   psql -U postgres -d agency -f scripts/alter_image_jobs_batch.sql
+-- Verify:
+--   psql -U postgres -d agency -c "\d image_jobs"
 --
--- Hepsi IF NOT EXISTS — script iki kez koşarsa patlamaz.
+-- Everything is IF NOT EXISTS — running the script twice won't break anything.
 
 BEGIN;
 
--- Partinin haftası ('YYYY-Www'). brief_id yanında AYRICA tutulur: brief yeniden
--- üretilirse (brief_handler force yolu satırı üzerine yazar) galeri gruplaması
--- week_iso sayesinde ayakta kalır.
+-- The batch's week ('YYYY-Www'). Kept alongside brief_id: if the brief is
+-- regenerated (the brief_handler force path overwrites the row), gallery
+-- grouping stays intact via week_iso.
 ALTER TABLE image_jobs ADD COLUMN IF NOT EXISTS week_iso varchar(16);
 
--- brief.ideas[] içindeki sıra (0-tabanlı) — galeride fikir başlığını bulmak için.
+-- Index (0-based) within brief.ideas[] — for finding the idea's title in the gallery.
 ALTER TABLE image_jobs ADD COLUMN IF NOT EXISTS brief_idea_index integer;
 
--- with_text | clean. Tekil üretimde NULL kalır.
+-- with_text | clean. Stays NULL for single-image generation.
 ALTER TABLE image_jobs ADD COLUMN IF NOT EXISTS variant varchar(16);
 
--- Galeri sorgusu (client + hafta) ve idempotency kontrolü bu index'i kullanır.
+-- Used by the gallery query (client + week) and the idempotency check.
 CREATE INDEX IF NOT EXISTS ix_imagejob_week ON image_jobs (client_id, week_iso);
 
 COMMIT;

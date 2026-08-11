@@ -118,17 +118,17 @@ export function useDeleteAd() {
   })
 }
 
-// ₺ formatting (TR locale, with cents)
-export function fmtTRY(n: number) {
-  return new Intl.NumberFormat("tr-TR", {
+// ₺ formatting (TRY currency; the number format follows the UI language)
+export function fmtTRY(n: number, lang: "tr" | "en") {
+  return new Intl.NumberFormat(lang === "tr" ? "tr-TR" : "en-US", {
     style: "currency",
     currency: "TRY",
     maximumFractionDigits: 2,
   }).format(n || 0)
 }
 
-export function fmtDateRange(start: string, end: string | null, ongoingLabel: string) {
-  const f = (s: string) => new Date(s).toLocaleDateString("tr-TR", { day: "2-digit", month: "short", year: "numeric" })
+export function fmtDateRange(start: string, end: string | null, ongoingLabel: string, lang: "tr" | "en") {
+  const f = (s: string) => new Date(s).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { day: "2-digit", month: "short", year: "numeric" })
   if (!end) return `${f(start)} → ${ongoingLabel}`
   return `${f(start)} → ${f(end)}`
 }

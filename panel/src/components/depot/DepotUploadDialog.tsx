@@ -27,7 +27,7 @@ export function DepotUploadDialog({ quota, onClose }: {
   quota: DepotQuota | undefined
   onClose: () => void
 }) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const [items, setItems] = useState<Item[]>([])
   const [note, setNote] = useState("")
   const [busy, setBusy] = useState(false)
@@ -47,7 +47,7 @@ export function DepotUploadDialog({ quota, onClose }: {
     let ok = files.filter((f) => !isBlockedFile(f.name))
     const tooBig = ok.filter((f) => f.size > fileLimit)
     if (tooBig.length) {
-      toast.error(t("components.depot.uploadDialog.tooBigFiles", { count: tooBig.length, limit: fmtBytes(fileLimit) }))
+      toast.error(t("components.depot.uploadDialog.tooBigFiles", { count: tooBig.length, limit: fmtBytes(fileLimit, lang) }))
     }
     ok = ok.filter((f) => f.size <= fileLimit)
     if (!ok.length) return
@@ -55,7 +55,7 @@ export function DepotUploadDialog({ quota, onClose }: {
     if (quota && nextTotal > quota.remaining) {
       toast.warning(
         t("components.depot.uploadDialog.overQuotaWarning", {
-          selected: fmtBytes(nextTotal), remaining: fmtBytes(quota.remaining),
+          selected: fmtBytes(nextTotal, lang), remaining: fmtBytes(quota.remaining, lang),
         }))
     }
     setItems((prev) => [...prev, ...ok.map((f) => ({ file: f, pct: 0, status: "pending" as const }))])
@@ -107,7 +107,7 @@ export function DepotUploadDialog({ quota, onClose }: {
               }} />
             <p className="text-xs text-muted-foreground">
               {t("components.depot.uploadDialog.acceptHint")}
-              {quota && ` ${t("components.depot.uploadDialog.remainingSpace", { remaining: fmtBytes(quota.remaining) })}`}
+              {quota && ` ${t("components.depot.uploadDialog.remainingSpace", { remaining: fmtBytes(quota.remaining, lang) })}`}
             </p>
           </div>
 
@@ -123,7 +123,7 @@ export function DepotUploadDialog({ quota, onClose }: {
                 <div key={`${it.file.name}-${i}`} className="space-y-1 rounded-md border p-2">
                   <div className="flex items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-sm">{it.file.name}</span>
-                    <span className="text-xs text-muted-foreground">{fmtBytes(it.file.size)}</span>
+                    <span className="text-xs text-muted-foreground">{fmtBytes(it.file.size, lang)}</span>
                     {it.status === "done" && <span className="text-xs text-emerald-600">✓</span>}
                     {it.status === "error" && <span className="text-xs text-destructive">⚠</span>}
                     {it.status === "uploading" && (

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# svc-agency başlatıcı (systemd ExecStart).
-# Infisical (kotar-secrets) machine identity ile Google Drive sırlarını
-# (GOOGLE_SA_JSON, GOOGLE_DRIVE_TOKEN_JSON) sürece env olarak enjekte eder;
-# diske yazmaz. Diğer config (DATABASE_URL, SECRET_KEY, SSO_*) systemd
-# EnvironmentFile=/etc/kotar/agency/env'den gelir. Infisical erişilemezse
-# gunicorn yine başlar (Drive özellikleri devre dışı, panel çalışır).
+# Kotar starter (systemd ExecStart). Example deployment script — adapt the
+# paths/service names below to your own setup.
+# Injects the Google Drive secrets (GOOGLE_SA_JSON, GOOGLE_DRIVE_TOKEN_JSON)
+# into the process env via Infisical machine identity, without writing them to
+# disk. Other config (DATABASE_URL, SECRET_KEY, SSO_*) comes from systemd's
+# EnvironmentFile=/etc/kotar/agency/env. If Infisical is unreachable, gunicorn
+# still starts (Drive features are disabled, the panel still works).
 set -uo pipefail
 cd /srv/apps/agency
 
@@ -21,13 +22,13 @@ if [ -r "$INFISICAL_ENV_FILE" ]; then
      && [ -n "${INFISICAL_PROJECT_ID:-}" ]; then
     TOKEN="$(infisical login --method=universal-auth --plain --silent \
                --domain="$INFISICAL_DOMAIN" 2>/dev/null)"
-    # Bootstrap kimliğini süreçten temizle
+    # Clear the bootstrap identity from the process
     unset INFISICAL_UNIVERSAL_AUTH_CLIENT_ID INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
     if [ -n "$TOKEN" ]; then
       export INFISICAL_TOKEN="$TOKEN"
-      # infisical RUN yerine EXPORT: sırları sürecin env'ine alıp infisical'ı resident
-      # bırakma (~62MB Go runtime tasarrufu). dotenv-export tek-tırnaklı; JSON sırları
-      # (GOOGLE_SA_JSON) dahil round-trip doğrulandı (2026-07-13).
+      # EXPORT instead of infisical RUN: pulls secrets into the process env
+      # without keeping infisical resident (~62MB Go runtime saved). dotenv-export
+      # is single-quoted; verified round-trip including JSON secrets (GOOGLE_SA_JSON).
       SECRETS="$(infisical export --projectId="$INFISICAL_PROJECT_ID" --env="$INFISICAL_ENV" \
                    --domain="$INFISICAL_DOMAIN" --path=/ --format=dotenv-export 2>/dev/null)"
       unset INFISICAL_TOKEN
@@ -37,7 +38,7 @@ if [ -r "$INFISICAL_ENV_FILE" ]; then
       fi
     fi
   fi
-  echo "[start.sh] ⚠️ Infisical login başarısız/eksik — Google Drive sırları olmadan başlıyor (Drive çalışmaz)" >&2
+  echo "[start.sh] ⚠️ Infisical login failed/missing — starting without Google Drive secrets (Drive won't work)" >&2
 fi
 
 exec "${GUNICORN[@]}"

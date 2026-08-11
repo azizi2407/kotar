@@ -32,7 +32,7 @@ function todayStr() {
 }
 
 export function AdsPage() {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const PLATFORM_LABELS = usePlatformLabels()
   const STATUS_LABELS = useStatusLabels()
   // On first load, show ACTIVE ads in timeline view (project owner's request, 2026-07-24).
@@ -141,7 +141,7 @@ export function AdsPage() {
         <div className="grid gap-3 md:grid-cols-3">
           <div className="rounded-lg border p-4">
             <div className="text-xs text-muted-foreground">{t("pages.ads.totalSpendFiltered")}</div>
-            <div className="mt-1 text-2xl font-semibold">{fmtTRY(summary.total_amount)}</div>
+            <div className="mt-1 text-2xl font-semibold">{fmtTRY(summary.total_amount, lang)}</div>
             <div className="text-xs text-muted-foreground">{t("pages.ads.recordCount", { count: summary.count })}</div>
           </div>
           <div className="rounded-lg border p-4 md:col-span-2">
@@ -156,7 +156,7 @@ export function AdsPage() {
                       <tr key={b.client_id} className="border-b last:border-0">
                         <td className="py-1">{b.client_name}</td>
                         <td className="py-1 text-right text-muted-foreground">{t("pages.ads.adCount", { count: b.count })}</td>
-                        <td className="py-1 text-right font-medium">{fmtTRY(b.total)}</td>
+                        <td className="py-1 text-right font-medium">{fmtTRY(b.total, lang)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -205,8 +205,8 @@ export function AdsPage() {
                   <td className="px-3 py-2 font-medium">{c.client_name}</td>
                   <td className="px-3 py-2">{c.title || "—"}</td>
                   <td className="px-3 py-2 text-muted-foreground">{PLATFORM_LABELS[c.platform] ?? c.platform}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">{fmtDateRange(c.start_date, c.end_date, t("pages.ads.ongoing"))}</td>
-                  <td className="px-3 py-2 text-right font-medium">{fmtTRY(c.amount_spent)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{fmtDateRange(c.start_date, c.end_date, t("pages.ads.ongoing"), lang)}</td>
+                  <td className="px-3 py-2 text-right font-medium">{fmtTRY(c.amount_spent, lang)}</td>
                   <td className="px-3 py-2">
                     <span className={cn("rounded px-1.5 py-0.5 text-xs", STATUS_TONE[c.status])}>
                       {STATUS_LABELS[c.status] ?? c.status}
@@ -214,7 +214,7 @@ export function AdsPage() {
                   </td>
                   <td className="px-3 py-2 text-right text-muted-foreground">
                     {c.reach != null || c.clicks != null
-                      ? `${c.reach?.toLocaleString("tr-TR") ?? "—"} / ${c.clicks?.toLocaleString("tr-TR") ?? "—"}`
+                      ? `${c.reach?.toLocaleString(lang === "tr" ? "tr-TR" : "en-US") ?? "—"} / ${c.clicks?.toLocaleString(lang === "tr" ? "tr-TR" : "en-US") ?? "—"}`
                       : "—"}
                   </td>
                   <td className="max-w-[16rem] truncate px-3 py-2 text-muted-foreground" title={c.notes || ""}>

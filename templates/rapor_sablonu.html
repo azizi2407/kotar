@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="tr">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -767,7 +767,7 @@
         <!-- ═══════════ REPORT PANEL ═══════════ -->
         <div class="report-panel">
             <div class="report-container" id="reportContainer">
-                <!-- Dinamik içerik buraya enjekte edilir -->
+                <!-- Dynamic content is injected here -->
             </div>
         </div>
 
@@ -805,10 +805,10 @@
 
         /* ─── Build Report HTML ───────────────────────── */
         function updateReport() {
-            // Veri DOĞRUDAN `reportData`'dan okunur (2026-08-07). Eskiden sayfada bir
-            // "Rapor Düzenleyici" formu vardı ve değerler oradan geliyordu; sayfa
-            // artık müşteriye gönderiliyor, düzenleme alanı kaldırıldı. Form ölü kod
-            // olarak bırakılmadı — veri kaynağı tek olsun diye okuma buraya taşındı.
+            // Data is read DIRECTLY from `reportData`. The page used to have a
+            // "Report Editor" form that values came from; the page is now sent
+            // to the client, so the editing area was removed. The form wasn't
+            // left as dead code — the read was moved here to keep a single data source.
             const d      = (typeof reportData !== 'undefined' && reportData) ? reportData : {};
             const totals = d.totals || {};
             const ads    = (d.ads_data && d.ads_data.metrics) || {};
@@ -834,7 +834,7 @@
 
             const enIyiHikaye    = (d.top_stories && d.top_stories[0]) || null;
             const storyRecord    = enIyiHikaye ? Math.round(n(enIyiHikaye.value)) : 0;
-            // Tarih: Python'un hesapladığı yayınlanma tarihi; yoksa başlıktaki desen.
+            // Date: the publish date computed by Python; falls back to the pattern in the title.
             const hikayeBaslik   = enIyiHikaye ? (enIyiHikaye.title || '') : '';
             const tarihEsleme    = hikayeBaslik.match(/(\d+\s+\w+)/);
             const storyDate      = d.story_date || (tarihEsleme ? tarihEsleme[1] : '');
@@ -1046,11 +1046,11 @@
 
         /* ─── Top Posts Table ─────────────────────────── */
         function updateTopPostsTable(topPost, topPostReach) {
-            // Yalnızca formdaki satır; Python verisi varsa aşağıda tamamen onunla değiştirilir.
-            // (Örnek/sahte içerik listesi bilinçli olarak yok — rapora asla örnek veri sızmamalı.)
+            // Just the form row; fully replaced below if Python data is present.
+            // (Deliberately no sample/fake content list — sample data must never leak into the report.)
             const topPosts = topPost ? [{ content: topPost, reach: topPostReach }] : [];
 
-            // Python'dan veri varsa kullan
+            // Use Python's data if present
             if (typeof reportData !== 'undefined' && reportData && reportData.top_posts) {
                 topPosts.length = 0;
                 reportData.top_posts.forEach(p => {

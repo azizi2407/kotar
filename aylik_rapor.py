@@ -838,7 +838,7 @@ def create_index_page(reports_folder: str, clients: list[tuple[str, str]]) -> No
         for name, fname in clients
     )
     html = f"""<!DOCTYPE html>
-<html lang="tr">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>Kotar - Client Reports</title>

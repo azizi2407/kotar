@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Media worker başlatıcı (proje sahibi systemd --user). Infisical machine identity ile
-# GOOGLE_SA_JSON'u enjekte eder (Drive'dan video indirmek için). DATABASE_URL/
-# WHISPER_URL systemd EnvironmentFile'dan gelir. Infisical erişilemezse yine
-# başlar (Drive indirmesi başarısız olur, job fail'e düşer).
+# Media worker starter (systemd --user, run as the deploy user). Example
+# script: injects GOOGLE_SA_JSON via Infisical machine identity (to download
+# video from Drive). DATABASE_URL/WHISPER_URL come from systemd's
+# EnvironmentFile. If Infisical is unreachable, it still starts (Drive
+# downloads fail, the job goes to failed).
 set -uo pipefail
 cd /srv/apps/agency
 
-INFISICAL_ENV_FILE="${INFISICAL_ENV_FILE:-/home/proje sahibi/.config/agency-worker/infisical.env}"
+INFISICAL_ENV_FILE="${INFISICAL_ENV_FILE:-/home/deploy/.config/agency-worker/infisical.env}"
 PY=(/srv/apps/agency/venv/bin/python media_worker.py)
 
 if [ -r "$INFISICAL_ENV_FILE" ]; then
@@ -22,9 +23,9 @@ if [ -r "$INFISICAL_ENV_FILE" ]; then
     unset INFISICAL_UNIVERSAL_AUTH_CLIENT_ID INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
     if [ -n "$TOKEN" ]; then
       export INFISICAL_TOKEN="$TOKEN"
-      # infisical RUN yerine EXPORT: sırları sürecin env'ine alıp infisical'ı resident
-      # bırakma (~62MB Go runtime tasarrufu). dotenv-export tek-tırnaklı; JSON sırları
-      # (GOOGLE_SA_JSON) dahil round-trip doğrulandı (2026-07-13).
+      # EXPORT instead of infisical RUN: pulls secrets into the process env
+      # without keeping infisical resident (~62MB Go runtime saved). dotenv-export
+      # is single-quoted; verified round-trip including JSON secrets (GOOGLE_SA_JSON).
       SECRETS="$(infisical export --projectId="$INFISICAL_PROJECT_ID" --env="$INFISICAL_ENV" \
                    --domain="$INFISICAL_DOMAIN" --path=/ --format=dotenv-export 2>/dev/null)"
       unset INFISICAL_TOKEN
@@ -34,6 +35,6 @@ if [ -r "$INFISICAL_ENV_FILE" ]; then
       fi
     fi
   fi
-  echo "[media_worker_start] ⚠️ Infisical login başarısız — Drive olmadan başlıyor" >&2
+  echo "[media_worker_start] ⚠️ Infisical login failed — starting without Drive" >&2
 fi
 exec "${PY[@]}"

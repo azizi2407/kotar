@@ -34,9 +34,9 @@ type DirInputProps = React.InputHTMLAttributes<HTMLInputElement> & {
   webkitdirectory?: string
 }
 
-function fmt(n: number | null | undefined) {
+function fmt(n: number | null | undefined, lang: "tr" | "en") {
   if (n == null) return "—"
-  return new Intl.NumberFormat("tr-TR").format(Math.round(n))
+  return new Intl.NumberFormat(lang === "tr" ? "tr-TR" : "en-US").format(Math.round(n))
 }
 
 function SonucOzeti({ sonuc }: { sonuc: GenerateResult }) {
@@ -68,7 +68,7 @@ function RaporSatiri({ r, onSil }: {
   r: import("@/lib/reports").ReportRow
   onSil: () => void
 }) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const paylas = useShareReport()
   const paylasimAcik = !!r.token
 
@@ -103,9 +103,9 @@ function RaporSatiri({ r, onSil }: {
           )}
         </div>
         <div className="mt-0.5 flex flex-wrap gap-3 text-xs text-muted-foreground">
-          <span>{t("pages.monthlyReport.views")} {fmt(r.ozet["Toplam Görüntüleme"])}</span>
-          <span>{t("pages.monthlyReport.reach")} {fmt(r.ozet["Toplam Erişim"])}</span>
-          <span>{t("pages.monthlyReport.engagement")} {fmt(r.ozet["Toplam Etkileşim"])}</span>
+          <span>{t("pages.monthlyReport.views")} {fmt(r.ozet["Toplam Görüntüleme"], lang)}</span>
+          <span>{t("pages.monthlyReport.reach")} {fmt(r.ozet["Toplam Erişim"], lang)}</span>
+          <span>{t("pages.monthlyReport.engagement")} {fmt(r.ozet["Toplam Etkileşim"], lang)}</span>
         </div>
         {r.warnings.length > 0 && (
           <div className="mt-1 flex gap-1.5 text-[11px] text-amber-600 dark:text-amber-500">

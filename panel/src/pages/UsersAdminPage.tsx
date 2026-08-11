@@ -14,9 +14,9 @@ import { createUser, listUsers, ROLES, updateUser, useRoleLabels, type SsoUser }
 import { useAuth } from "@/lib/auth"
 import { useI18n } from "@/lib/i18n"
 
-function fmtDate(s: string | null) {
+function fmtDate(s: string | null, lang: "tr" | "en") {
   if (!s) return "—"
-  return new Date(s).toLocaleString("tr-TR", { dateStyle: "short", timeStyle: "short" })
+  return new Date(s).toLocaleString(lang === "tr" ? "tr-TR" : "en-US", { dateStyle: "short", timeStyle: "short" })
 }
 
 function RoleSelect({ value, onChange, disabled }: { value: string; onChange: (r: string) => void; disabled?: boolean }) {
@@ -40,7 +40,7 @@ function RoleSelect({ value, onChange, disabled }: { value: string; onChange: (r
 
 export function UsersAdminPage() {
   const { authMode } = useAuth()
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const qc = useQueryClient()
   const usersQ = useQuery({ queryKey: ["admin-users"], queryFn: listUsers })
   const [addOpen, setAddOpen] = useState(false)
@@ -129,7 +129,7 @@ export function UsersAdminPage() {
                       {u.status === "active" ? t("pages.users.active") : t("pages.users.inactive")}
                     </Button>
                   </td>
-                  <td className="px-3 py-2 text-muted-foreground">{fmtDate(u.last_login)}</td>
+                  <td className="px-3 py-2 text-muted-foreground">{fmtDate(u.last_login, lang)}</td>
                   {authMode === "local" && (
                     <td className="px-3 py-2">
                       <Button

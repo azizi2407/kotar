@@ -40,14 +40,14 @@ export function isBlockedFile(name: string): boolean {
 }
 
 // Note: "0 MB"/"GB"/"MB" units are already language-independent (Latin
-// abbreviations) — only the number format is localized (Intl.NumberFormat
-// uses the "tr-TR" decimal separator, left unchanged to stay consistent with the rest of the panel).
-export function fmtBytes(n: number): string {
+// abbreviations) — only the number format is localized, following the UI language.
+export function fmtBytes(n: number, lang: "tr" | "en"): string {
   if (!n) return "0 MB"
+  const locale = lang === "tr" ? "tr-TR" : "en-US"
   if (n >= 1024 ** 3) {
-    return `${new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 1 }).format(n / 1024 ** 3)} GB`
+    return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(n / 1024 ** 3)} GB`
   }
-  return `${new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 0 }).format(n / 1024 ** 2)} MB`
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(n / 1024 ** 2)} MB`
 }
 
 export function useDepotFiles(params: { q?: string } = {}) {

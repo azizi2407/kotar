@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Mail sync poller başlatıcı (proje sahibi systemd --user, oneshot). Infisical machine
-# identity ile MAIL_ENC_KEY + MAIL_ALLOWED_DOMAINS'i enjekte eder (parola çözme).
-# DATABASE_URL vb. systemd EnvironmentFile'dan gelir. Infisical erişilemezse
-# mail modülü fail-closed olur (senkron atlanır); worker yine temiz çıkar.
+# Mail sync poller starter (systemd --user, oneshot, run as the deploy user).
+# Example script: injects MAIL_ENC_KEY + MAIL_ALLOWED_DOMAINS via Infisical
+# machine identity (for password decryption). DATABASE_URL etc. come from
+# systemd's EnvironmentFile. If Infisical is unreachable, the mail module
+# fails closed (sync is skipped); the worker still exits cleanly.
 set -uo pipefail
 cd /srv/apps/agency
 
-INFISICAL_ENV_FILE="${INFISICAL_ENV_FILE:-/home/proje sahibi/.config/agency-worker/infisical.env}"
+INFISICAL_ENV_FILE="${INFISICAL_ENV_FILE:-/home/deploy/.config/agency-worker/infisical.env}"
 PY=(/srv/apps/agency/venv/bin/python mail_sync_worker.py)
 
 if [ -r "$INFISICAL_ENV_FILE" ]; then
@@ -31,6 +32,6 @@ if [ -r "$INFISICAL_ENV_FILE" ]; then
       fi
     fi
   fi
-  echo "[mail_sync_start] ⚠️ Infisical login başarısız — mail senkronu atlanıyor" >&2
+  echo "[mail_sync_start] ⚠️ Infisical login failed — skipping mail sync" >&2
 fi
 exec "${PY[@]}"

@@ -34,10 +34,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the map. Quick pointers:
 
 ## Known gaps (good first contributions)
 
-- **UI language**: all panel copy and code comments are Turkish. An i18n
-  layer (or a full English translation) would make this far more accessible
-  — not done here because it's a large, error-prone change to make without
-  visual QA on every page.
+- **More languages**: the panel ships with English (default) and Turkish via
+  the i18n layer in `panel/src/lib/i18n.tsx` and `panel/src/lib/dictionaries/`.
+  Adding another language means adding a new dictionary file per feature area
+  and merging it in `dictionaries/index.ts`.
 - **`sso_admin.py`** assumes a specific `list_users`/`create_user`/
   `update_user` REST contract on the OIDC side; it's a reference
   implementation, not a real integration with any specific provider
@@ -50,9 +50,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the map. Quick pointers:
 
 ## Style
 
-- Match the surrounding file: Turkish comments/UI strings, the existing
-  naming conventions (Turkish route segments like `/musteri-takip`,
-  English internal identifiers).
+- Code comments are in English. New UI copy goes through the i18n layer
+  (`t("...")` with an entry in both the `en` and `tr` dictionaries) rather
+  than being hardcoded — see `panel/src/lib/dictionaries/`.
+- Match the surrounding file's naming conventions: some route segments are
+  still Turkish (e.g. `/musteri-takip`), internal identifiers are English.
 - Backend: plain Flask blueprints + SQLAlchemy, no ORM magic beyond what's
   already in use. Keep new modules flat at the repo root, matching the
   existing layout (no `src/` nesting).

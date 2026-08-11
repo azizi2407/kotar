@@ -135,7 +135,7 @@ export function DepotPage() {
                   )}
                 </TableCell>
                 <TableCell className="hidden whitespace-nowrap text-muted-foreground sm:table-cell">
-                  {fmtBytes(f.file_size)}
+                  {fmtBytes(f.file_size, lang)}
                 </TableCell>
                 <TableCell className="hidden text-muted-foreground md:table-cell">
                   {f.uploader_name || "—"}

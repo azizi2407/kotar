@@ -136,9 +136,9 @@ export function itemIcon(name: string | null): LucideIcon {
 
 // --- formatting -------------------------------------------------------
 
-export function fmtDay(iso: string | null): string {
+export function fmtDay(iso: string | null, lang: "tr" | "en"): string {
   if (!iso) return "—"
-  return new Date(iso).toLocaleDateString("tr-TR", {
+  return new Date(iso).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", {
     day: "2-digit", month: "short", year: "numeric",
   })
 }

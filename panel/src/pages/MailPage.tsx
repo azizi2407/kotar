@@ -26,10 +26,10 @@ import {
   type MailMessage,
 } from "@/lib/mail"
 
-function fmtDate(s: string | null) {
+function fmtDate(s: string | null, lang: "tr" | "en") {
   if (!s) return ""
   const d = new Date(s)
-  return d.toLocaleString("tr-TR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+  return d.toLocaleString(lang === "tr" ? "tr-TR" : "en-US", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
 }
 
 function fmtSize(n: number) {
@@ -40,7 +40,7 @@ function fmtSize(n: number) {
 
 export function MailPage() {
   const { canImpersonate } = useAuth()
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const qc = useQueryClient()
   const [accId, setAccId] = useState<number | null>(null)
   const [folderId, setFolderId] = useState<number | null>(null)
@@ -227,7 +227,7 @@ export function MailPage() {
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate text-sm">{m.from_name || m.from_addr}</span>
-                  <span className="shrink-0 text-xs text-muted-foreground">{fmtDate(m.date)}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">{fmtDate(m.date, lang)}</span>
                 </div>
                 <div className="flex items-center gap-1 truncate text-sm">
                   {m.flagged && <Star className="h-3 w-3 fill-amber-400 text-amber-400" />}
@@ -277,7 +277,7 @@ export function MailPage() {
                     &lt;{active.from_addr}&gt;
                   </div>
                   <div>{t("pages.mail.to")}: {active.to_addrs}</div>
-                  <div>{fmtDate(active.date)}</div>
+                  <div>{fmtDate(active.date, lang)}</div>
                 </div>
                 {active.attachments && active.attachments.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-2">

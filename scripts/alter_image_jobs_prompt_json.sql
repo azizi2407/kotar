@@ -1,19 +1,20 @@
--- Codex görsel hattı: İngilizce JSON prompt alanı (2026-08-10)
+-- Codex image pipeline: structured English JSON prompt field.
 --
--- NEDEN ELLE: `db.create_all()` eksik TABLOYU yaratır ama var olan tabloya kolon
--- EKLEMEZ (`notifications.severity` ve `design_files` dersleri).
+-- WHY MANUAL: `db.create_all()` creates a missing TABLE but does not ADD a
+-- column to an existing table (same lesson as `notifications.severity` and
+-- `design_files`).
 --
--- SIRA KRİTİK: önce bu script, SONRA `sudo systemctl restart agency.service` ve
--- `systemctl --user restart agency-ai-worker.service`.
+-- ORDER MATTERS: run this script FIRST, THEN restart the app service and the
+-- AI worker service.
 --
--- Uygulama:
---   sudo podman exec -i platform-pg psql -U postgres -d agency < scripts/alter_image_jobs_prompt_json.sql
--- Doğrulama:
---   sudo podman exec platform-pg psql -U postgres -d agency -c "\d image_jobs" | grep prompt_json
+-- Apply:
+--   psql -U postgres -d agency -f scripts/alter_image_jobs_prompt_json.sql
+-- Verify:
+--   psql -U postgres -d agency -c "\d image_jobs" | grep prompt_json
 
 BEGIN;
 
--- claude -p'nin ürettiği, şemaya göre doğrulanmış İngilizce görsel tarifi.
+-- The schema-validated English image description produced by `claude -p`.
 ALTER TABLE image_jobs ADD COLUMN IF NOT EXISTS prompt_json jsonb;
 
 COMMIT;

@@ -22,7 +22,7 @@ export function ListView({ items, onOpen }: {
   items: PlanningItem[]
   onOpen: (it: PlanningItem) => void
 }) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const statusLabels = useMemo(() => itemStatusLabels(t), [t])
   // Sort order: overdue first, then by due date, undated last.
   const rows = useMemo(() => [...items]
@@ -65,7 +65,7 @@ export function ListView({ items, onOpen }: {
               <TableCell>
                 {it.due_date
                   ? <span className={cn("rounded-full px-1.5 py-0.5 text-xs", dueTone(it.due_date, it.status))}>
-                      {fmtDay(it.due_date)}
+                      {fmtDay(it.due_date, lang)}
                     </span>
                   : <span className="text-muted-foreground">—</span>}
               </TableCell>
@@ -143,7 +143,7 @@ export function CalendarView({ items, onOpen }: {
                     {it.title || t("components.planlama.boardViews.untitled")}
                   </span>
                   <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[10px]", dueTone(it.due_date, it.status))}>
-                    {fmtDay(it.due_date)}
+                    {fmtDay(it.due_date, lang)}
                   </span>
                 </div>
                 {it.assignee_name && (
@@ -174,7 +174,7 @@ export function AssignedStrip({ items, currentBoard }: {
   items: AssignedItem[]
   currentBoard: string
 }) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const other = items.filter((i) => i.board_key !== currentBoard)
   if (!other.length) return null
   return (
@@ -193,7 +193,7 @@ export function AssignedStrip({ items, currentBoard }: {
             </span>
             {it.due_date && (
               <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[10px]", dueTone(it.due_date, it.status))}>
-                {fmtDay(it.due_date)}
+                {fmtDay(it.due_date, lang)}
               </span>
             )}
             <span className="shrink-0 text-muted-foreground">{it.board_title}</span>

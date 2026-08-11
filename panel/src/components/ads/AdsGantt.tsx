@@ -21,8 +21,8 @@ function todayUTC() {
   return Date.UTC(n.getFullYear(), n.getMonth(), n.getDate())
 }
 
-function fmtDay(ms: number) {
-  return new Date(ms).toLocaleDateString("tr-TR", { day: "2-digit", month: "short", timeZone: "UTC" })
+function fmtDay(ms: number, lang: "tr" | "en") {
+  return new Date(ms).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { day: "2-digit", month: "short", timeZone: "UTC" })
 }
 
 const STATUS_BAR: Record<string, string> = {
@@ -38,7 +38,7 @@ export function AdsGantt({
   campaigns: AdCampaign[]
   onSelect: (c: AdCampaign) => void
 }) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
   const PLATFORM_LABELS = usePlatformLabels()
   const STATUS_LABELS = useStatusLabels()
   const model = useMemo(() => {
@@ -73,7 +73,7 @@ export function AdsGantt({
       const w = ((mEnd - mStart) / DAY + 1) * pxPerDay
       if (w > 1) {
         months.push({
-          label: new Date(mStart).toLocaleDateString("tr-TR", { month: "long", year: "numeric", timeZone: "UTC" }),
+          label: new Date(mStart).toLocaleDateString(lang === "tr" ? "tr-TR" : "en-US", { month: "long", year: "numeric", timeZone: "UTC" }),
           left, width: w,
         })
       }
@@ -125,7 +125,7 @@ export function AdsGantt({
     const gridBg = `repeating-linear-gradient(to right, rgba(148,163,184,0.28) 0 1px, transparent 1px ${gridStep}px)`
 
     return { min, max, pxPerDay, width, months, grouped, todayLeft, ticks, gridBg }
-  }, [campaigns])
+  }, [campaigns, lang])
 
   if (!model) {
     return (
@@ -186,8 +186,8 @@ export function AdsGantt({
                     : "text-muted-foreground",
                 )}
                 title={tick.kind === "today"
-                  ? t("components.ads.adsGantt.todayTitle", { date: fmtDay(tick.ms) })
-                  : t("components.ads.adsGantt.endTitle", { date: fmtDay(tick.ms) })}
+                  ? t("components.ads.adsGantt.todayTitle", { date: fmtDay(tick.ms, lang) })
+                  : t("components.ads.adsGantt.endTitle", { date: fmtDay(tick.ms, lang) })}
               >
                 {tick.label}
               </div>
@@ -234,7 +234,7 @@ export function AdsGantt({
                     <button
                       type="button"
                       onClick={() => onSelect(c)}
-                      title={`${c.client_name} · ${c.title || t("components.ads.adsGantt.untitled")}\n${PLATFORM_LABELS[c.platform] ?? c.platform} · ${STATUS_LABELS[c.status] ?? c.status}\n${fmtDay(parseDay(c.start_date))} → ${c.end_date ? fmtDay(parseDay(c.end_date)) : t("components.ads.adsGantt.ongoing")}\n${fmtTRY(c.amount_spent)}${c.notes ? `\n${c.notes}` : ""}`}
+                      title={`${c.client_name} · ${c.title || t("components.ads.adsGantt.untitled")}\n${PLATFORM_LABELS[c.platform] ?? c.platform} · ${STATUS_LABELS[c.status] ?? c.status}\n${fmtDay(parseDay(c.start_date), lang)} → ${c.end_date ? fmtDay(parseDay(c.end_date), lang) : t("components.ads.adsGantt.ongoing")}\n${fmtTRY(c.amount_spent, lang)}${c.notes ? `\n${c.notes}` : ""}`}
                       className={cn(
                         "absolute top-1.5 flex h-6 items-center gap-1 overflow-hidden rounded px-1.5 text-[11px] font-medium text-white transition-colors",
                         STATUS_BAR[c.status] ?? "bg-primary/80",
@@ -242,7 +242,7 @@ export function AdsGantt({
                       )}
                       style={{ left: b.left, width: b.width }}
                     >
-                      <span className="truncate">{fmtTRY(c.amount_spent)}</span>
+                      <span className="truncate">{fmtTRY(c.amount_spent, lang)}</span>
                       {b.width > 110 && (
                         <span className="truncate opacity-80">· {PLATFORM_LABELS[c.platform] ?? c.platform}</span>
                       )}

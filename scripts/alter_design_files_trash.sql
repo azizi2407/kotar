@@ -1,30 +1,32 @@
--- Tasarım çalışma dosyaları: çöp kutusu + geri alma + yönetim onaylı kalıcı
--- silme (2026-08-08) — bkz. `.superpowers/sdd/2026-08-07-tasarim-calisma-dosyalari/
--- followup-silme-brief.md`
+-- Design working files: trash + restore + management-approved permanent
+-- delete.
 --
--- NEDEN ELLE: app.py başlangıçta `db.create_all()` çağırır; bu eksik TABLOYU
--- yaratır ama VAR OLAN bir tabloya eklenen kolonu yaratmaz (`notifications.severity`
--- dersi). `design_files`/`design_file_versions` prod'da BOŞ (0 satır) → ALTER
--- risksiz.
+-- WHY MANUAL: app.py calls `db.create_all()` at startup; that creates a
+-- missing TABLE but does not create a column added to an EXISTING table
+-- (same lesson as `notifications.severity`). `design_files`/
+-- `design_file_versions` are EMPTY (0 rows) in a fresh deploy, so this ALTER
+-- is risk-free there.
 --
--- SIRA KRİTİK: önce bu script, SONRA `sudo systemctl restart agency.service`.
--- Tersi durumda yeni kod olmayan kolonu okur ve /api/design-files/* 500 verir.
+-- ORDER MATTERS: run this script FIRST, THEN restart the app service.
+-- Otherwise the new code reads a column that doesn't exist yet and
+-- /api/design-files/* returns 500.
 --
--- Uygulama:
---   sudo podman exec -i platform-pg psql -U postgres -d agency < scripts/alter_design_files_trash.sql
--- Doğrulama:
---   sudo podman exec platform-pg psql -U postgres -d agency -c "\d design_files"
---   sudo podman exec platform-pg psql -U postgres -d agency -c "\d design_file_versions"
+-- Apply:
+--   psql -U postgres -d agency -f scripts/alter_design_files_trash.sql
+-- Verify:
+--   psql -U postgres -d agency -c "\d design_files"
+--   psql -U postgres -d agency -c "\d design_file_versions"
 --
--- Hepsi IF NOT EXISTS — script iki kez koşarsa patlamaz.
+-- Everything is IF NOT EXISTS — running the script twice won't break anything.
 
 BEGIN;
 
--- Kim sildi (önceden hiç kaydedilmiyordu — soft-delete tek yönlü bir kapıydı).
+-- Who deleted it (never recorded before — soft-delete used to be a one-way door).
 ALTER TABLE design_files ADD COLUMN IF NOT EXISTS deleted_by varchar(64);
 
--- Tasarımcının "kalıcı silinsin" işareti — çöp kutusunda yönetime görünen bir
--- uyarı rozeti, TEK BAŞINA hiçbir şeyi silmez (tetik yalnız yönetimde).
+-- The designer's "please permanently delete" flag — a warning badge visible to
+-- management in the trash view, does NOT delete anything by itself (the
+-- actual trigger is management-only).
 ALTER TABLE design_files ADD COLUMN IF NOT EXISTS purge_requested_at timestamptz;
 ALTER TABLE design_files ADD COLUMN IF NOT EXISTS purge_requested_by varchar(64);
 
