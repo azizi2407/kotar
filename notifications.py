@@ -302,7 +302,7 @@ def notify_old_video_kept(client_id, week_iso, new_name, kept_names, reason):
     title = 'Revision received — old video not removed'
     body = (f'{_client_name(client_id)} — {week_iso}: "{new_name}" looks like a '
             f'revision, but the previous version ({eski}) was not removed because '
-            f'of {reason}. Remove it manually if needed.')
+            f'{reason}. Remove it manually if needed.')
     _push_to_client_team('old_video_kept', client_id, title, body,
                          link=f'/panel/videograf-yukleme?week={week_iso}')
 

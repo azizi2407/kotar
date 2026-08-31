@@ -40,6 +40,13 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     } catch { /* no-op */ }
   }, [lang])
 
+  useEffect(() => {
+    // Drives CSS `text-transform: uppercase` casing rules (e.g. Turkish
+    // dotted-I: İÇERİK, not İÇERIK) — the browser needs `lang` to pick the
+    // right locale-aware uppercasing.
+    document.documentElement.lang = lang
+  }, [lang])
+
   function setLang(l: Lang) {
     setLangState(l)
   }

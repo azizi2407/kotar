@@ -860,11 +860,11 @@ def _video_korumali_mi(up):
                 .filter_by(file_id=up.file_id, deleted_at=None)
                 .first())
     if paylasim is not None:
-        return 'paylaşımda olduğu'
+        return 'it is in an active share'
     if UploadReview.query.filter_by(upload_id=up.id).first() is not None:
-        return 'müşteri onayına girdiği'
+        return 'it has a client review record'
     if UploadPreApproval.query.filter_by(upload_id=up.id).first() is not None:
-        return 'ön-onaya girdiği'
+        return 'it has a pre-approval record'
     return None
 
 

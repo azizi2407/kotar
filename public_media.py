@@ -91,7 +91,7 @@ def public_media(file_id):
     if not _ID_RE.match(file_id):
         return '', 404
     if not ratelimit.hit(f'pubmedia:{request.remote_addr}', RATE_MAX, RATE_WINDOW):
-        return 'çok fazla istek', 429
+        return 'too many requests', 429
     name, kind = _eligible(file_id)
     if name is None:
         # Not eligible OR deleted. We don't distinguish the two: doing so would

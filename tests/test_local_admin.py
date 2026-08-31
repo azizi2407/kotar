@@ -66,6 +66,21 @@ def test_update_user_olmayan_id_404(app):
         assert exc.value.status == 404
 
 
+def test_create_user_gecersiz_rol_400(app):
+    with app.app_context():
+        with pytest.raises(local_admin.LocalAdminError) as exc:
+            local_admin.create_user({'email': 'yeni@test.com', 'role': 'client'})
+        assert exc.value.status == 400
+
+
+def test_update_user_gecersiz_rol_400(app):
+    with app.app_context():
+        out = local_admin.create_user({'email': 'yeni@test.com', 'role': 'designer'})
+        with pytest.raises(local_admin.LocalAdminError) as exc:
+            local_admin.update_user(out['id'], {'role': 'restaurant_owner'})
+        assert exc.value.status == 400
+
+
 # --- /api/admin/* (local dispatch) ---
 
 def test_api_list_requires_superadmin(client):
@@ -104,3 +119,19 @@ def test_api_duplicate_email_409(client):
     r = client.post('/api/admin/users', json={'email': 'yeni@test.com', 'role': 'designer'},
                     headers=csrf_headers(client))
     assert r.status_code == 409
+
+
+def test_api_create_gecersiz_rol_400(client):
+    login_as(client, SUPERADMIN)
+    r = client.post('/api/admin/users', json={'email': 'yeni@test.com', 'role': 'client'},
+                    headers=csrf_headers(client))
+    assert r.status_code == 400
+
+
+def test_api_update_gecersiz_rol_400(client):
+    login_as(client, SUPERADMIN)
+    created = client.post('/api/admin/users', json={'email': 'yeni@test.com', 'role': 'designer'},
+                          headers=csrf_headers(client)).get_json()['user']
+    r = client.patch(f"/api/admin/users/{created['id']}", json={'role': 'restaurant_owner'},
+                     headers=csrf_headers(client))
+    assert r.status_code == 400

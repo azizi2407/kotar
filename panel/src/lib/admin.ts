@@ -21,8 +21,6 @@ export const ROLES = [
   "designer",
   "videographer",
   "content_creator",
-  "client",
-  "restaurant_owner",
   "pending",
 ] as const
 
@@ -33,8 +31,6 @@ export function useRoleLabels(): Record<string, string> {
     designer: t("pages.users.role.designer"),
     videographer: t("pages.users.role.videographer"),
     content_creator: t("pages.users.role.contentCreator"),
-    client: t("pages.users.role.client"),
-    restaurant_owner: t("pages.users.role.restaurantOwner"),
     pending: t("pages.users.role.pending"),
   }
 }

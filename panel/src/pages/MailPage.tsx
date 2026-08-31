@@ -4,7 +4,7 @@
 import { useMemo, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import DOMPurify from "dompurify"
-import { Inbox, Mail, Paperclip, RefreshCw, Reply, Send, Star, Plus } from "lucide-react"
+import { AlertTriangle, Inbox, Mail, Paperclip, RefreshCw, Reply, Send, Star, Plus } from "lucide-react"
 import { toast } from "sonner"
 
 import { ComposeDialog, composeReply, type ComposeState } from "@/components/mail/ComposeDialog"
@@ -13,6 +13,7 @@ import { MailAccountHealth } from "@/components/mail/MailAccountHealth"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
+import { ApiError } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { useI18n } from "@/lib/i18n"
 import {
@@ -108,6 +109,23 @@ export function MailPage() {
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t("pages.mail.flagFailed"))
     }
+  }
+
+  // Backend has no MAIL_ENC_KEY set → /api/mail/* fails closed with 503 on every
+  // call. Surface that as one full-width state instead of three silently-empty
+  // panels (the account query's 503 previously just logged to the console).
+  if (accountsQ.isError && accountsQ.error instanceof ApiError && accountsQ.error.status === 503) {
+    return (
+      <div className="flex h-[70vh] flex-col items-center justify-center gap-4 text-center">
+        <AlertTriangle className="h-12 w-12 text-muted-foreground" />
+        <div>
+          <h2 className="text-lg font-semibold">{t("pages.mail.notConfigured.title")}</h2>
+          <p className="text-sm text-muted-foreground">
+            {t("pages.mail.notConfigured.body")}
+          </p>
+        </div>
+      </div>
+    )
   }
 
   // No accounts at all → connect call to action
