@@ -14,6 +14,7 @@ import { useI18n } from "@/lib/i18n"
 import {
   ITEM_ICONS, itemIcon, useCategoryLabels, useCreateTrackingItem, useDeleteTrackingItem,
   useReorderTrackingItems, useTrackingItems, useUpdateTrackingItem, type TrackingItem,
+  itemDisplayName,
 } from "@/lib/musteri-takip"
 
 function errText(e: unknown, fallback: string) {
@@ -79,7 +80,7 @@ export function TrackingItemsDialog({ onClose }: { onClose: () => void }) {
   }
 
   async function deleteItem(item: TrackingItem) {
-    if (!window.confirm(t("components.clientTracking.trackingItemsDialog.confirmDelete", { name: item.name }))) return
+    if (!window.confirm(t("components.clientTracking.trackingItemsDialog.confirmDelete", { name: itemDisplayName(item, t) }))) return
     try {
       await remove.mutateAsync(item.id)
       setDirty(false)
@@ -106,7 +107,7 @@ export function TrackingItemsDialog({ onClose }: { onClose: () => void }) {
               <div key={item.id} className="flex items-center gap-2 rounded-md border px-2 py-1.5">
                 <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className={item.active ? "flex-1 text-sm" : "flex-1 text-sm text-muted-foreground line-through"}>
-                  {item.name}
+                  {itemDisplayName(item, t)}
                 </span>
                 <span className="hidden text-xs text-muted-foreground sm:inline">
                   {CATEGORY_LABELS[item.category] ?? item.category}

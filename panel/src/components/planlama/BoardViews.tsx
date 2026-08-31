@@ -12,7 +12,7 @@ import {
 } from "@/components/ui/table"
 import { useI18n } from "@/lib/i18n"
 import {
-  dueTone, fmtDay, itemStatusLabels, type AssignedItem, type PlanningItem,
+  MANAGEMENT_KEY, dueTone, fmtDay, itemStatusLabels, type AssignedItem, type PlanningItem,
 } from "@/lib/planlama"
 import { cn } from "@/lib/utils"
 
@@ -196,7 +196,9 @@ export function AssignedStrip({ items, currentBoard }: {
                 {fmtDay(it.due_date, lang)}
               </span>
             )}
-            <span className="shrink-0 text-muted-foreground">{it.board_title}</span>
+            <span className="shrink-0 text-muted-foreground">
+              {it.board_key === MANAGEMENT_KEY ? t("pages.planning.managementBoard") : it.board_title}
+            </span>
           </Link>
         ))}
       </div>

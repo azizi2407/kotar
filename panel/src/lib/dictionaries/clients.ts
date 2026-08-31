@@ -39,7 +39,7 @@ export const clientsTr = {
   "pages.clientDetail.tabs.drive": "Drive",
   "pages.clientDetail.tabs.captionSettings": "Caption Ayarları",
   "pages.clientDetail.tabs.brandAssets": "Marka Görselleri",
-  "pages.clientDetail.tabs.vaultAyar": "Vault Ayar",
+  "pages.clientDetail.tabs.vaultAyar": "Marka Profili",
 
   "pages.clientDetail.field.sector": "Sektör",
   "pages.clientDetail.field.email": "E-posta",
@@ -331,7 +331,7 @@ export const clientsEn: Record<keyof typeof clientsTr, string> = {
   "pages.clientDetail.tabs.drive": "Drive",
   "pages.clientDetail.tabs.captionSettings": "Caption Settings",
   "pages.clientDetail.tabs.brandAssets": "Brand Assets",
-  "pages.clientDetail.tabs.vaultAyar": "Vault Settings",
+  "pages.clientDetail.tabs.vaultAyar": "Brand Profile",
 
   "pages.clientDetail.field.sector": "Sector",
   "pages.clientDetail.field.email": "Email",

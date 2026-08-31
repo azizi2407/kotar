@@ -19,6 +19,7 @@ import { useI18n } from "@/lib/i18n"
 import {
   daysSince, useClientTracking, useEntryStatusLabels,
   type TrackingItem, type TrackingRow,
+  itemDisplayName,
 } from "@/lib/musteri-takip"
 import { trFold } from "@/lib/week"
 
@@ -117,7 +118,7 @@ export function MusteriTakipPage() {
           >
             <option value="">{t("pages.clientTracking.all")}</option>
             {items.filter((i) => i.active).map((i) => (
-              <option key={i.id} value={i.id}>{i.name}</option>
+              <option key={i.id} value={i.id}>{itemDisplayName(i, t)}</option>
             ))}
           </select>
         </div>

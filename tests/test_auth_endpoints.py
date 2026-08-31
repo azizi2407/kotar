@@ -96,3 +96,19 @@ def test_local_login_oidc_modda_404(client, monkeypatch):
     monkeypatch.setattr(auth, 'AUTH_MODE', 'oidc')
     r = client.post('/auth/local-login', json={'email': 'x@test.com', 'password': 'y'})
     assert r.status_code == 404
+
+
+def test_oidc_login_discovery_hatasinda_503(app, client, monkeypatch):
+    """IdP unreachable at login time -> a clear 503, not a raw traceback; the
+    app itself stays up (lazy discovery — see sso_client.OIDCClient)."""
+    import auth
+    import sso_client
+    monkeypatch.setattr(auth, 'AUTH_MODE', 'oidc')
+
+    class FakeOIDC:
+        def login_url(self, redirect_uri, state):
+            raise sso_client.OIDCDiscoveryError('idp unreachable')
+    app.extensions['oidc'] = FakeOIDC()
+    r = client.get('/auth/login')
+    assert r.status_code == 503
+    assert 'identity provider' in r.get_data(as_text=True)

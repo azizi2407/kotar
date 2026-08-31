@@ -133,8 +133,9 @@ def create_app():
     db.init_app(app)
     app.config['AUTH_MODE'] = AUTH_MODE
     if AUTH_MODE == 'oidc':
-        # Discovery (fetches authorization/token/jwks endpoints from the issuer)
-        # only hits the network if all three envs aren't set manually — see sso_client.OIDCClient.
+        # No network here: discovery (fetching authorization/token/jwks endpoints
+        # from the issuer) runs lazily on the first login attempt, so an
+        # unreachable IdP can't prevent startup — see sso_client.OIDCClient.
         app.extensions['oidc'] = OIDCClient(
             issuer=os.environ['OIDC_ISSUER'],
             client_id=os.environ['OIDC_CLIENT_ID'],

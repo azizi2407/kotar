@@ -69,6 +69,8 @@ to off.
 | `bolunmus_gorsel_N.<ext>` | `split_image_N.<ext>` |
 | `<base>-parcalar.zip` | `<base>-pieces.zip` |
 | skill trigger, unconditional | `_SKILL_TRIGGER` via `CAPTION_STYLE_SKILL` (opt-in) |
+| "Vault Ayar" client-detail tab label | "Brand Profile" / "Marka Profili" (dictionary values only; `vaultAyar` keys and `/vault-ayar` API paths unchanged) |
+| OIDC discovery at startup | lazy discovery on first login (`_ensure_endpoints`, 503 on failure) |
 
 Add a row here whenever a sync introduces a new deliberate divergence — this
 table is what keeps the next sync cheap.

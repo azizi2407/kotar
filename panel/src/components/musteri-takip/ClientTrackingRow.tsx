@@ -18,6 +18,7 @@ import {
   fmtDay, itemIcon, stalenessTone, useAddActivityNote,
   useClientTrackingDetail, useDeleteActivityNote, useEntryStatusLabels, useRoleSlotLabels,
   type TrackingItem, type TrackingRow,
+  itemDisplayName,
 } from "@/lib/musteri-takip"
 import { cn } from "@/lib/utils"
 
@@ -48,6 +49,7 @@ function CoverageStrip({ items, row, statusLabels }: {
   row: TrackingRow
   statusLabels: Record<string, string>
 }) {
+  const { t } = useI18n()
   return (
     <div className="flex flex-wrap items-center gap-1">
       {items.filter((i) => i.active).map((item) => {
@@ -56,7 +58,7 @@ function CoverageStrip({ items, row, statusLabels }: {
           <span
             key={item.id}
             className={cn("h-2.5 w-2.5 rounded-full", ENTRY_STATUS_DOT[status])}
-            title={`${item.name} · ${statusLabels[status]}`}
+            title={`${itemDisplayName(item, t)} · ${statusLabels[status]}`}
           />
         )
       })}
@@ -180,7 +182,7 @@ export function ClientTrackingRow({ row, items, expanded, onToggle, onEditEntry 
                     >
                       <div className="flex items-center gap-2">
                         <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        <span className="flex-1 truncate text-sm font-medium">{item.name}</span>
+                        <span className="flex-1 truncate text-sm font-medium">{itemDisplayName(item, t)}</span>
                         <span className={cn("rounded px-1.5 py-0.5 text-[11px] font-medium", ENTRY_STATUS_TONE[status])}>
                           {ENTRY_STATUS_LABELS[status]}
                         </span>
