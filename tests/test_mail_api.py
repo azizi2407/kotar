@@ -1,7 +1,7 @@
 """/api/mail/* — session, CSRF, authorization, secret not leaking, 503 fail-closed."""
 import mail_gateway as gw
 import mail_service as svc
-from conftest import MANAGER, login_as
+from conftest import DESIGNER, MANAGER, login_as
 from extensions import db
 from models_mail import MailAccount
 from test_session_csrf import csrf_headers
@@ -20,6 +20,17 @@ def _mk(owner_sub='1', email='yonetici@example.com', is_shared=False):
 
 def test_accounts_requires_login(client):
     assert client.get('/api/mail/accounts').status_code == 401
+
+
+def test_accounts_yalniz_management_diger_rol_403(client):
+    """Mail is management-only — a designer/videographer/content_creator cannot
+    call /api/mail/* even with their own session cookie. Hiding it in the panel
+    alone is not enough: this is the backend's own gate; `GuardedOutlet` does
+    NOT bind it."""
+    login_as(client, DESIGNER)
+    r = client.get('/api/mail/accounts')
+    assert r.status_code == 403
+    assert 'error' in r.get_json()
 
 
 def test_accounts_hides_secret(client):

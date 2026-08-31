@@ -4,11 +4,13 @@ Agency Instagram flow: a 3120x1350 wide image -> 3 side-by-side vertical
 posts (1080x1350). Tile x positions are 0/1020/2040 (60px overlap, exact
 match with the old tool).
 
-reels-cover submode: converts the center tile into a 1080x1920 Instagram
-Reels cover (with a play overlay). For the center tile to appear aligned
-with its neighbors in the Reels grid preview, the center content is warped
-to 1440 + a horizontal compensation (0.965) is applied, then centered onto
-a 1920 canvas (exact match with the old tool).
+reels-cover submode: converts ALL THREE tiles (in a triple post the video can
+be any of the tiles — previously only the center tile was converted) into a
+1080x1920 Instagram Reels cover (with a play overlay). For a tile to appear
+aligned with its neighbors in the Reels grid preview, the content is warped
+to 1440 + a horizontal compensation (0.965) is applied, then centered onto a
+1920 canvas (exact match with the old tool; the top/bottom margins stay
+unfilled — deliberate, the existing output must not change).
 """
 import io
 import os
@@ -26,6 +28,18 @@ GRID_SCALE_X = 0.965
 _PLAY_OVERLAY_PATH = os.path.join(os.path.dirname(__file__), 'assets', 'play_overlay.png')
 _play_cache = None
 
+# Play button opacity: the circle drops to 40% opacity, the triangle stays FULLY
+# opaque — the play icon stays readable while the design underneath shows through
+# the circle. `assets/play_overlay.png` is NOT modified (the source stays
+# canonical in one place); the transform is applied to the alpha channel at
+# generation time. In the source PNG the triangle has alpha=255 and the circle
+# alpha≈133 (~52%; edge antialiasing also produces in-between values like
+# 130/198 — scaling by ratio carries those to the right proportion too).
+# Above the threshold = "triangle", untouched.
+PLAY_CIRCLE_OPACITY = 0.40
+_PLAY_CIRCLE_SRC_OPACITY = 133 / 255
+_PLAY_SOLID_THRESHOLD = 200
+
 
 class ImageToolError(Exception):
     """Invalid input (size etc.)."""
@@ -35,7 +49,8 @@ def split_wide(img):
     """Split a 3120x1350 image into three 1080x1350 tiles. Returns the tile list."""
     if img.size != WIDE_SIZE:
         raise ImageToolError(
-            f"Görsel {img.size[0]}×{img.size[1]}, {WIDE_SIZE[0]}×{WIDE_SIZE[1]} olmalı.")
+            f"Image is {img.size[0]}×{img.size[1]}; it must be "
+            f"{WIDE_SIZE[0]}×{WIDE_SIZE[1]}.")
     return [img.crop((x, 0, x + TILE_W, TILE_H)) for x in X_POSITIONS]
 
 
@@ -69,13 +84,25 @@ def _compensate_reels_grid(tile, scale_x=GRID_SCALE_X):
     return canvas
 
 
+def _scale_circle_alpha(v):
+    """Play overlay alpha transform: above the threshold (the triangle) is
+    UNTOUCHED, below it is scaled proportionally to `PLAY_CIRCLE_OPACITY`
+    (see the constants at the top of the module)."""
+    if v > _PLAY_SOLID_THRESHOLD:
+        return v
+    return int(v * PLAY_CIRCLE_OPACITY / _PLAY_CIRCLE_SRC_OPACITY)
+
+
 def _apply_play_overlay(cover):
-    """Fit the play overlay to the cover's center, preserving aspect ratio, and composite it on top."""
+    """Fit the play overlay to the cover's center, preserving aspect ratio, and composite it on top.
+
+    The circle's alpha is scaled to `PLAY_CIRCLE_OPACITY`; the triangle stays fully opaque."""
     play = _load_play_overlay()
     cw, ch = cover.size
     pw, ph = play.size
     scale = min(cw / pw, ch / ph)
     play = play.resize((int(pw * scale), int(ph * scale)), Image.Resampling.LANCZOS)
+    play.putalpha(play.split()[3].point(_scale_circle_alpha))
     result = cover.convert('RGBA')
     x = (cw - play.size[0]) // 2
     y = (ch - play.size[1]) // 2
@@ -83,22 +110,31 @@ def _apply_play_overlay(cover):
     return result
 
 
-def make_reels_cover(img):
-    """3120x1350 -> [left(1080x1350), center reels cover(1080x1920, with play
-    overlay), right(1080x1350)]. Left/right are exact copies of the
-    original; the center tile is warped+compensated."""
-    if img.size != WIDE_SIZE:
-        raise ImageToolError(
-            f"Görsel {img.size[0]}×{img.size[1]}, {WIDE_SIZE[0]}×{WIDE_SIZE[1]} olmalı.")
-    left = img.crop((0, 0, TILE_W, TILE_H))
-    right = img.crop((2040, 0, 2040 + TILE_W, TILE_H))
-    center = img.crop((1020, 0, 1020 + TILE_W, TILE_H)).resize(
-        (TILE_W, CENTER_WARP_H), Image.Resampling.LANCZOS)
+def _to_cover(tile):
+    """Convert a 1080x1350 tile into a 1080x1920 reels cover: vertical warp to
+    1440 + horizontal compensation (see `_compensate_reels_grid`) + centering
+    onto a 1920 canvas + the play overlay. The remaining top/bottom space is
+    transparent (falls to white when encoded as JPEG)."""
+    center = tile.resize((TILE_W, CENTER_WARP_H), Image.Resampling.LANCZOS)
     center = _compensate_reels_grid(center)
     cover = Image.new('RGBA', (TILE_W, REELS_H), (0, 0, 0, 0))
     cover.paste(center, (0, (REELS_H - CENTER_WARP_H) // 2), center)
-    cover = _apply_play_overlay(cover)
-    return [left, cover, right]
+    return _apply_play_overlay(cover)
+
+
+def make_reels_cover(img):
+    """3120x1350 -> THREE 1080x1920 reels covers (with a play overlay).
+
+    In triple posts the video tile's position (left/center/right) can vary;
+    previously only the center tile was converted to a cover (left/right
+    stayed original posts). Now all three go through the SAME transform — the
+    user takes whichever one they need from the ZIP."""
+    if img.size != WIDE_SIZE:
+        raise ImageToolError(
+            f"Image is {img.size[0]}×{img.size[1]}; it must be "
+            f"{WIDE_SIZE[0]}×{WIDE_SIZE[1]}.")
+    tiles = [img.crop((x, 0, x + TILE_W, TILE_H)) for x in X_POSITIONS]
+    return [_to_cover(t) for t in tiles]
 
 
 def encode(img, ext):
@@ -121,19 +157,20 @@ def encode(img, ext):
 def split_wide_bytes(data, ext, reels=False):
     """Bytes input -> [(file_name, bytes, mime), ...]. Ready for the UI.
 
-    reels=True: the center tile is converted to a 1080x1920 video cover
-    (with a play overlay), left/right stay original tiles; the center file
-    is named 'instagram_video_kapagi.<ext>'."""
+    reels=True: ALL THREE tiles are converted to 1080x1920 video covers (with
+    a play overlay); the files are named 'instagram_video_cover_1..3.<ext>'
+    (previously only the center tile was a cover)."""
     try:
         img = Image.open(io.BytesIO(data))
         img.load()
     except Exception as e:
-        raise ImageToolError(f'Görsel açılamadı: {e}')
+        raise ImageToolError(f'Could not open image: {e}')
     out_ext = 'png' if (ext or '').lower() == 'png' else 'jpg'
     parts = make_reels_cover(img) if reels else split_wide(img)
     result = []
     for i, part in enumerate(parts, 1):
-        name = f'instagram_video_kapagi.{out_ext}' if (reels and i == 2) else f'bolunmus_gorsel_{i}.{out_ext}'
+        name = (f'instagram_video_cover_{i}.{out_ext}' if reels
+                else f'split_image_{i}.{out_ext}')
         b, mime = encode(part, out_ext)
         result.append((name, b, mime))
     return result

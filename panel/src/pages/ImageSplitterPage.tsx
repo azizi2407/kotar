@@ -1,5 +1,7 @@
 // Image Splitter — splits a 3120×1350 wide image into 3 Instagram posts (1080×1350).
-// Reels mode: turns the middle frame into a 1080×1920 video cover (with a play overlay).
+// Reels mode: all three become 1080×1920 video covers (with a play overlay) — the
+// video tile's position (left/center/right) varies from post to post, so the user
+// takes whichever one they need from the ZIP.
 import { useRef, useState } from "react"
 import { useMutation } from "@tanstack/react-query"
 import { Download, FileArchive, ImageDown, Upload, Film } from "lucide-react"
@@ -127,7 +129,7 @@ export function ImageSplitterPage() {
                 )}
               </div>
               <Button variant="outline" size="sm" onClick={() => download(p)}>
-                <Download className="mr-1 h-3.5 w-3.5" /> {p.is_cover ? t("pages.imageSplitter.downloadCover") : t("pages.imageSplitter.downloadPiece", { n: i + 1 })}
+                <Download className="mr-1 h-3.5 w-3.5" /> {p.is_cover ? t("pages.imageSplitter.downloadCover", { n: i + 1 }) : t("pages.imageSplitter.downloadPiece", { n: i + 1 })}
               </Button>
             </div>
           ))}

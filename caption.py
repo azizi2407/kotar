@@ -7,10 +7,47 @@ kind + (if any) the weekly brief intro + card note + (optional) brand guide
 Carrying the brand context into build_prompt is not the worker's job (see
 Phase 1a Task 2).
 """
+import os
+
 import ai_claude
 
 KIND_TR = {'post': 'Instagram post', 'story': 'Instagram story',
            'video': 'Instagram reels/video', 'linkedin': 'LinkedIn gönderisi'}
+
+# Optional style-skill trigger — appended at the VERY END of the prompt.
+#
+# WHY: the upstream agency wires a locally installed Claude Code skill into
+# caption generation (theirs naturalizes Turkish copy while preserving facts;
+# they A/B-measured it on real posts: it eliminated the boilerplate "As
+# <brand>, we…" openers entirely and improved factual-reference retention in a
+# regulated-sector client from 1/3 to 3/3 alternatives, at ~1.8× tokens and
+# ~+25s per caption). In kotar this is opt-in configuration: set
+# CAPTION_STYLE_SKILL to the name of a skill installed in the worker's Claude
+# environment to enable it; unset (the default) leaves the prompt untouched.
+# Also measured upstream and rejected: asking the model to read the skill's
+# references/*.md too — cost rose to 2.9× while factual references DROPPED.
+#
+# The second sentence is NON-NEGOTIABLE: a skill may impose its own delivery
+# format (text + change notes), while this prompt is bound to the
+# [[CAPTION]]/[[HASHTAGS]] contract — if that breaks, rationale prose ends up
+# in the caption field (this exact failure class happened once in production
+# upstream). The trigger therefore comes AFTER the format instructions and
+# restates that the format must not change. If the named skill isn't
+# installed, the trigger is harmless: the model ignores it.
+_SKILL_TRIGGER = (
+    "Use the `{skill}` skill while producing these captions.\n"
+    "The response format is unaffected: output only the [[CAPTION]] / "
+    "[[HASHTAGS]] blocks requested above; do not add edit notes, rationale, "
+    "or any other commentary.")
+
+
+def style_skill_trigger():
+    """The configured trigger text, or None when CAPTION_STYLE_SKILL is unset.
+
+    Reads the env at call time (not import time) so tests and late dotenv
+    loading both behave."""
+    skill = (os.getenv('CAPTION_STYLE_SKILL') or '').strip()
+    return _SKILL_TRIGGER.format(skill=skill) if skill else None
 
 
 def build_prompt(client_name, sector, kind, brief_intro=None, note=None, transcript=None, images=False,
@@ -124,6 +161,9 @@ def build_prompt(client_name, sector, kind, brief_intro=None, note=None, transcr
         "[[CAPTION]]\n<ikinci alternatif>\n"
         "[[CAPTION]]\n<üçüncü alternatif>\n"
         "[[HASHTAGS]]\n<hashtag seti>")
+    trigger = style_skill_trigger()
+    if trigger:
+        lines.append(trigger)  # last — AFTER the format contract (see _SKILL_TRIGGER's note)
     return "\n".join(lines)
 
 

@@ -1,7 +1,15 @@
 """/api/mail/* — panel mail module endpoints. Session comes from SSO (session);
 mutations are CSRF-protected (api.csrf_protect is shared, same pattern as
 sharing.py). Access is restricted by owner_sub (IDOR protection lives in
-mail_service). 503 if there's no key (fail-closed)."""
+mail_service). 503 if there's no key (fail-closed).
+
+**management ONLY.** The role gate lives at the single choke point
+(`_require_login_and_config`) — instead of sprinkling `_require_management()`
+over every route like `ads.py`/`tools.py`, this blueprint's ONE before_request
+already exists, so it went there. Hiding the page in the panel alone would not
+have been enough: without a nav role a designer/videographer could still call
+`/api/mail/*` directly with their own session cookie (the frontend role gate,
+`GuardedOutlet`, does NOT bind the backend)."""
 from flask import Blueprint, Response, jsonify, request
 
 import mail_gateway as gw
@@ -15,8 +23,11 @@ bp.before_request(csrf_protect)  # same CSRF as api
 
 @bp.before_request
 def _require_login_and_config():
-    if not current_user():
+    u = current_user()
+    if not u:
         return jsonify(error='not authenticated'), 401
+    if u.get('role') != 'management':
+        return jsonify(error='this page is for management only'), 403
     if not gw.available():
         return jsonify(error='mail module not configured (MAIL_ENC_KEY missing)'), 503
 

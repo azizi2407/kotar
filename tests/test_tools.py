@@ -33,7 +33,7 @@ def test_split_wide_yanlis_boyut_hata():
 def test_split_wide_bytes_isim_ve_uzanti():
     parts = image_tools.split_wide_bytes(_img_bytes(3120, 1350), "png")
     assert [n for n, _, _ in parts] == [
-        "bolunmus_gorsel_1.png", "bolunmus_gorsel_2.png", "bolunmus_gorsel_3.png"]
+        "split_image_1.png", "split_image_2.png", "split_image_3.png"]
 
 
 # --- endpoint ---
@@ -72,13 +72,13 @@ def test_image_split_yanlis_boyut_400(client):
     assert "3120" in r.get_json()["error"]
 
 
-# --- reels-cover (video cover) submode ---
+# --- reels-cover (video cover) submode — all THREE are covers ---
 
 def test_make_reels_cover_boyutlar():
+    """Whichever tile the video is (left/center/right), all return as 1080×1920 covers."""
     img = Image.new("RGB", (3120, 1350), (40, 80, 120))
     parts = image_tools.make_reels_cover(img)
-    # left (1080×1350) · middle video cover (1080×1920) · right (1080×1350)
-    assert [p.size for p in parts] == [(1080, 1350), (1080, 1920), (1080, 1350)]
+    assert [p.size for p in parts] == [(1080, 1920)] * 3
 
 
 def test_make_reels_cover_yanlis_boyut_hata():
@@ -89,7 +89,8 @@ def test_make_reels_cover_yanlis_boyut_hata():
 def test_split_wide_bytes_reels_isim():
     parts = image_tools.split_wide_bytes(_img_bytes(3120, 1350), "png", reels=True)
     assert [n for n, _, _ in parts] == [
-        "bolunmus_gorsel_1.png", "instagram_video_kapagi.png", "bolunmus_gorsel_3.png"]
+        "instagram_video_cover_1.png", "instagram_video_cover_2.png",
+        "instagram_video_cover_3.png"]
 
 
 def test_image_split_reels_modu(client):
@@ -100,8 +101,70 @@ def test_image_split_reels_modu(client):
     assert r.status_code == 200
     pieces = r.get_json()["pieces"]
     assert len(pieces) == 3
-    assert pieces[1]["name"] == "instagram_video_kapagi.png"
-    assert pieces[1]["is_cover"] is True
+    assert [p["name"] for p in pieces] == [
+        "instagram_video_cover_1.png", "instagram_video_cover_2.png",
+        "instagram_video_cover_3.png"]
+    assert all(p["is_cover"] is True for p in pieces)
+
+
+def test_play_overlay_kaynak_daire_alfasi_sabitle_tutarli():
+    """Does `_PLAY_CIRCLE_SRC_OPACITY` (133/255) match the ACTUAL circle alpha of
+    `assets/play_overlay.png`? If the asset gets re-exported some day and the
+    circle alpha shifts, this constant silently becomes wrong — no other test
+    would catch it."""
+    from collections import Counter
+    play = image_tools._load_play_overlay()
+    most_common = Counter(play.split()[3].tobytes()).most_common(3)
+    circle_alpha = next(v for v, _ in most_common if v not in (0, 255))
+    assert circle_alpha == round(image_tools._PLAY_CIRCLE_SRC_OPACITY * 255)
+
+
+def test_play_overlay_daire_yuzde_40_ucgen_tam_opak():
+    """The play button transform: the circle drops to 40% opacity, the triangle
+    (alpha=255 in the source PNG) stays UNTOUCHED."""
+    assert image_tools._scale_circle_alpha(255) == 255
+    # source circle alpha ~133 (52%) → scaled to 40% it should be ~102
+    assert abs(image_tools._scale_circle_alpha(133) - 102) <= 1
+    assert image_tools._scale_circle_alpha(0) == 0
+
+
+def test_reels_kapaginda_play_overlay_uygulanmis():
+    """End-to-end sanity check: the cover has both fully opaque (triangle) and
+    partially transparent (circle) pixels — catches the case where the overlay
+    is not composited AT ALL (e.g. the `_apply_play_overlay` call dropping out
+    of `_to_cover`). It does NOT prove the scale (40%) is applied correctly —
+    see `test_apply_play_overlay_daire_olcegini_cagirir`'s docstring: the
+    composite alphas of those two cases coincide within measurement error."""
+    img = Image.new("RGB", (3120, 1350), (40, 80, 120))
+    cover = image_tools.make_reels_cover(img)[0]
+    assert cover.mode == "RGBA"
+    # getdata() is deprecated in Pillow (removed in 14) → raw alpha bytes via tobytes().
+    alphas = {a for a in cover.split()[3].tobytes() if a not in (0, 255)}
+    assert alphas, "no partially transparent pixel found in the circle area"
+
+
+def test_apply_play_overlay_daire_olcegini_cagirir(monkeypatch):
+    """Verifies `_apply_play_overlay` ACTUALLY calls `_scale_circle_alpha`.
+
+    Why call-tracing instead of pixel values: `result.paste(play, xy, play)`
+    uses the source's OWN alpha as both content and mask (RGBA-as-own-mask
+    paste) — so the COMPOSITE alpha of the scaled (source_alpha=102, 40%) and
+    unscaled (source_alpha=133, source 52%) cases nearly coincide when
+    measured (194 vs 191), and even though the final RGB color changes
+    visibly, the raw alpha channel cannot reliably distinguish them. Tracing
+    the wiring directly — this test goes red if the putalpha line is deleted —
+    is the sturdier regression gate."""
+    calls = []
+    original = image_tools._scale_circle_alpha
+
+    def traced(v):
+        calls.append(v)
+        return original(v)
+
+    monkeypatch.setattr(image_tools, "_scale_circle_alpha", traced)
+    cover = Image.new("RGBA", (image_tools.TILE_W, image_tools.REELS_H), (0, 0, 0, 255))
+    image_tools._apply_play_overlay(cover)
+    assert calls, "_scale_circle_alpha was never called — the play circle may no longer be scaled"
 
 
 def test_image_split_zip_ciktisi(client):
@@ -111,7 +174,7 @@ def test_image_split_zip_ciktisi(client):
     login_as(client, DESIGNER)
     r = _post(client, _img_bytes(3120, 1350), name="kampanya.png")
     d = r.get_json()
-    assert d["zip_name"] == "kampanya-parcalar.zip"
+    assert d["zip_name"] == "kampanya-pieces.zip"
     prefix = "data:application/zip;base64,"
     assert d["zip_data_url"].startswith(prefix)
     zf = zipfile.ZipFile(io.BytesIO(base64.b64decode(d["zip_data_url"][len(prefix):])))
