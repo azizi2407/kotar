@@ -88,6 +88,32 @@ def test_build_prompt_varsayilan_turkce_only_uc_paragraf():
     assert p.count("[[CAPTION]]") == 3 and "[[HASHTAGS]]" in p
 
 
+def test_build_prompt_style_skill_kapali_varsayilan(monkeypatch):
+    """CAPTION_STYLE_SKILL unset (the default) -> the prompt carries no skill
+    trigger at all; generation behaves exactly as before the feature."""
+    monkeypatch.delenv("CAPTION_STYLE_SKILL", raising=False)
+    p = caption.build_prompt("Kafe X", "Yeme-İçme", "post")
+    assert "skill" not in p
+    assert p.endswith("<hashtag seti>")
+
+
+def test_build_prompt_style_skill_tetigi_en_sonda_ve_bicimi_yineliyor(monkeypatch):
+    """With CAPTION_STYLE_SKILL set, the trigger must be at the VERY END of the
+    prompt. The position is contractual: a skill can impose its own delivery
+    format (text + change notes), so the trigger comes AFTER the format
+    instructions and restates that the format must not change — otherwise
+    rationale prose can end up in the caption field."""
+    monkeypatch.setenv("CAPTION_STYLE_SKILL", "housestyle")
+    p = caption.build_prompt("Kafe X", "Yeme-İçme", "post")
+    trigger = caption.style_skill_trigger()
+    assert trigger and "`housestyle`" in trigger
+    assert p.endswith(trigger)
+    # the trigger comes AFTER the format template…
+    assert p.index(trigger) > p.index("[[HASHTAGS]]\n")
+    # …and restates that the format is unchanged
+    assert "edit notes" in trigger
+
+
 def test_build_prompt_lang_en_yalniz_ingilizce():
     p = caption.build_prompt("X", None, "post", settings={'lang': 'EN'})
     assert "YALNIZCA İngilizce yaz" in p

@@ -102,7 +102,7 @@ def test_varsayilan_mod_SAYFA_dondurur_ham_dosya_DEGIL(client, cid):
     assert r.headers["Content-Type"].startswith("text/html")
     html = r.get_data(as_text=True)
     assert "<video" in html and 'src="/m/VIDSAYFA001?raw=1"' in html
-    assert "/m/VIDSAYFA001?dl=1" in html and "İndir" in html
+    assert "/m/VIDSAYFA001?dl=1" in html and "Download" in html
     assert "reels pazartesi.mp4" in html
     assert r.data != b"dosya-icerigi"
 

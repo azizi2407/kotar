@@ -45,18 +45,18 @@ def image_split():
         return jsonify(error=str(e)), 400
     pieces = [{
         'name': name,
-        'is_cover': reels and i == 1,  # middle piece = video cover
+        'is_cover': reels,  # in reels mode ALL THREE are video covers
         'data_url': f'data:{mime};base64,' + base64.b64encode(data).decode(),
-    } for i, (name, data, mime) in enumerate(parts)]
+    } for name, data, mime in parts]
     # All in one click: zip the pieces (STORED — images are already compressed).
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as zf:
         for name, data, _ in parts:
             zf.writestr(name, data)
-    base = f.filename.rsplit('.', 1)[0] or 'gorsel'
+    base = f.filename.rsplit('.', 1)[0] or 'image'
     return jsonify(
         pieces=pieces,
-        zip_name=f'{base}-parcalar.zip',
+        zip_name=f'{base}-pieces.zip',
         zip_data_url='data:application/zip;base64,' + base64.b64encode(buf.getvalue()).decode())
 
 

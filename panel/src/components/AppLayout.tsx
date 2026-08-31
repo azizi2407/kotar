@@ -63,8 +63,9 @@ const nav = [
     roles: ["management", "designer", "content_creator", "videographer"] },
   { to: "/reklam", labelKey: "nav.ads", icon: Megaphone, end: false, roles: ["management"] },
   { to: "/musteri-takip", labelKey: "nav.clientTracking", icon: ClipboardList, end: false, roles: ["management"] },
-  { to: "/posta", labelKey: "nav.mail", icon: Mail, end: false },
-  { to: "/kullanicilar", labelKey: "nav.users", icon: ShieldCheck, end: false, superadmin: true },
+  { to: "/posta", labelKey: "nav.mail", icon: Mail, end: false, roles: ["management"] },
+  { to: "/kullanicilar", labelKey: "nav.users", icon: ShieldCheck, end: false,
+    roles: ["management"], superadmin: true },
 ]
 
 // Sidebar groups (2026-08-07). Once the menu grew to 24 items, a flat list became
