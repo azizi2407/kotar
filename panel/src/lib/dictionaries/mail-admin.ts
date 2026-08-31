@@ -259,6 +259,20 @@ export const mailAdminTr = {
   "components.ads.adsGantt.todayTitle": "Bugün · {date}",
   "components.ads.adsGantt.untitled": "(adsız)",
 
+  // --- trackingItem.* — seed catalog labels (client_tracking.py SEED_ITEMS) ---
+  "trackingItem.marka_tescili": "Marka Tescili",
+  "trackingItem.logo_kurumsal_kimlik": "Logo / Kurumsal Kimlik",
+  "trackingItem.web_sitesi": "Web Sitesi",
+  "trackingItem.e_ticaret": "E-Ticaret Sitesi",
+  "trackingItem.google_isletme": "Google İşletme Profili",
+  "trackingItem.sosyal_medya_yonetimi": "Sosyal Medya Yönetimi",
+  "trackingItem.reklam_yonetimi": "Reklam Yönetimi",
+  "trackingItem.katalog": "Katalog",
+  "trackingItem.matbaa_baski": "Matbaa / Baskı",
+  "trackingItem.fotograf_cekimi": "Fotoğraf Çekimi",
+  "trackingItem.video_cekimi": "Video Çekimi",
+  "trackingItem.ozel_proje": "Özel Proje",
+
   // --- pages.clientTracking --------------------------------------------------
   "pages.clientTracking.all": "Tümü",
   "pages.clientTracking.category.diger": "Diğer",
@@ -663,6 +677,20 @@ export const mailAdminEn: Record<keyof typeof mailAdminTr, string> = {
   "components.ads.adsGantt.today": "Today",
   "components.ads.adsGantt.todayTitle": "Today · {date}",
   "components.ads.adsGantt.untitled": "(untitled)",
+
+  // --- trackingItem.* — seed catalog labels (client_tracking.py SEED_ITEMS) ---
+  "trackingItem.marka_tescili": "Trademark Registration",
+  "trackingItem.logo_kurumsal_kimlik": "Logo / Corporate Identity",
+  "trackingItem.web_sitesi": "Website",
+  "trackingItem.e_ticaret": "E-Commerce Site",
+  "trackingItem.google_isletme": "Google Business Profile",
+  "trackingItem.sosyal_medya_yonetimi": "Social Media Management",
+  "trackingItem.reklam_yonetimi": "Ad Management",
+  "trackingItem.katalog": "Catalog",
+  "trackingItem.matbaa_baski": "Printing",
+  "trackingItem.fotograf_cekimi": "Photo Shoot",
+  "trackingItem.video_cekimi": "Video Shoot",
+  "trackingItem.ozel_proje": "Custom Project",
 
   // --- pages.clientTracking --------------------------------------------------
   "pages.clientTracking.all": "All",

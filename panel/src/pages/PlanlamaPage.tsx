@@ -197,7 +197,11 @@ export function PlanlamaPage() {
   }
 
   const detailItem = detail ? store.byKey.get(detail) ?? null : null
-  const boardTitle = boardQ.data?.board.title ?? t("pages.planning.defaultBoardTitle")
+  // The management board's title comes from the backend as a fixed English
+  // string — render it through the dictionary so it follows the panel language.
+  const boardName = (b: { kind: "management" | "user"; title: string }) =>
+    b.kind === "management" ? t("pages.planning.managementBoard") : b.title
+  const boardTitle = boardQ.data ? boardName(boardQ.data.board) : t("pages.planning.defaultBoardTitle")
 
   return (
     <div className="flex h-[calc(100vh-7rem)] flex-col gap-3">
@@ -218,7 +222,7 @@ export function PlanlamaPage() {
                 prev.set("pano", e.target.value); return prev
               }, { replace: true })}>
               {boards.map((b) => (
-                <option key={b.key} value={b.key}>{b.title} ({b.item_count})</option>
+                <option key={b.key} value={b.key}>{boardName(b)} ({b.item_count})</option>
               ))}
             </select>
           )}

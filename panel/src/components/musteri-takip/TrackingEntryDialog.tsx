@@ -12,6 +12,7 @@ import { useI18n } from "@/lib/i18n"
 import {
   useEntryStatusLabels, useSaveTrackingEntry,
   type EntryStatus, type TrackingEntry, type TrackingItem,
+  itemDisplayName,
 } from "@/lib/musteri-takip"
 
 interface Props {
@@ -37,7 +38,7 @@ export function TrackingEntryDialog({ clientId, clientName, item, entry, onClose
         clientId, itemId: item.id,
         body: { status, status_date: statusDate || null, note: note || null, url: url || null },
       })
-      toast.success(t("components.clientTracking.trackingEntryDialog.updated", { name: item.name }))
+      toast.success(t("components.clientTracking.trackingEntryDialog.updated", { name: itemDisplayName(item, t) }))
       onClose()
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t("components.clientTracking.trackingEntryDialog.saveFailed"))
@@ -48,7 +49,7 @@ export function TrackingEntryDialog({ clientId, clientName, item, entry, onClose
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{item.name}</DialogTitle>
+          <DialogTitle>{itemDisplayName(item, t)}</DialogTitle>
         </DialogHeader>
         <p className="-mt-2 text-sm text-muted-foreground">{clientName}</p>
         <div className="space-y-3">

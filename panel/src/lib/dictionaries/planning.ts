@@ -31,6 +31,7 @@ export const planningTr = {
   "pages.planning.nothingToRedo": "İleri alınacak bir şey yok.",
   "pages.planning.templateAdded": "{name} eklendi ({count} öğe).",
   "pages.planning.defaultBoardTitle": "Pano",
+  "pages.planning.managementBoard": "Yönetim Panosu",
   "pages.planning.status.open": "Açık",
   "pages.planning.status.done": "Bitti",
 
@@ -354,6 +355,7 @@ export const planningEn: Record<keyof typeof planningTr, string> = {
   "pages.planning.nothingToRedo": "Nothing to redo.",
   "pages.planning.templateAdded": "{name} added ({count} items).",
   "pages.planning.defaultBoardTitle": "Board",
+  "pages.planning.managementBoard": "Management Board",
   "pages.planning.status.open": "Open",
   "pages.planning.status.done": "Done",
 

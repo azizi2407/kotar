@@ -22,6 +22,34 @@ export interface TrackingItem {
   active: boolean
 }
 
+/** Seed items ship with fixed English names (client_tracking.py SEED_ITEMS) —
+ *  render those through the dictionary so they follow the panel language.
+ *  A label management has customized (name no longer matches the seed
+ *  default) and custom items (key=null) always show their stored name. */
+const SEED_ITEM_NAMES: Record<string, string> = {
+  marka_tescili: "Trademark Registration",
+  logo_kurumsal_kimlik: "Logo / Corporate Identity",
+  web_sitesi: "Website",
+  e_ticaret: "E-Commerce Site",
+  google_isletme: "Google Business Profile",
+  sosyal_medya_yonetimi: "Social Media Management",
+  reklam_yonetimi: "Ad Management",
+  katalog: "Catalog",
+  matbaa_baski: "Printing",
+  fotograf_cekimi: "Photo Shoot",
+  video_cekimi: "Video Shoot",
+  ozel_proje: "Custom Project",
+}
+
+export function itemDisplayName(
+  it: { key: string | null; name: string },
+  t: (key: string) => string,
+): string {
+  return it.key && SEED_ITEM_NAMES[it.key] === it.name
+    ? t(`trackingItem.${it.key}`)
+    : it.name
+}
+
 export interface TrackingEntry {
   id: number
   client_id: number

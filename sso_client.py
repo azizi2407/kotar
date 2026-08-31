@@ -29,6 +29,12 @@ from flask import abort, current_app, redirect, request, session, url_for
 AUTH_MODE = os.getenv('AUTH_MODE', 'oidc').strip().lower()
 
 
+class OIDCDiscoveryError(RuntimeError):
+    """The issuer's discovery document could not be fetched or was invalid.
+
+    Raised from the login/callback paths, NOT at startup — see OIDCClient."""
+
+
 class OIDCClient:
     def __init__(self, issuer, client_id, client_secret, *,
                  authorization_endpoint=None, token_endpoint=None, jwks_url=None,
@@ -39,24 +45,48 @@ class OIDCClient:
         self.scope = scope
         self.role_claim = role_claim
         self.default_role = default_role
-        disc = None
-        if not (authorization_endpoint and token_endpoint and jwks_url):
-            disc = self._discover()
-        self.authorization_endpoint = authorization_endpoint or disc['authorization_endpoint']
-        self.token_endpoint = token_endpoint or disc['token_endpoint']
-        self._jwks = jwt.PyJWKClient(jwks_url or disc['jwks_uri'])  # fetches + caches the public key
+        # Discovery is deliberately LAZY: it runs on the first login attempt,
+        # not here. This constructor runs inside create_app(), and a network
+        # call there means a transient IdP outage at (re)start takes down the
+        # WHOLE app — including public, no-auth pages (/review/<token>, /m/…).
+        # With all three endpoints set manually, no network is ever needed.
+        self.authorization_endpoint = authorization_endpoint
+        self.token_endpoint = token_endpoint
+        # PyJWKClient fetches + caches the signing keys on first use (lazy).
+        self._jwks = jwt.PyJWKClient(jwks_url) if jwks_url else None
 
     def _discover(self):
         r = requests.get(f'{self.issuer}/.well-known/openid-configuration', timeout=10)
         r.raise_for_status()
         return r.json()
 
+    def _ensure_endpoints(self):
+        """Fills the endpoints from discovery on first need; no-op once known.
+
+        Failures raise OIDCDiscoveryError instead of a raw requests exception so
+        callers (auth.py) can turn them into a clear 503 — a later attempt
+        retries discovery, so a recovered IdP heals without a restart."""
+        if self.authorization_endpoint and self.token_endpoint and self._jwks:
+            return
+        try:
+            disc = self._discover()
+            self.authorization_endpoint = (self.authorization_endpoint
+                                           or disc['authorization_endpoint'])
+            self.token_endpoint = self.token_endpoint or disc['token_endpoint']
+            if self._jwks is None:
+                self._jwks = jwt.PyJWKClient(disc['jwks_uri'])
+        except (requests.RequestException, ValueError, KeyError) as e:
+            raise OIDCDiscoveryError(
+                f'OIDC discovery failed for {self.issuer}: {e}') from e
+
     def login_url(self, redirect_uri, state):
+        self._ensure_endpoints()
         params = {'response_type': 'code', 'client_id': self.client_id,
                   'redirect_uri': redirect_uri, 'scope': self.scope, 'state': state}
         return f'{self.authorization_endpoint}?' + urlencode(params)
 
     def exchange(self, code, redirect_uri):
+        self._ensure_endpoints()
         r = requests.post(self.token_endpoint, data={
             'grant_type': 'authorization_code', 'code': code,
             'redirect_uri': redirect_uri, 'client_id': self.client_id,
@@ -66,6 +96,7 @@ class OIDCClient:
         return r.json()  # {access_token, id_token, token_type, expires_in, ...}
 
     def verify(self, id_token):
+        self._ensure_endpoints()
         key = self._jwks.get_signing_key_from_jwt(id_token).key
         claims = jwt.decode(id_token, key, algorithms=['RS256', 'ES256'],
                             audience=self.client_id, issuer=self.issuer)
