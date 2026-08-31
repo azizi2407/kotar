@@ -24,8 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import app  # noqa: E402  (env must be loaded)
 import local_admin  # noqa: E402
-
-ROLES = ('management', 'designer', 'content_creator', 'videographer', 'pending')
+from local_admin import ALLOWED_ROLES as ROLES  # noqa: E402
 
 
 def run(email, role='management', name=None):

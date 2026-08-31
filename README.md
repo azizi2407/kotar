@@ -109,7 +109,13 @@ password `create_local_user.py` printed.
 You'll also need PostgreSQL running and `DATABASE_URL` pointing at it. Most
 individual features (mail, AI captions, Drive sync, push notifications) are
 optional and simply stay inactive until their env vars are configured — see
-`.env.example` for the full list with explanations.
+`.env.example` for the full list with explanations. Creating the role and
+database that match `.env.example`'s `DATABASE_URL`:
+
+```bash
+sudo -u postgres createuser --pwprompt kotar
+sudo -u postgres createdb -O kotar kotar
+```
 
 ### Authentication
 
@@ -288,7 +294,13 @@ Ayrıca çalışan bir PostgreSQL'e ve ona işaret eden bir `DATABASE_URL`'e
 ihtiyacın olacak. Tekil özelliklerin çoğu (posta, AI açıklamalar, Drive
 senkronu, push bildirimleri) isteğe bağlıdır ve env değişkenleri
 yapılandırılana kadar pasif kalır — açıklamalarıyla birlikte tam liste için
-`.env.example`'a bakın.
+`.env.example`'a bakın. `.env.example`'daki `DATABASE_URL`'e uyan rol ve
+veritabanını oluşturmak:
+
+```bash
+sudo -u postgres createuser --pwprompt kotar
+sudo -u postgres createdb -O kotar kotar
+```
 
 ### Kimlik Doğrulama
 

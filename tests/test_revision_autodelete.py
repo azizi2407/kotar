@@ -207,4 +207,4 @@ def test_korununca_uyari_bildirimi_dusor(client, cid, monkeypatch):
 
     _yeni_yukleme(cid, "camsaşr0728.mp4")
     assert len(cagrilar) == 1
-    assert "paylaşımda" in cagrilar[0][4]
+    assert "active share" in cagrilar[0][4]

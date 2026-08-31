@@ -382,18 +382,18 @@ _PAGE = """<!doctype html>
 <script>
 const TOKEN = "__TOKEN__";
 const main = document.getElementById("main");
-let CSRF = "";          // personel oturumundaki CSRF token'ı (/api/session)
-let CAN_MANAGE = false; // yönetim/tasarımcı ise kaldırma düğmeleri görünür
-let MODE = "client";    // "pre" = ön-onay linki (iç akış)
-let CAN_DECIDE = false; // ön-onayda karar yetkisi (yalnız yönetim)
+let CSRF = "";          // CSRF token from the staff session (/api/session)
+let CAN_MANAGE = false; // management/designer → removal buttons are shown
+let MODE = "client";    // "pre" = pre-approval link (internal flow)
+let CAN_DECIDE = false; // decision authority on pre-approval (management only)
 function toast(m){ const t=document.getElementById("toast"); t.textContent=m; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2200); }
 function esc(s){ const d=document.createElement("div"); d.textContent=s||""; return d.innerHTML; }
-// Medya yüklenemezse sessizce gizleme — müşteri "içerik yok" sanmasın.
+// If media fails to load, don't hide it silently — the client shouldn't think there's no content.
 function ph(){ const d=document.createElement("div"); d.className="ph"; d.textContent="Preview unavailable"; return d; }
 const KIND={post:"Post",story:"Story",video:"Video",linkedin:"LinkedIn"};
 
 async function load(){
-  // Personel aynı tarayıcıda oturumluysa CSRF token'ı al (kaldırma için gerekir).
+  // If staff has a session in the same browser, grab the CSRF token (needed for removal).
   try { const s = await fetch("/api/session"); if(s.ok){ CSRF = (await s.json()).csrf || ""; } } catch(e){}
   const r = await fetch(`/review/${TOKEN}/shares`);
   if(r.status===403){
@@ -436,7 +436,7 @@ async function toggleExclude(s, btn){
     });
     if(!r.ok){ toast("Action failed"); btn.disabled=false; return; }
     toast(s.excluded ? "Restored" : "Removed from page");
-    await load();   // listeyi tazele (sayaç + görünüm)
+    await load();   // refresh the list (count + view)
   }catch(e){ toast("Action failed"); btn.disabled=false; }
 }
 function statusHtml(rv, prefix){
@@ -447,15 +447,15 @@ function statusHtml(rv, prefix){
   return "";
 }
 function media(s){
-  // Lokal kopya varken (ilk 3 hafta) video sayfa içinde oynar.
+  // While the local copy exists (first 3 weeks), the video plays inline on the page.
   if(s.video_url) return `<video class="media" controls playsinline preload="metadata" src="${s.video_url}"></video>`;
   if(!s.media_url) return "";
-  // Tam boyut (proje sahibi 2026-07-24): önizleme değil, doğrudan tam çözünürlük servis edilir.
+  // Full size (2026-07-24): not a preview — full resolution is served directly.
   const img=`<img class="media" loading="lazy" src="${s.media_url}?size=full"`+
     ` alt="content preview" onerror="this.replaceWith(ph())">`;
-  // Video (lokal süresi dolmuş): poster'a tıkla, Drive'da aç.
+  // Video (local copy expired): tap the poster, opens in Drive.
   if(s.drive_url) return `<a class="mwrap" href="${s.drive_url}" target="_blank" rel="noopener noreferrer">${img}<span class="play"><span>▶</span></span></a>`;
-  // Görsel: tıklayınca tam çözünürlük (lokalse orijinal, değilse Drive s2048).
+  // Image: tap for full resolution (original if local, Drive s2048 otherwise).
   return `<a class="mwrap" href="${s.media_url}?size=full" target="_blank" rel="noopener noreferrer">${img}</a>`;
 }
 function card(s){
@@ -482,8 +482,8 @@ function card(s){
   const st=el.querySelector(".st");
   const ex=el.querySelector(".excl");
   if(ex) ex.onclick=()=>toggleExclude(s,ex);
-  if(MODE!=="pre" && s.excluded) return el;   // kaldırılmışta onay/revize düğmesi yok
-  if(MODE==="pre" && !CAN_DECIDE) return el;  // tasarımcı yalnız izler
+  if(MODE!=="pre" && s.excluded) return el;   // no approve/revise buttons once removed
+  if(MODE==="pre" && !CAN_DECIDE) return el;  // designer is view-only
   el.querySelector(".ok").onclick=()=>act(s.id,"approve",null,st);
   el.querySelector(".rev").onclick=()=>{
     if(el.querySelector("textarea")) return;

@@ -9,6 +9,10 @@ from extensions import db
 from models import UserRef, upsert_user_ref
 from models_auth import LocalUser, generate_temp_password
 
+# The panel roles this deployment recognizes — kept in sync with panel/src/lib/admin.ts
+# ROLES. `scripts/create_local_user.py` imports this same tuple instead of duplicating it.
+ALLOWED_ROLES = ('management', 'designer', 'content_creator', 'videographer', 'pending')
+
 
 class LocalAdminError(Exception):
     """local_admin error — status is passed through to the endpoint as-is (same shape as sso_admin.SsoAdminError)."""
@@ -26,6 +30,8 @@ def create_user(data):
     role = data.get('role') or 'pending'
     if not email:
         raise LocalAdminError('email is required')
+    if role not in ALLOWED_ROLES:
+        raise LocalAdminError('invalid role')
     if LocalUser.query.filter_by(email=email).first():
         raise LocalAdminError('this email is already registered', 409)
     user = LocalUser(email=email, role=role, name=data.get('name'), status='active')
@@ -49,6 +55,8 @@ def update_user(user_id, data):
     if user is None:
         raise LocalAdminError('user not found', 404)
     if 'role' in data and data['role']:
+        if data['role'] not in ALLOWED_ROLES:
+            raise LocalAdminError('invalid role')
         user.role = data['role']
     if 'status' in data and data['status'] in ('active', 'disabled'):
         user.status = data['status']
